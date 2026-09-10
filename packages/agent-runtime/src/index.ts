@@ -310,6 +310,9 @@ export type {
   CommandPaletteMeta,
   CommandListItem,
 } from './core/index.js'
+export { TeamRegistryService, collectSkillFiles } from './services/team-registry/index.js'
+export { TeamRegistryConfigStore } from './services/team-registry/team-registry-config.js'
+export type { TeamRegistryConfigInput, TeamRegistryConfigSnapshot } from './services/team-registry/team-registry-config.js'
 export { SkillRegistryService } from './services/skill-registry/index.js'
 export {
   fetchSparkInstallManifest,
@@ -326,6 +329,7 @@ export type {
   BinaryArchiveInstallParams,
   BinaryArchiveInstallResult,
 } from './services/skill-registry/tarball-installer.js'
+export type { TeamSkillPublishResult, TeamSkillUpdateInfo } from './services/skill-registry/index.js'
 export { SettingsService } from './services/settings.service.js'
 export { UsageLedgerService } from './services/usage-ledger.service.js'
 export type {

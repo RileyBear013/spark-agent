@@ -2343,6 +2343,113 @@ export interface SkillRegistryCategoriesResponse {
   categories: SkillRegistryCategoryItem[]
 }
 
+// ─── 团队注册中心（Team Nacos Registry） ─────────────────────────────────
+// 信封/推拉领域类型在 @spark/agent-runtime（protocol 不依赖 runtime），
+// 这里只定义 IPC 传输形状；handler 负责领域对象 → DTO 的映射。
+
+export interface TeamRegistryConfigSnapshotDto {
+  /** 三要素齐备（地址/账号/密码）才算已配置，团队功能才启用 */
+  configured: boolean
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 密码只回布尔，明文永不跨 IPC */
+  hasPassword: boolean
+}
+
+export interface TeamRegistryHealthDto {
+  healthy: boolean
+  latencyMs: number
+  error?: string
+}
+
+export interface TeamRegistryConfigGetRequest {}
+
+export interface TeamRegistryConfigGetResponse {
+  snapshot: TeamRegistryConfigSnapshotDto
+}
+
+export interface TeamRegistryConfigSaveRequest {
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 不传 = 保留旧密码；传空串 = 清除密码 */
+  password?: string
+}
+
+export interface TeamRegistryConfigSaveResponse {
+  snapshot: TeamRegistryConfigSnapshotDto
+  healthCheck: TeamRegistryHealthDto
+}
+
+export interface TeamRegistryTestConnectionRequest {
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 测试连接是「未保存表单」的预检，必须带密码 */
+  password: string
+}
+
+export interface TeamRegistryTestConnectionResponse {
+  health: TeamRegistryHealthDto
+}
+
+export interface TeamRegistryPublishSkillRequest {
+  localSkillId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishSkillResponse {
+  slug: string
+  version: string
+  /** 配置中心 dataId（skill/<slug> @ SPARK_TEAM） */
+  dataId: string
+  fileCount: number
+  checksum: string
+  /** 发布前远端已有版本（null = 首发） */
+  previousRemoteVersion: string | null
+  /** 发布时被跳过的文件（二进制/超限/忽略规则） */
+  skipped: Array<{ path: string; reason: string }>
+}
+
+export interface TeamRegistryInstallSkillRequest {
+  slug: string
+}
+
+export interface TeamRegistryInstallSkillResponse {
+  skill: SkillItem
+}
+
+export interface TeamRegistryUpdateItemDto {
+  slug: string
+  localSkillId: string
+  name: string
+  localVersion: string
+  remoteVersion: string
+  remoteUpdatedAt: string
+  /**
+   * not-installed | up-to-date | remote-newer | local-newer | local-modified |
+   * version-equal-content-differs | remote-missing
+   */
+  state: string
+}
+
+export interface TeamRegistryListUpdatesRequest {}
+
+export interface TeamRegistryListUpdatesResponse {
+  updates: TeamRegistryUpdateItemDto[]
+}
+
+export interface TeamRegistryConfigHistoryRequest {
+  slug: string
+}
+
+export interface TeamRegistryConfigHistoryResponse {
+  /** Nacos 原生配置历史（倒序，最新在前），无历史返回空数组 */
+  history: Array<{ modifiedAt?: number; md5?: string }>
+}
+
 // ─── Installable Skill Catalog（内置可安装技能卡片） ─────────────────────
 
 /** 可安装技能的来源（与 InstallableSkillSource 运行时定义对齐） */
@@ -6527,6 +6634,26 @@ export interface IpcChannelMap
   'skill:install-status': [SkillInstallStatusRequest, SkillInstallStatusResponse]
   'skill:uninstall-catalog': [SkillUninstallCatalogRequest, SkillUninstallCatalogResponse]
   'skill:install-remote': [SkillInstallRemoteRequest, SkillInstallRemoteResponse]
+  // Team Registry（团队 Nacos 注册中心）
+  'team-registry:config-get': [TeamRegistryConfigGetRequest, TeamRegistryConfigGetResponse]
+  'team-registry:config-save': [TeamRegistryConfigSaveRequest, TeamRegistryConfigSaveResponse]
+  'team-registry:test-connection': [
+    TeamRegistryTestConnectionRequest,
+    TeamRegistryTestConnectionResponse,
+  ]
+  'team-registry:publish-skill': [
+    TeamRegistryPublishSkillRequest,
+    TeamRegistryPublishSkillResponse,
+  ]
+  'team-registry:install-skill': [
+    TeamRegistryInstallSkillRequest,
+    TeamRegistryInstallSkillResponse,
+  ]
+  'team-registry:list-updates': [TeamRegistryListUpdatesRequest, TeamRegistryListUpdatesResponse]
+  'team-registry:config-history': [
+    TeamRegistryConfigHistoryRequest,
+    TeamRegistryConfigHistoryResponse,
+  ]
 
   // External Tools (IDE / Terminal)
   'tool:detect': [ToolDetectRequest, ToolDetectResponse]

@@ -158,6 +158,8 @@ export { SkillRepository } from './skill.repository.js'
 export type { SkillRow } from './skill.repository.js'
 export { SkillRegistryRepository } from './skill-registry.repository.js'
 export type { SkillRegistryRow } from './skill-registry.repository.js'
+export { TeamAssetPinsRepository } from './team-asset-pins.repository.js'
+export type { TeamAssetPinRow, TeamAssetPinUpsertFields } from './team-asset-pins.repository.js'
 export { PluginRepository } from './plugin.repository.js'
 export type {
   PluginPermissionRow,

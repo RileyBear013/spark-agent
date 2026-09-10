@@ -67,6 +67,7 @@ export { ProviderEditPanel } from './ProvidersView'
 import { MemoryPanel } from './MemoryPanel'
 import { SettingsLogViewer } from './SettingsLogViewer'
 import { SubAppRuntimeSettingsCard } from '../sub-app/SubAppRuntimeSettingsCard'
+import { TeamRegistrySection } from './TeamRegistrySection'
 import { UsageHeatmap } from './UsageHeatmap'
 import { ModelUsageTrendCard } from './ModelUsageTrendCard'
 import { needsSdkInstallAction } from './sdkIntegrityPresentation'
@@ -414,6 +415,12 @@ export function SettingsView({ initialSection }: { initialSection?: string } = {
           keywords: ['API Key', '供应商', 'Provider', '模型', '密钥', '渠道'],
         },
         {
+          id: 'team-registry',
+          icon: <Icons.Users size={13} />,
+          label: '团队注册中心',
+          keywords: ['Nacos', '团队', '共享', '技能市场', '团队源', '团队注册中心'],
+        },
+        {
           id: 'system-prompt',
           icon: <Icons.Chat size={13} />,
           label: '系统提示词',
@@ -518,6 +525,7 @@ export function SettingsView({ initialSection }: { initialSection?: string } = {
     // MCP 设置暂未完全实现，隐藏
     // 'mcp-settings': McpSection,
     'remote-connections': RemoteConnectionsSection,
+    'team-registry': TeamRegistrySection,
     'system-prompt': SystemPromptSection,
     // 直接引用模块级组件，不要包箭头函数（同 MemoryPanel 的教训）
     'sub-app': SubAppRuntimeSettingsCard,

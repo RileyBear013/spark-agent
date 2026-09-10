@@ -149,6 +149,8 @@ import {
   McpService,
   SkillService,
   SkillRegistryService,
+  TeamRegistryConfigStore,
+  TeamRegistryService,
   SettingsService,
   UsageLedgerService,
   RuntimeCompositionService,
@@ -1788,6 +1790,14 @@ function getUsageLedgerService(): UsageLedgerService {
   return _usageLedgerService
 }
 
+let _teamRegistryService: TeamRegistryService | null = null
+function getTeamRegistryService(): TeamRegistryService {
+  if (_teamRegistryService == null) {
+    _teamRegistryService = new TeamRegistryService(new TeamRegistryConfigStore(getDatabase()))
+  }
+  return _teamRegistryService
+}
+
 let _skillRegistryService: SkillRegistryService | null = null
 function getSkillRegistryService(): SkillRegistryService {
   if (_skillRegistryService == null) {
@@ -1796,6 +1806,7 @@ function getSkillRegistryService(): SkillRegistryService {
       getDatabase(),
       getAppSkillsManager().userDir,
       binaryDir,
+      getTeamRegistryService(),
     )
     _skillRegistryService.initialize()
   }
@@ -7367,6 +7378,87 @@ export function registerAllIpcHandlers(): void {
     log.info(`skill-registry:categories requested, registryId=${req.registryId}`)
     const categories = await getSkillRegistryService().categories(req.registryId)
     return { categories }
+  })
+
+  // ─── Team Registry Handlers（团队 Nacos 注册中心） ───────────────────
+
+  typedIpcHandle('team-registry:config-get', async () => {
+    const snapshot = await getTeamRegistryService().getSnapshot()
+    return { snapshot }
+  })
+
+  typedIpcHandle('team-registry:config-save', async (req) => {
+    log.info(
+      `team-registry:config-save requested, serverUrl=${req.serverUrl}, namespace=${req.namespace}, username=${req.username}, password=${req.password === undefined ? 'keep' : req.password === '' ? 'clear' : 'updated'}`,
+    )
+    const store = new TeamRegistryConfigStore(getDatabase())
+    const snapshot = await store.save({
+      serverUrl: req.serverUrl,
+      namespace: req.namespace,
+      username: req.username,
+      ...(req.password !== undefined ? { password: req.password } : {}),
+    })
+    // 配置变化同步技能市场源行 + 重建 team adapter
+    getSkillRegistryService().ensureTeamRegistryRow(snapshot.serverUrl)
+    getSkillRegistryService().refreshTeamRegistry()
+    const healthCheck = await store.testSavedConnection()
+    return { snapshot, healthCheck }
+  })
+
+  typedIpcHandle('team-registry:test-connection', async (req) => {
+    log.info(
+      `team-registry:test-connection requested, serverUrl=${req.serverUrl}, namespace=${req.namespace}`,
+    )
+    const store = new TeamRegistryConfigStore(getDatabase())
+    const health = await store.testConnectionWith({
+      serverUrl: req.serverUrl,
+      namespace: req.namespace,
+      username: req.username,
+      password: req.password,
+    })
+    return { health }
+  })
+
+  typedIpcHandle('team-registry:publish-skill', async (req) => {
+    log.info(
+      `team-registry:publish-skill requested, localSkillId=${req.localSkillId}, version=${req.version ?? 'auto-bump'}`,
+    )
+    const result = await getSkillRegistryService().publishToTeam(req.localSkillId, {
+      ...(req.version !== undefined ? { version: req.version } : {}),
+    })
+    return {
+      slug: result.slug,
+      version: result.version,
+      dataId: result.dataId,
+      fileCount: result.fileCount,
+      checksum: result.checksum,
+      previousRemoteVersion: result.previousRemoteVersion,
+      skipped: result.skipped.map((item) => ({ path: item.path, reason: item.reason })),
+    }
+  })
+
+  typedIpcHandle('team-registry:install-skill', async (req) => {
+    log.info(`team-registry:install-skill requested, slug=${req.slug}`)
+    const skill = await getSkillRegistryService().installFromTeam(req.slug)
+    return { skill }
+  })
+
+  typedIpcHandle('team-registry:list-updates', async () => {
+    const updates = await getSkillRegistryService().listTeamUpdates()
+    return { updates }
+  })
+
+  typedIpcHandle('team-registry:config-history', async (req) => {
+    log.info(`team-registry:config-history requested, slug=${req.slug}`)
+    const client = await getTeamRegistryService().client()
+    if (!client) return { history: [] }
+    const raw = await client.listConfigHistory(`skill/${req.slug}`)
+    return {
+      history: raw.map((item) => ({
+        ...(item.modifyTimestamp !== undefined ? { modifiedAt: item.modifyTimestamp } : {}),
+        ...(item.md5 !== undefined ? { md5: item.md5 } : {}),
+      })),
+    }
   })
 
   // ─── Installable Skill Catalog（内置可安装技能卡片） ───────────────────
