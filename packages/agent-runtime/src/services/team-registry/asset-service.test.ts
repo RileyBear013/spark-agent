@@ -207,7 +207,7 @@ function makeWorkflowPort(seed: Array<{ id: string; name: string; graph?: Record
   const items = new Map(seed.map((w) => [w.id, { ...w, graph: w.graph ?? { nodes: [], edges: [] } }]))
   let validateCalls = 0
   const port: TeamAssetPort = {
-    buildPayload(localId: string): TeamAssetBuildResult | null {
+    async buildPayload(localId: string): Promise<TeamAssetBuildResult | null> {
       const item = items.get(localId)
       if (!item) return null
       return {
@@ -223,7 +223,7 @@ function makeWorkflowPort(seed: Array<{ id: string; name: string; graph?: Record
       }
       return null
     },
-    installFromPayload(envelope: TeamAssetEnvelope, existingLocalId: string | null) {
+    async installFromPayload(envelope: TeamAssetEnvelope, existingLocalId: string | null) {
       if (existingLocalId != null) {
         const item = items.get(existingLocalId)
         if (item && envelope.payload.kind === 'workflow') item.graph = envelope.payload.graph
@@ -244,9 +244,9 @@ function makeWorkflowPort(seed: Array<{ id: string; name: string; graph?: Record
 /** agent/app 用不到的通用桩端口（类型满足 Record） */
 function stubPort(): TeamAssetPort {
   return {
-    buildPayload: () => null,
+    buildPayload: async () => null,
     findInstalledLocalId: () => null,
-    installFromPayload: () => {
+    installFromPayload: async () => {
       throw new Error('stub port 不支持安装')
     },
   }

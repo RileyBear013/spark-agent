@@ -30,6 +30,7 @@ import {
   bumpPatchVersion,
   classifyTeamAssetState,
   compareSemver,
+  computeNormalizedPayloadChecksum,
   computePayloadChecksum,
   type TeamAssetEnvelope,
   type TeamAssetState,
@@ -50,6 +51,20 @@ export interface TeamAssetBuildResult {
   warnings?: string[]
 }
 
+/** 安装端口的扩展副作用：随包捆绑物化产生的新建 Agent 与 warning 列表 */
+interface TeamAssetInstallSideEffects {
+  /** 本次随包新建（停用态）的捆绑 Agent——handler 层补运行时刷新 */
+  createdAgentIds?: string[]
+  /** 捆绑物化 warning（缺密钥/停用态/unresolved 等），原样透出展示 */
+  warnings?: string[]
+  /**
+   * 安装完成后的本地载荷 checksum（v2 自包含必需：图引用已改写为本地 id，
+   * 与远端信封 checksum 不可比；pins 记录本地基准供六态判定）。
+   * 缺省时 pins 回退记远端 envelope checksum（v1 行为，非捆绑资产等价）。
+   */
+  installedLocalChecksum?: string
+}
+
 /**
  * 信封型资产的本地侧端口。desktop 主进程为每类资产提供实现：
  *   - workflow：WorkflowRepository（graph + 元数据）
@@ -57,15 +72,18 @@ export interface TeamAssetBuildResult {
  *   - app：SubAppRepository（V1 单文件草稿快照）
  */
 export interface TeamAssetPort {
-  /** 本地实体 → 信封载荷；null = 实体不存在或不可发布（如 V2 多文件应用） */
-  buildPayload(localId: string): TeamAssetBuildResult | null
+  /**
+   * 本地实体 → 信封载荷；null = 实体不存在或不可发布（如 V2 多文件应用）。
+   * v2 起为异步：自包含捆绑需要读技能目录（collectDirectory）。
+   */
+  buildPayload(localId: string): Promise<TeamAssetBuildResult | null>
   /** 团队 slug → 本地对应实体 id；无则 null（按名称推导 slug 反查，本地改名后视为未安装） */
   findInstalledLocalId(slug: string): string | null
-  /** 落地安装/更新；existingLocalId 为 null = 新建 */
+  /** 落地安装/更新；existingLocalId 为 null = 新建；可返回捆绑物化副作用 */
   installFromPayload(
     envelope: TeamAssetEnvelope,
     existingLocalId: string | null,
-  ): { localId: string; updatedExisting: boolean }
+  ): Promise<{ localId: string; updatedExisting: boolean } & TeamAssetInstallSideEffects>
   /** 安装前结构校验（如工作流图环检测）；抛错即中止安装 */
   validatePayload?(envelope: TeamAssetEnvelope): void
 }
@@ -102,6 +120,10 @@ export interface TeamAssetInstallResult {
   version: string
   localId: string
   updatedExisting: boolean
+  /** 随包新建的捆绑 Agent（handler 层补运行时刷新） */
+  createdAgentIds?: string[]
+  /** 捆绑物化 warning（密钥待补/停用态/unresolved） */
+  warnings?: string[]
 }
 
 const SLUG_PREFIX: Record<EnvelopeAssetType, string> = {
@@ -206,7 +228,7 @@ export class TeamAssetService {
     opts: { version?: string } = {},
   ): Promise<TeamAssetPublishResult> {
     const port = this.ports[assetType]
-    const built = port.buildPayload(localId)
+    const built = await port.buildPayload(localId)
     if (!built) {
       throw new Error(`本地资产不存在或不可发布：${assetType}/${localId}`)
     }
@@ -328,11 +350,11 @@ export class TeamAssetService {
     port.validatePayload?.(envelope)
 
     const existingLocalId = port.findInstalledLocalId(slug)
-    const installed = port.installFromPayload(envelope, existingLocalId)
+    const installed = await port.installFromPayload(envelope, existingLocalId)
 
     this.pinsRepo.upsert(assetType, slug, {
       installedVersion: envelope.version,
-      installedChecksum: envelope.checksum,
+      installedChecksum: installed.installedLocalChecksum ?? envelope.checksum,
       installedAt: new Date().toISOString(),
     })
     return {
@@ -341,6 +363,8 @@ export class TeamAssetService {
       version: envelope.version,
       localId: installed.localId,
       updatedExisting: installed.updatedExisting,
+      ...(installed.createdAgentIds?.length ? { createdAgentIds: installed.createdAgentIds } : {}),
+      ...(installed.warnings?.length ? { warnings: installed.warnings } : {}),
     }
   }
 
@@ -375,7 +399,7 @@ export class TeamAssetService {
           if (localId != null) {
             return {
               slug,
-              name: this.portName(port, localId) ?? slug,
+              name: (await this.portName(port, localId)) ?? slug,
               localId,
               localVersion: pin.installed_version,
               remoteVersion: '',
@@ -398,9 +422,11 @@ export class TeamAssetService {
         } catch {
           // 详情失败 → checksum 不可比，走版本号判定
         }
-        const localPayload = port.buildPayload(localId)?.payload
+        const localPayload = (await port.buildPayload(localId))?.payload
         const state = classifyTeamAssetState({
-          localChecksum: localPayload ? computePayloadChecksum(localPayload) : null,
+          // 本地侧归一化（剥离 bundle origin*）；远端侧仍是完整信封 checksum，
+          // 二者不相等是预期（rule 1 不触发），一致性判定走 pins 基准（rule 3）
+          localChecksum: localPayload ? computeNormalizedPayloadChecksum(localPayload) : null,
           installedChecksum: pin.installed_checksum,
           installedVersion: pin.installed_version,
           remoteVersion: remote.version,
@@ -419,7 +445,7 @@ export class TeamAssetService {
     return results.filter((item): item is TeamAssetUpdateInfo => item != null)
   }
 
-  private portName(port: TeamAssetPort, localId: string): string | null {
-    return port.buildPayload(localId)?.name ?? null
+  private async portName(port: TeamAssetPort, localId: string): Promise<string | null> {
+    return (await port.buildPayload(localId))?.name ?? null
   }
 }

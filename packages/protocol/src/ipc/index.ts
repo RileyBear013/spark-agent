@@ -2783,6 +2783,8 @@ export interface TeamRegistryInstallAssetResponse {
   version: string
   localId: string
   updatedExisting: boolean
+  /** 自包含捆绑物化提示（MCP 待补密钥/捆绑 Agent 停用态/unresolved 项） */
+  warnings?: string[]
 }
 
 export interface TeamRegistryAssetUpdateItemDto {

@@ -445,3 +445,46 @@ Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上�
   部署方式见交付说明（替换 nacos 部署目录 console 模块 static/next 后重启）。
 - 残留边界：上游无 zip 下载端点（安装走版本内容回读，不受影响）；「助手」类资产
   尚未发布过条目（客户端已支持 agent 类型发布，发布后自动归入对应分类）。
+
+### 3. 2026-09-12 追加：v2.1 自包含捆绑（空机器可运行）
+
+用户要求：上传内容必须全面——工作流/应用安装包要**自包含**，对方在「什么技能、
+MCP、Agent 都没有」的空机器上一键安装即可运行，不依赖本地环境。
+
+**载荷扩展**（信封 schema 不变，payload 增加可选 `bundle` 字段）：
+- `TeamBundleSpec = { skills[], mcps[], agents[], unresolved[] }`
+- `skills[]`：完整文件内联（utf8 文本直存 / 二进制 base64 保真）+ 目录 sha256
+  + SkillLoader manifest + 原始字节数；路径排序 canonical 化（两侧 checksum 可比）
+- `mcps[]`：密钥脱敏为 `{{secret:path}}` 占位符 + requiredSecrets 清单
+- `agents[]`：被引用的平台 Agent 定义（级联其技能/MCP）
+- `unresolved[]`：跨环境不可移植项（规则/自定义工具/绑定工作流）与收集失败项
+  （目录超限/缺失），安装侧显式 warning，不静默
+
+**收集与物化**（`team-bundle.ts`）：
+- 收集（发布方）：图依赖收集（技能/MCP/Agent 级联）→ 内联打包；内建技能静默
+  跳过；分级上限（单技能 2000 文件 / 单文件 4MB / 单技能 20MB / 单资产 24MB），
+  超限按体积降级为 unresolved，保证发布永远可完成。
+- 物化（接收方，`TeamBundleInstaller`）：确定性 bundleId `team-<assetType>-<slug>`
+  幂等替换——技能落 `_bundles/<bundleId>/<slug>/`（id `bundle:<bundleId>:<slug>`，
+  sha256 校验）、MCP 落禁用行（bundle_id 标记，更新保留接收方已补密钥）、Agent
+  以 `team-agent-<bundleId>-<sha8>` 确定性 id 停用落位（更新保留运行状态）、
+  登记 `workflow_bundles` 行（复用工作流包管理 UI 的卸载/校验/激活 MCP）；
+  主资产落位失败时尽力回滚新建项。
+
+**引用改写**：安装后图引用（skillIds/mcpServerIds/agentId，含 loop.body 递归）
+统一改写为本地 id（`rewriteGraphReferences` 扩展可选 agentIdMap，向后兼容）。
+
+**六态判定适配**：捆绑资产的本地 payload（引用已改写）与远端信封逐字节不可比，
+ pins.installedChecksum 改记「安装完成时的本地载荷 checksum」（剔除 bundle 的
+ 归一化口径 `computeNormalizedPayloadChecksum`）；分类器新增规则——本地未被改动
+ 且版本一致即 up-to-date（AgentSpec 服务端版本号每次发布必递增，「同版本内容
+ 不同」形态不可达，规则安全）。捆绑内容不参与本地一致性判定（随安装整体更新）。
+
+**传输上限实测**：~2.7MB base64 载荷（zip ~3.6MB）真机上传/回读完整（checksum
+一致），TEAM_ASSET_LIMITS.maxEnvelopeBytes 由 900KB（配置中心时代遗留）提升至
+40MB，分级约束由 TEAM_BUNDLE_LIMITS 承担。
+
+**全量重发**：正式版 9 工作流 + 4 个 V1 应用以 v2.1 载荷全部重新发布（PUBLIC，
+服务端自增版本），逐条回读校验 checksum 与捆绑清单。依赖收集确认：9 个工作流
+均为内联 prompt 的 agent 节点流（零外部引用，天然自包含）；「发布巡检中心」
+HTML 源码扫描发现引用 hq-static-db，自动随包捆绑 1 个脱敏 MCP 配置。

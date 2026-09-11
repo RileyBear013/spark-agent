@@ -26,6 +26,36 @@ import {
 } from './types.js'
 import type { TeamAgentSpecVersionDetail } from './nacos-client.js'
 
+/** AGENTS.md「包内文件」的捆绑内容说明（v2 自包含） */
+function bundleDocLines(envelope: TeamAssetEnvelope): string[] {
+  const bundle = (envelope.payload as { bundle?: { skills: unknown[]; mcps: unknown[]; agents: unknown[] } })
+    .bundle
+  if (!bundle) return []
+  const lines: string[] = []
+  if (bundle.skills.length > 0) {
+    lines.push(
+      '- `payload.bundle.skills` — 随包技能 ' +
+        bundle.skills.length +
+        ' 个（接收方安装后自动落位，无需自备）',
+    )
+  }
+  if (bundle.mcps.length > 0) {
+    lines.push(
+      '- `payload.bundle.mcps` — 随包 MCP ' +
+        bundle.mcps.length +
+        ' 个（密钥已脱敏，接收方激活时补齐）',
+    )
+  }
+  if (bundle.agents.length > 0) {
+    lines.push(
+      '- `payload.bundle.agents` — 随包 Agent 定义 ' +
+        bundle.agents.length +
+        ' 个（接收方安装后为停用态）',
+    )
+  }
+  return lines
+}
+
 /** manifest 里的 SparkWork 扩展字段名（服务端对未知字段原样保留，实测） */
 export const AGENT_SPEC_X_FIELD = 'x-spark'
 
@@ -103,7 +133,8 @@ export function buildAgentSpecReadme(
     '## 包内文件',
     '',
     '- `manifest.json` — 身份与元数据（含 x-spark 扩展字段）',
-    '- `payload.json` — 完整载荷数据',
+    '- `payload.json` — 完整载荷数据（自包含：随包捆绑全部运行依赖）',
+    ...bundleDocLines(envelope),
     '',
     '## 安装方式',
     '',

@@ -36,7 +36,7 @@ const APP_NAME = '团队探针应用'
 function makePort(seed: Array<{ id: string; name: string; content: Record<string, unknown> }>) {
   const items = new Map(seed.map((s) => [s.id, { ...s }]))
   const port: TeamAssetPort = {
-    buildPayload(localId) {
+    async buildPayload(localId) {
       const item = items.get(localId)
       if (!item) return null
       const payload: TeamAssetBuildResult['payload'] =
@@ -57,7 +57,7 @@ function makePort(seed: Array<{ id: string; name: string; content: Record<string
       }
       return null
     },
-    installFromPayload(envelope: TeamAssetEnvelope, existingLocalId: string | null) {
+    async installFromPayload(envelope: TeamAssetEnvelope, existingLocalId: string | null) {
       const content =
         envelope.payload.kind === 'workflow'
           ? { kind: 'workflow', graph: envelope.payload.graph }

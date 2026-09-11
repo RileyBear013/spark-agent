@@ -15,7 +15,8 @@ export const TEAM_ASSET_SCHEMA = 'spark.team.asset.v1' as const
 /**
  * 团队资产类型：
  *   skill/mcp 走 Nacos 原生 AI 资源（zip API / serverSpecification）；
- *   workflow/agent/app 走配置中心统一信封（M3/M4）。
+ *   workflow/agent/app 走原生 AgentSpec 承载（M3/M4，2026-09-12 起载荷升级为
+ *   自包含 bundle：图引用的技能/MCP/Agent 全量随包，空机器安装即可运行）。
  */
 export type TeamAssetType = 'skill' | 'mcp' | 'workflow' | 'agent' | 'app'
 
@@ -27,22 +28,112 @@ export interface TeamSkillFile {
   content: string
 }
 
+// ─── 自包含捆绑（bundle：随包携带全部依赖，对方空机器安装即可运行） ────
+
+/** 捆绑文件内容编码：utf8 文本直接存；二进制（图片/字体等）base64 保真 */
+export type TeamBundleFileEncoding = 'utf8' | 'base64'
+
+export interface TeamBundleFile {
+  /** 相对技能根目录的 posix 风格路径（不含 .. 与盘符） */
+  path: string
+  encoding: TeamBundleFileEncoding
+  /** utf8 → 原文本；base64 → 字节的 base64 编码 */
+  content: string
+}
+
+/** 随包捆绑的技能（完整文件内联；安装侧落为 bundle 隔离技能并改写引用） */
+export interface TeamBundleSkill {
+  /** 包内唯一 slug（名称 ASCII 归一 + 去重） */
+  slug: string
+  /** 原技能展示名 */
+  name: string
+  /** 发布方机器上的技能 id（安装后按此改写图/Agent 引用） */
+  originSkillId: string
+  /** 目录整体指纹（与 hashDirectoryEntries 同规则，安装侧校验保真） */
+  sha256: string
+  /** SkillLoader manifest 原文（'{}' 兜底），安装侧原样落库 */
+  manifestJson: string
+  files: TeamBundleFile[]
+  /** 收集时统计的原始字节总量（体积守门与展示用；随包序列化） */
+  totalBytes: number
+}
+
+/** 随包捆绑的 MCP（密钥已脱敏为占位符；安装侧落为禁用行，激活时补密钥） */
+export interface TeamBundleMcp {
+  refId: string
+  name: string
+  transport: 'stdio' | 'http' | 'sse'
+  /** 脱敏后的 config（JSON 对象） */
+  config: Record<string, unknown>
+  /** 被脱敏的密钥路径清单（激活前需补齐） */
+  requiredSecrets: Array<{ path: string; label: string }>
+  /** 发布方机器上的 MCP 行 id（安装后按此改写图/Agent 引用） */
+  originServerId: string
+}
+
+/**
+ * Agent 捆绑条目的源形状（TeamAgentEntry + mcpServerIds；desktop 的
+ * AgentRepository.get 返回 AgentItem 为其超集，直接收敛为可移植字段）
+ */
+export interface TeamAgentEntryLike {
+  id: string
+  name: string
+  description: string
+  agentAdapter: string
+  permissionMode: string
+  reasoningEffort: string
+  prompt: string
+  skillIds: string[]
+  disabledSkillIds: string[]
+  mcpServerIds: string[]
+  ruleIds: string[]
+  hookConfig: Record<string, unknown>
+  workflowId: string | null
+  metadata: Record<string, unknown>
+}
+
+/** 随包捆绑的平台 Agent 定义（prompt 等纯配置；技能/MCP 引用为发布方本地 id，安装侧改写） */
+export interface TeamBundleAgent {
+  /** 发布方机器上的 agent id（安装后按此改写图引用） */
+  originAgentId: string
+  config: Record<string, unknown>
+}
+
+/** 跨环境不可移植 / 收集失败项（安装侧转为 warning 显式展示，不静默） */
+export interface TeamBundleUnresolved {
+  type: 'skill' | 'mcp' | 'agent' | 'rule' | 'tool' | 'workflow' | 'provider'
+  name: string
+  hint: string
+}
+
+/** 自包含捆绑：payload 内联携带的全部依赖（缺省 = 旧版无捆绑载荷，安装侧跳过） */
+export interface TeamBundleSpec {
+  skills: TeamBundleSkill[]
+  mcps: TeamBundleMcp[]
+  agents: TeamBundleAgent[]
+  unresolved: TeamBundleUnresolved[]
+}
+
 export interface TeamSkillPayload {
   kind: 'skill-files'
   files: TeamSkillFile[]
 }
 
-/** 工作流载荷：完整流程图 DAG + 展示元数据（M3） */
+/** 工作流载荷：完整流程图 DAG + 展示元数据（M3）；v2 起带自包含 bundle */
 export interface TeamWorkflowPayload {
   kind: 'workflow'
   graph: Record<string, unknown>
   meta?: Record<string, unknown>
+  /** 图引用的技能/MCP/Agent 全量随包（2026-09-12 v2；缺省 = 旧载荷） */
+  bundle?: TeamBundleSpec
 }
 
-/** 平台 Agent 载荷：Agent 配置（prompt/技能/MCP/工作流绑定等）（M3） */
+/** 平台 Agent 载荷：Agent 配置（prompt/技能/MCP/工作流绑定等）（M3）；v2 起带自包含 bundle */
 export interface TeamAgentPayload {
   kind: 'agent-config'
   config: Record<string, unknown>
+  /** Agent 引用的技能/MCP 随包（2026-09-12 v2；缺省 = 旧载荷） */
+  bundle?: TeamBundleSpec
 }
 
 /** 子应用载荷：源码文件树 + 入口 + manifest 摘要（M4） */
@@ -51,6 +142,8 @@ export interface TeamAppPayload {
   files: TeamSkillFile[]
   entry: string
   manifest?: Record<string, unknown>
+  /** 应用源码内引用的 MCP 随包（发布侧按名称扫描发现；2026-09-12 v2） */
+  bundle?: TeamBundleSpec
 }
 
 export type TeamAssetPayload =
@@ -96,10 +189,26 @@ export const TEAM_ASSET_LIMITS = {
   /** 单资产文件数上限 */
   maxFileCount: 200,
   /**
-   * 信封整体（序列化后）上限。Nacos 配置中心实测 1MB 可写 / 2MB 报 413，
-   * 留余量取 900KB；子应用快照超限时发布侧会给出明确报错（后续可选 gzip/MinIO）。
+   * 信封整体（zip 序列化后）上限。承载已切到 AgentSpec 原生 zip 上传后不再受
+   * 配置中心 1MB 限制（2026-09-12 真机实测 ~12MB 包上传/回读通过），当前上限
+   * 取 40MB 防失控；捆绑内容另有 TEAM_BUNDLE_LIMITS 分级约束。
    */
-  maxEnvelopeBytes: 900_000,
+  maxEnvelopeBytes: 40_000_000,
+} as const
+
+/**
+ * 自包含捆绑的分级上限：超限的技能不硬失败，转入 unresolved 显式提示
+ * （提示接收方经技能团队源单独安装），保证发布永远可完成、依赖缺口可见。
+ */
+export const TEAM_BUNDLE_LIMITS = {
+  /** 单技能文件数上限 */
+  maxSkillFiles: 2000,
+  /** 单文件字节上限 */
+  maxSkillFileBytes: 4_000_000,
+  /** 单技能目录总字节上限 */
+  maxSkillTotalBytes: 20_000_000,
+  /** 单资产全部捆绑内容总字节上限 */
+  maxBundleTotalBytes: 24_000_000,
 } as const
 
 // ─── checksum ───────────────────────────────────────────────────────────
@@ -128,6 +237,23 @@ function stringifyStable(value: unknown): string {
 /** 对 payload 计算 sha256 hex checksum */
 export function computePayloadChecksum(payload: unknown): string {
   return crypto.createHash('sha256').update(canonicalJson(payload), 'utf-8').digest('hex')
+}
+
+/**
+ * 归一化 payload checksum：剔除 bundle 后计算（本地一致性基准专用）。
+ * v2 自包含资产安装时图引用被改写为本地 id、捆绑行以本地确定性 id 落位，
+ * 且 Agent config 内嵌本地 id——bundle 内容在「重算本地」与「远端信封」两个
+ * 视角下逐字节不可比。故 pins 基准与本地重算均剔除 bundle：本地一致性只看
+ * 主资产（工作流图/Agent 配置/应用源码），捆绑内容随每次安装整体更新。
+ * 跨机器比对远端信封仍用 computePayloadChecksum（完整 payload）。
+ */
+export function computeNormalizedPayloadChecksum(payload: unknown): string {
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return computePayloadChecksum(payload)
+  }
+  if (!('bundle' in payload)) return computePayloadChecksum(payload)
+  const { bundle: _bundle, ...rest } = payload as Record<string, unknown>
+  return computePayloadChecksum(rest)
 }
 
 /** 校验信封 checksum 是否与 payload 一致（防传输损坏/手改） */
@@ -235,6 +361,18 @@ export interface TeamAssetClassifyInput {
 export function classifyTeamAssetState(input: TeamAssetClassifyInput): TeamAssetState {
   if (input.installedVersion == null && input.installedChecksum == null) return 'not-installed'
   if (input.localChecksum != null && input.localChecksum === input.remoteChecksum) {
+    return 'up-to-date'
+  }
+  // 自包含捆绑（v2）：安装时图引用会被改写为本地 id，本地 payload 与远端
+  // 信封逐字节不可比。pins.installedChecksum 记录「安装完成时的本地载荷
+  // checksum」——本地未被改动且版本一致即视为 up-to-date。AgentSpec 承载下
+  // 服务端版本号每次发布必递增，「同版本内容不同」形态不可达，此规则安全。
+  if (
+    input.localChecksum != null &&
+    input.installedChecksum != null &&
+    input.localChecksum === input.installedChecksum &&
+    compareSemver(input.remoteVersion, input.installedVersion ?? '0.0.0') === 0
+  ) {
     return 'up-to-date'
   }
   if (input.localChecksum != null && input.installedChecksum != null) {

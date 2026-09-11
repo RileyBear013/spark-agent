@@ -79,6 +79,16 @@ export {
   parseAgentSpecName,
 } from './agentspec.js'
 export type { AgentSpecAssetType } from './agentspec.js'
+export {
+  TeamBundleInstaller,
+  bundlePublishWarnings,
+  collectTeamBundle,
+  isBundleEmpty,
+  type TeamBundleCollectorDeps,
+  type TeamBundleInstallDeps,
+  type TeamBundleMeta,
+  type TeamBundleMaterializeResult,
+} from './team-bundle.js'
 export { buildZip, readZip, stripZipCommonRoot } from './zip.js'
 export type { ZipEntryInput, ZipEntryOutput } from './zip.js'
 export * from './types.js'
