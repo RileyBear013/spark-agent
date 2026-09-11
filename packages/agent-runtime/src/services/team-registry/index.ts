@@ -73,6 +73,41 @@ export function collectSkillFiles(rootPath: string): CollectSkillFilesResult {
   return { files, skipped }
 }
 
+/**
+ * 空目录诊断：技能目录收集不到可发布文件时，区分两种根因并给出可行动提示。
+ *   - 目录真空：raw 条目为 0 → 安装内容未落盘，或落盘后事后被本机安全软件清理
+ *     （Windows 实测：安装成功后文件在数秒~数分钟内被终端安全代理删除、目录保留）；
+ *   - 全部被过滤：目录有内容但均为二进制/超限/忽略文件。
+ */
+export function emptySkillDirError(
+  rootPath: string,
+  skipped: CollectSkillFilesResult['skipped'],
+): Error {
+  let rawEntryCount = -1
+  try {
+    rawEntryCount = readdirSync(rootPath).length
+  } catch {
+    // 目录此刻已不可读，按真空处理
+  }
+  if (rawEntryCount <= 0) {
+    return new Error(
+      '技能目录内容为空，无法发布：该技能的文件未落盘或已被本机安全软件清理。' +
+        '请先在技能商店重新安装本技能；若重装后发布仍报此错，请将 SparkWork 数据目录加入安全软件白名单后重试。',
+    )
+  }
+  const reasonCount = new Map<string, number>()
+  for (const item of skipped) {
+    reasonCount.set(item.reason, (reasonCount.get(item.reason) ?? 0) + 1)
+  }
+  const summary = [...reasonCount.entries()].map(([reason, count]) => `${reason}=${count}`).join('、')
+  return new Error(
+    '技能目录内没有可发布的文本文件（' +
+      skipped.length +
+      ' 个文件全部被跳过：' +
+      summary +
+      '），无法发布。请检查技能目录内容是否完整。',
+  )
+}
 const IGNORED_ENTRIES = new Set(['.git', 'node_modules', '__pycache__', '.DS_Store', 'Thumbs.db'])
 
 function statSizeOf(full: string): number | null {

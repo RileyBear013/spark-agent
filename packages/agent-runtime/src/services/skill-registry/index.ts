@@ -46,6 +46,7 @@ import {
   collectSkillFiles,
   compareSemver,
   computeSkillFilesChecksum,
+  emptySkillDirError,
   pickLatestTeamVersion,
   readZip,
   stripZipCommonRoot,
@@ -1317,7 +1318,7 @@ export class SkillRegistryService {
 
     const warnings: string[] = []
     const { files, skipped } = collectSkillFiles(row.root_path)
-    if (files.length === 0) throw new Error('技能目录为空，无法发布')
+    if (files.length === 0) throw emptySkillDirError(row.root_path, skipped)
     const skillMdFile = files.find((f) => f.path === 'SKILL.md')
     if (!skillMdFile) throw new Error('技能目录缺少 SKILL.md，无法发布')
 

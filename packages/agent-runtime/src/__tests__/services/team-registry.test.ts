@@ -12,7 +12,7 @@ import {
   classifyTeamAssetState,
   bumpPatchVersion,
 } from '../../services/team-registry/types.js'
-import { collectSkillFiles } from '../../services/team-registry/index.js'
+import { collectSkillFiles, emptySkillDirError } from '../../services/team-registry/index.js'
 import { NacosClient } from '../../services/team-registry/nacos-client.js'
 import {
   NacosTeamAdapter,
@@ -150,6 +150,41 @@ describe('collectSkillFiles', () => {
       expect(reasons['.git']).toBe('ignored')
       expect(reasons['scratch.tmp']).toBe('ignored')
       expect(reasons['icon.png']).toBe('binary')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+// ─── emptySkillDirError（空目录诊断） ──────────────────────────────────
+
+describe('emptySkillDirError', () => {
+  it('目录真空：给出重装/白名单指引', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'team-skill-empty-'))
+    try {
+      const err = emptySkillDirError(dir, [])
+      expect(err.message).toContain('内容为空')
+      expect(err.message).toContain('重新安装')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('目录不可读（已被删除）：按真空处理', () => {
+    const missing = join(tmpdir(), 'team-skill-gone-' + Date.now())
+    const err = emptySkillDirError(missing, [])
+    expect(err.message).toContain('内容为空')
+  })
+
+  it('全部被过滤：错误里带跳过统计', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'team-skill-bin-'))
+    try {
+      writeFileSync(join(dir, 'icon.png'), Buffer.from([0x00, 0x01]))
+      const { skipped } = collectSkillFiles(dir)
+      expect(skipped.length).toBeGreaterThan(0)
+      const err = emptySkillDirError(dir, skipped)
+      expect(err.message).toContain('全部被跳过')
+      expect(err.message).toContain('binary=1')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

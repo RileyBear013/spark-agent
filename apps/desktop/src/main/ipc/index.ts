@@ -7715,14 +7715,28 @@ export function registerAllIpcHandlers(): void {
     return { categories }
   })
 
+  /**
+   * team-registry 服务层抛的是面向用户的业务 Error（如「技能目录内容为空，无法发布」），
+   * 但 typed-ipc 公共错误处理只识别 SparkError，普通 Error 会被掩码成「操作未完成」固定文案，
+   * 真实原因只进主进程日志无从排查。统一捕获转 SparkError 透传真实消息
+   * （对齐 registerProviderFilesIpc.runFilesTask 的做法）。
+   */
+  async function runTeamRegistryTask<T>(task: () => Promise<T>): Promise<T> {
+    try {
+      return await task()
+    } catch (err) {
+      if (err instanceof SparkError) throw err
+      throw new SparkError('UNKNOWN', err instanceof Error ? err.message : String(err))
+    }
+  }
   // ─── Team Registry Handlers（团队 Nacos 注册中心） ───────────────────
 
-  typedIpcHandle('team-registry:config-get', async () => {
+  typedIpcHandle('team-registry:config-get', async () => runTeamRegistryTask(async () => {
     const snapshot = await getTeamRegistryService().getSnapshot()
     return { snapshot }
-  })
+  }))
 
-  typedIpcHandle('team-registry:config-save', async (req) => {
+  typedIpcHandle('team-registry:config-save', async (req) => runTeamRegistryTask(async () => {
     log.info(
       `team-registry:config-save requested, serverUrl=${req.serverUrl}, namespace=${req.namespace}, username=${req.username}, password=${req.password === undefined ? 'keep' : req.password === '' ? 'clear' : 'updated'}`,
     )
@@ -7738,9 +7752,9 @@ export function registerAllIpcHandlers(): void {
     getSkillRegistryService().refreshTeamRegistry()
     const healthCheck = await store.testSavedConnection()
     return { snapshot, healthCheck }
-  })
+  }))
 
-  typedIpcHandle('team-registry:test-connection', async (req) => {
+  typedIpcHandle('team-registry:test-connection', async (req) => runTeamRegistryTask(async () => {
     log.info(
       `team-registry:test-connection requested, serverUrl=${req.serverUrl}, namespace=${req.namespace}`,
     )
@@ -7752,9 +7766,9 @@ export function registerAllIpcHandlers(): void {
       password: req.password,
     })
     return { health }
-  })
+  }))
 
-  typedIpcHandle('team-registry:publish-skill', async (req) => {
+  typedIpcHandle('team-registry:publish-skill', async (req) => runTeamRegistryTask(async () => {
     log.info(
       `team-registry:publish-skill requested, localSkillId=${req.localSkillId}, version=${req.version ?? 'auto-bump'}`,
     )
@@ -7771,25 +7785,25 @@ export function registerAllIpcHandlers(): void {
       warnings: result.warnings,
       skipped: result.skipped.map((item) => ({ path: item.path, reason: item.reason })),
     }
-  })
+  }))
 
-  typedIpcHandle('team-registry:install-skill', async (req) => {
+  typedIpcHandle('team-registry:install-skill', async (req) => runTeamRegistryTask(async () => {
     log.info(`team-registry:install-skill requested, slug=${req.slug}`)
     const skill = await getSkillRegistryService().installFromTeam(req.slug)
     return { skill }
-  })
+  }))
 
-  typedIpcHandle('team-registry:list-updates', async () => {
+  typedIpcHandle('team-registry:list-updates', async () => runTeamRegistryTask(async () => {
     const updates = await getSkillRegistryService().listTeamUpdates()
     return { updates }
-  })
+  }))
 
-  typedIpcHandle('team-registry:list-mcp', async () => {
+  typedIpcHandle('team-registry:list-mcp', async () => runTeamRegistryTask(async () => {
     const servers = await getTeamMcpService().listTeamServers()
     return { servers }
-  })
+  }))
 
-  typedIpcHandle('team-registry:publish-mcp', async (req) => {
+  typedIpcHandle('team-registry:publish-mcp', async (req) => runTeamRegistryTask(async () => {
     log.info(
       `team-registry:publish-mcp requested, mcpServerId=${req.mcpServerId}, version=${req.version ?? 'auto-bump'}`,
     )
@@ -7802,20 +7816,20 @@ export function registerAllIpcHandlers(): void {
       sensitiveKeys: result.sensitiveKeys,
       previousRemoteVersion: result.previousRemoteVersion,
     }
-  })
+  }))
 
-  typedIpcHandle('team-registry:install-mcp', async (req) => {
+  typedIpcHandle('team-registry:install-mcp', async (req) => runTeamRegistryTask(async () => {
     log.info(`team-registry:install-mcp requested, slug=${req.slug}`)
     const result = await getTeamMcpService().installFromTeam(req.slug)
     return result
-  })
+  }))
 
-  typedIpcHandle('team-registry:list-mcp-updates', async () => {
+  typedIpcHandle('team-registry:list-mcp-updates', async () => runTeamRegistryTask(async () => {
     const updates = await getTeamMcpService().listTeamUpdates()
     return { updates }
-  })
+  }))
 
-  typedIpcHandle('team-registry:config-history', async (req) => {
+  typedIpcHandle('team-registry:config-history', async (req) => runTeamRegistryTask(async () => {
     log.info(`team-registry:config-history requested, slug=${req.slug}`)
     const client = await getTeamRegistryService().client()
     if (!client) return { history: [] }
@@ -7826,7 +7840,7 @@ export function registerAllIpcHandlers(): void {
         ...(item.md5 !== undefined ? { md5: item.md5 } : {}),
       })),
     }
-  })
+  }))
 
 
   // ─── Installable Skill Catalog（内置可安装技能卡片） ───────────────────
