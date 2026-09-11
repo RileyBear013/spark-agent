@@ -262,3 +262,27 @@ installed_at、published_version、published_checksum、published_at。
 - 未决：本地 vitest 全量受环境牵制（better-sqlite3 于当日 09:02 被 Electron ABI 重编译，
   Node 侧 SQLite 测试挂载失败；属环境状态非代码回归），本次验证范围为 team-registry /
   skill-registry 非 DB 单测 21/21 与真机探针 2/2。
+
+### UI 自查与合并验证（2026-09-11 晚）
+
+- **e2e 走查**（`apps/desktop/e2e/team-registry.ui.e2e.ts`，隔离 profile 生产模式，4/4 通过）：
+  1. 设置 → 团队注册中心分区渲染（未配置降级态 + 四输入框 + 按钮可见）；
+  2. 真实保存配置并连接测试（直连测试机，~220ms 返回「已保存并连接成功」）；
+  3. 技能商店 → 团队源 Tab：配置后空态（不再是「尚未配置」），真实拉取列表；
+  4. MCP 管理 → 团队 MCP 折叠区块：真实拉取「0 个共享」→ 展开后空态可见。
+- **行为发现**：钥匙串凭据是机器级（跨 profile），`hasPassword=true` 时密码框占位符变为
+  「已保存（留空保持不变，输入则更新）」——新 profile 未配置但机器已存过密码即如此显示，
+  属预期行为；e2e 按结构定位密码框，不依赖占位符。
+- **合并 master（141 提交）冲突解析**：
+  - HistoryImport/ZCode：取 master 侧（`zcodeCliStore`/`zcodeV2Parser` 更新且带修复）；
+    我方 `ba9eed7b` 平行实现（`zcodeStore`/`zcodeParser`）已无引用，随合并移除；
+    `docs/design/history-import-experience.md` 随 master 删除；
+  - `ensure-native-electron.mjs`：取 master 侧（sha256 指纹 + 真实加载验证 + vendor prebuilds 链路，
+    与 master 的 sqlite-abi.sh 工具链配套）；我方 c4eec01d 的同类修复被其演进版取代；
+  - `ipc/index.ts` 手工融合：master 全部新增通道 + team-registry 全部通道/服务工厂/导入；
+  - **迁移撞号**：master 已占用 093（unified_tool_invocations），我方 team_asset_pins
+    迁移改号为 098；该迁移从未随版本发布，无兼容性影响（master 侧迁移编号唯一性断言拦下）。
+- **合并后验证**：全仓 `pnpm -r typecheck` 0 错误；聚焦单测 21（team-registry）+ 3（pins，
+  Electron-as-Node 跑）全部通过；重建产物明文；e2e 4/4 通过。
+- **导航备注**：侧边栏 MCP 管理入口的实际可访问名是「扩展中心」（`nav.extensions`），
+  i18n 的 `nav.mcp`（「连接器」）不用于该侧边栏按钮。
