@@ -40,13 +40,16 @@ import {
 } from './tarball-installer.js'
 import { TeamAssetPinsRepository } from '@spark/storage'
 import {
-  TEAM_ASSET_SCHEMA,
+  buildZip,
   bumpPatchVersion,
   classifyTeamAssetState,
   collectSkillFiles,
   compareSemver,
   computeSkillFilesChecksum,
-  type TeamAssetEnvelope,
+  pickLatestTeamVersion,
+  readZip,
+  stripZipCommonRoot,
+  type NacosClient,
   type TeamAssetState,
   type TeamRegistryService,
   type TeamSkillFile,
@@ -1192,8 +1195,8 @@ export class SkillRegistryService {
   }
 
   /**
-   * 从团队源安装/更新一个技能（多文件保真）。
-   * 校验信封 checksum（getEnvelope 内已校验）→ 落盘文件树 →
+   * 从团队源安装/更新一个技能（原生 zip API，M1.5）。
+   * 下载最新已发布版本 zip → 解包 → 落盘文件树 →
    * upsert DB 行（registry_id=team）→ 记录 pins 锚点。
    */
   async installFromTeam(slug: string): Promise<SkillItem> {
@@ -1202,14 +1205,21 @@ export class SkillRegistryService {
       throw new Error('User skills directory not configured; cannot install')
     }
     const team = this.requireTeamRegistry()
-    const envelope = await team.getEnvelope('skill', slug)
-    if (!envelope) throw new Error(`团队源中不存在该技能：${slug}`)
-    const payload = envelope.payload as { files?: TeamSkillFile[] }
-    const files = payload.files ?? []
+    const client = await team.client()
+    if (!client) throw new Error('团队注册中心尚未配置，无法安装')
+    const detail = await client.getTeamSkill(slug)
+    if (!detail) throw new Error('团队源中不存在该技能：' + slug)
+    const version = pickLatestTeamVersion(detail.versions)
+    if (!version) throw new Error('技能 ' + slug + ' 没有已发布版本，无法安装')
+    const zip = await client.downloadTeamSkillVersion(slug, version)
+    const files: TeamSkillFile[] = stripZipCommonRoot(readZip(zip))
+      .filter((e) => !e.path.endsWith('/'))
+      .map((e) => ({ path: e.path, content: e.content.toString('utf-8') }))
     const skillMdFile = files.find((f) => f.path === 'SKILL.md')
-    if (!skillMdFile) throw new Error(`信封缺少 SKILL.md，无法安装：${slug}`)
+    if (!skillMdFile) throw new Error('技能包缺少 SKILL.md，无法安装：' + slug)
+    const checksum = computeSkillFilesChecksum(files)
 
-    // 落盘（先清旧目录，保证与信封内容严格一致）
+    // 落盘（先清旧目录，保证与包内容严格一致）
     const dest = join(this.userSkillsDir, slug)
     if (existsSync(dest)) rmSync(dest, { recursive: true, force: true })
     mkdirSync(dest, { recursive: true })
@@ -1218,33 +1228,32 @@ export class SkillRegistryService {
     const skillMd = skillMdFile.content
     const hasFm = skillMd.startsWith('---')
     const fm = hasFm ? parseSkillFrontmatter(skillMd) : null
-    const skillName = fm?.name || envelope.name
-    const skillVersion = fm?.version || envelope.version || '0.0.0'
-    const description = fm?.description || envelope.description
+    const skillName = fm?.name || detail.name || slug
+    const skillVersion = fm?.version || version
+    const description = fm?.description || detail.description
 
     // dedupe by rootPath；id 用稳定 slug 指纹（与 skillhub 路径同构）
     const existing = this.skillRepo.list().find((s) => s.root_path === dest)
-    const id = existing?.id ?? `skill:team:${slug}`
+    const id = existing?.id ?? 'skill:team:' + slug
     const manifestJson = JSON.stringify({
       desc: description,
       description,
       displayName: skillName,
       canonicalName: fm?.name || '',
-      source: `Team:${slug}`,
-      author: fm?.author || envelope.author,
+      source: 'Team:' + slug,
+      author: fm?.author || '',
       category: fm?.category || 'team',
       tags: fm?.tags ?? [],
       systemPrompt: hasFm ? stripSkillFrontmatter(skillMd).trim() : skillMd.trim(),
       registry: 'team',
       remoteSlug: slug,
-      remoteVersion: envelope.version,
-      teamChecksum: envelope.checksum,
-      teamUpdatedAt: envelope.updatedAt,
+      remoteVersion: version,
+      teamChecksum: checksum,
     })
     const extended = {
       registryId: 'team',
       remoteId: slug,
-      author: fm?.author || envelope.author,
+      author: fm?.author || '',
       category: fm?.category || 'team',
       tagsJson: JSON.stringify(fm?.tags ?? []),
     }
@@ -1271,10 +1280,10 @@ export class SkillRegistryService {
       this.skillRepo.updateExtendedFields(id, extended)
     }
 
-    // pins 锚点：installed 版本/checksum 对齐本次信封
+    // pins 锚点：installed 版本/checksum 对齐本次安装的包内容
     this.pinsRepo.upsert('skill', slug, {
-      installedVersion: envelope.version,
-      installedChecksum: envelope.checksum,
+      installedVersion: version,
+      installedChecksum: checksum,
       installedAt: new Date().toISOString(),
     })
     this.registryRepo.update(TEAM_REGISTRY_ID, { lastSyncAt: new Date().toISOString() })
@@ -1283,16 +1292,17 @@ export class SkillRegistryService {
   }
 
   /**
-   * 发布本地技能到团队源。
-   * 读目录文件树（文本）→ 组信封（semver + checksum）→ 写配置中心 →
-   * best-effort 同步 AI Skill 元数据 → 记录 pins 发布锚点。
+   * 发布本地技能到团队源（原生 zip API，M1.5）。
+   * 读目录文件树 → frontmatter 写版本 → zip → precheck 校验 → upload →
+   * submit → publish → online → scope=PUBLIC → pins 发布锚点。
+   * 不再用配置中心信封；配置中心信封保留给工作流/子应用（M3/M4）。
    */
   async publishToTeam(
     localSkillId: string,
     opts: { version?: string } = {},
   ): Promise<TeamSkillPublishResult> {
     const row = this.skillRepo.list().find((s) => s.id === localSkillId)
-    if (!row) throw new Error(`本地技能不存在：${localSkillId}`)
+    if (!row) throw new Error('本地技能不存在：' + localSkillId)
     if (
       !row.root_path ||
       row.root_path.startsWith('builtin://') ||
@@ -1302,83 +1312,159 @@ export class SkillRegistryService {
       throw new Error('该技能没有真实落盘目录（内置/虚拟路径技能不能发布到团队源）')
     }
     const team = this.requireTeamRegistry()
+    const client = await team.client()
+    if (!client) throw new Error('团队注册中心尚未配置，无法发布')
 
-    const slug = basename(row.root_path)
-    if (!slug || slug === '.' || slug === '..') throw new Error('无法从技能目录推导 slug')
+    const warnings: string[] = []
     const { files, skipped } = collectSkillFiles(row.root_path)
     if (files.length === 0) throw new Error('技能目录为空，无法发布')
-    if (!files.some((f) => f.path === 'SKILL.md')) {
-      throw new Error('技能目录缺少 SKILL.md，无法发布')
-    }
+    const skillMdFile = files.find((f) => f.path === 'SKILL.md')
+    if (!skillMdFile) throw new Error('技能目录缺少 SKILL.md，无法发布')
+
+    // slug 以 SKILL.md frontmatter name 为准（服务端从 frontmatter 解析 name/version），
+    // 缺失时回退目录名归一化
+    const fm = skillMdFile.content.startsWith('---')
+      ? parseSkillFrontmatter(skillMdFile.content)
+      : null
+    const slug = sanitizeTeamSlug(fm?.name || basename(row.root_path))
     const checksum = computeSkillFilesChecksum(files)
 
-    // 远端现状（不存在 → 首发版本 1.0.0；存在 → 默认 patch 位 +1）
-    let remote: TeamAssetEnvelope | null = null
+    // 远端现状（详情 versions 中最高已发布版本；不存在 → 首发 1.0.0）
+    let remoteVersion: string | null = null
     try {
-      remote = await team.getEnvelope('skill', slug)
+      const detail = await client.getTeamSkill(slug)
+      if (detail) remoteVersion = pickLatestTeamVersion(detail.versions)
     } catch (err) {
       console.warn(
-        `[team-registry] 读取远端信封失败，按首发处理：${err instanceof Error ? err.message : err}`,
+        '[team-registry] 读取远端技能失败，按首发处理：' +
+          (err instanceof Error ? err.message : String(err)),
       )
     }
     const explicitVersion = opts.version?.trim()
-    const version = explicitVersion || bumpPatchVersion(remote?.version)
-    if (remote && explicitVersion && compareSemver(explicitVersion, remote.version) <= 0) {
+    const version = explicitVersion || bumpPatchVersion(remoteVersion)
+    if (remoteVersion && explicitVersion && compareSemver(explicitVersion, remoteVersion) <= 0) {
       throw new Error(
-        `指定版本 ${explicitVersion} 不高于远端当前版本 ${remote.version}；如需覆盖请升版本号`,
+        '指定版本 ' + explicitVersion + ' 不高于远端当前版本 ' + remoteVersion + '；如需覆盖请升版本号',
       )
     }
 
-    const manifestDesc = safeParseJson(row.manifest_json)?.desc
-    const snapshot = await team.getSnapshot()
-    const envelope: TeamAssetEnvelope = {
-      schema: TEAM_ASSET_SCHEMA,
-      assetType: 'skill',
-      slug,
-      name: row.name,
-      version,
-      author: snapshot.username || os.userInfo().username,
-      description: typeof manifestDesc === 'string' && manifestDesc ? manifestDesc : row.name,
-      updatedAt: new Date().toISOString(),
-      checksum,
-      payload: { kind: 'skill-files', files },
+    // zip（SKILL.md 的 frontmatter 版本号改写为发布版本，服务端按它解析 targetVersion）
+    const zip = buildZip(
+      files.map((f) => ({
+        path: f.path,
+        content:
+          f.path === 'SKILL.md'
+            ? Buffer.from(applyFrontmatterVersion(f.content, version), 'utf-8')
+            : Buffer.from(f.content, 'utf-8'),
+      })),
+    )
+
+    // precheck 防御：服务端解析结果必须与本地意图一致
+    const pre = await client.precheckTeamSkillUpload(zip)
+    if (!pre || !pre.skillName || pre.precheckCode !== 'READY') {
+      const reason = pre ? pre.precheckCode + (pre.reason ? ' ' + pre.reason : '') : '无响应'
+      throw new Error('团队注册中心预检未通过：' + reason)
     }
-    const { dataId } = await team.publishEnvelope(envelope)
+    if (pre.skillName !== slug) {
+      throw new Error(
+        'SKILL.md frontmatter name（' + pre.skillName + '）与推导 slug（' + slug + '）不一致，' +
+          '请统一后再发布',
+      )
+    }
+    const finalVersion = explicitVersion ?? pre.targetVersion ?? version
+    if (pre.targetVersion && pre.targetVersion !== finalVersion) {
+      throw new Error(
+        '服务端解析版本（' + pre.targetVersion + '）与发布版本（' + finalVersion + '）不一致',
+      )
+    }
+
+    const snapshot = await team.getSnapshot()
+    const author = snapshot.username || os.userInfo().username
+    await client.uploadTeamSkillZip({
+      zip,
+      overwrite: pre.exists,
+      commitMsg: 'SparkWork 发布 ' + finalVersion + ' by ' + author,
+    })
+    await client.submitTeamSkillVersion(slug, finalVersion)
+    await client.publishTeamSkillVersion(slug, finalVersion)
+    await this.onlineSkillTolerantly(client, slug, finalVersion, warnings)
+    try {
+      await client.setTeamSkillScope(slug, 'PUBLIC')
+    } catch (err) {
+      warnings.push(
+        '技能已发布但共享范围（PUBLIC）设置失败，团队成员可能看不到：' +
+          (err instanceof Error ? err.message : String(err)),
+      )
+    }
 
     this.pinsRepo.upsert('skill', slug, {
-      publishedVersion: version,
+      publishedVersion: finalVersion,
       publishedChecksum: checksum,
       publishedAt: new Date().toISOString(),
     })
     return {
       slug,
-      version,
-      dataId,
+      version: finalVersion,
+      skillName: slug,
       fileCount: files.length,
       skipped,
       checksum,
-      previousRemoteVersion: remote?.version ?? null,
+      warnings,
+      previousRemoteVersion: remoteVersion,
+    }
+  }
+
+  /** online 步骤：已是终态或服务端拒绝时不阻断发布，降级为 warning */
+  private async onlineSkillTolerantly(
+    client: NacosClient,
+    slug: string,
+    version: string,
+    warnings: string[],
+  ): Promise<void> {
+    try {
+      await client.onlineTeamSkillVersion(slug, version)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      let status = ''
+      try {
+        const detail = await client.getTeamSkill(slug)
+        status = detail?.versions.find((v) => v.version === version)?.status ?? ''
+      } catch {
+        // 详情读取失败不影响降级判断
+      }
+      if (/online|publish/i.test(status)) {
+        warnings.push('online 被拒但版本已是终态（' + status + '）')
+      } else {
+        warnings.push('online 失败（技能已发布但可能未上线）：' + message)
+      }
     }
   }
 
   /**
-   * 已安装团队技能 vs 远端信封的版本比对（更新徽标数据源）。
+   * 已安装团队技能 vs 远端原生列表的版本比对（更新徽标数据源）。
    * 未配置团队注册中心时返回空数组（不抛错）。
    */
   async listTeamUpdates(): Promise<TeamSkillUpdateInfo[]> {
     if (!this.teamRegistry) return []
     const client = await this.teamRegistry.client()
     if (!client) return []
-    const envelopes = await this.teamRegistry.listEnvelopes('skill')
-    const bySlug = new Map(envelopes.map((e) => [e.slug, e]))
+    const raw = await client.listTeamSkills()
+    const bySlug = new Map<string, { version: string; updatedAt: string }>()
+    for (const item of raw) {
+      const slug = teamItemString(item, ['skillName', 'name'])
+      if (!slug) continue
+      const version = teamItemString(item, ['version', 'latestVersion']) ?? ''
+      const updatedAt = teamItemString(item, ['updatedAt', 'modifiedTime', 'lastModifiedTime']) ?? ''
+      bySlug.set(slug, { version, updatedAt })
+    }
     const rows = this
       .skillRepo.list()
       .filter((s) => s.registry_id === TEAM_REGISTRY_ID && s.remote_id)
     const results: TeamSkillUpdateInfo[] = []
     for (const row of rows) {
       const slug = row.remote_id!
-      const env = bySlug.get(slug)
-      if (!env) {
+      const remote = bySlug.get(slug)
+      if (!remote) {
         results.push({
           slug,
           localSkillId: row.id,
@@ -1398,16 +1484,16 @@ export class SkillRegistryService {
         localChecksum,
         installedChecksum: pin?.installed_checksum ?? null,
         installedVersion: pin?.installed_version ?? row.version ?? null,
-        remoteVersion: env.version,
-        remoteChecksum: env.checksum,
+        remoteVersion: remote.version || '0.0.0',
+        remoteChecksum: '',
       })
       results.push({
         slug,
         localSkillId: row.id,
         name: row.name,
         localVersion: row.version,
-        remoteVersion: env.version,
-        remoteUpdatedAt: env.updatedAt,
+        remoteVersion: remote.version,
+        remoteUpdatedAt: remote.updatedAt,
         state,
       })
     }
@@ -1602,12 +1688,14 @@ export class SkillRegistryService {
 export interface TeamSkillPublishResult {
   slug: string
   version: string
-  /** 配置中心 dataId（skill/<slug> @ SPARK_TEAM） */
-  dataId: string
+  /** 服务端确认的技能名（= slug） */
+  skillName: string
   fileCount: number
   /** 发布时被跳过的文件（二进制/超限/忽略规则） */
   skipped: Array<{ path: string; reason: 'binary' | 'too-large' | 'ignored' }>
   checksum: string
+  /** 非阻断告警（online 降级 / scope 设置失败等） */
+  warnings: string[]
   /** 发布前远端已有版本（null = 首发） */
   previousRemoteVersion: string | null
 }
@@ -1620,6 +1708,42 @@ export interface TeamSkillUpdateInfo {
   remoteVersion: string
   remoteUpdatedAt: string
   state: TeamAssetState | 'remote-missing'
+}
+
+// ─── 团队推拉助手 ──────────────────────────────────────────────────────
+
+/**
+ * 把 SKILL.md frontmatter 的 version 行改写为发布版本（服务端按 frontmatter
+ * 解析 targetVersion）。无 frontmatter 时补最小 frontmatter。
+ */
+function applyFrontmatterVersion(skillMd: string, version: string): string {
+  if (!skillMd.startsWith('---')) {
+    return '---\nversion: ' + version + '\n---\n\n' + skillMd
+  }
+  const end = skillMd.indexOf('\n---', 3)
+  const head = end === -1 ? skillMd : skillMd.slice(0, end)
+  const tail = end === -1 ? '' : skillMd.slice(end)
+  if (/(^|\r?\n)version:\s*\S/.test(head)) {
+    return head.replace(/(^|\r?\n)version:\s*[^\r\n]*/i, '$1version: ' + version) + tail
+  }
+  return head + '\nversion: ' + version + tail
+}
+
+/** 团队 slug 归一化：小写 + 非法字符转 '-'（Nacos name 保守约束） */
+function sanitizeTeamSlug(raw: string): string {
+  const slug = raw.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-')
+  if (!slug || slug === '.' || slug === '..') throw new Error('无法推导团队技能 slug：' + raw)
+  return slug
+}
+
+/** 团队原生列表条目的字符串字段宽容提取 */
+function teamItemString(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const v = record[key]
+    if (typeof v === 'string' && v.length > 0) return v
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  }
+  return null
 }
 
 // ─── Row → Protocol Type Mappers ──────────────────────────────────────

@@ -241,10 +241,11 @@ function slugOf(skill: RemoteSkillItem): string | null {
 interface PublishResultView {
   slug: string
   version: string
-  dataId: string
+  skillName: string
   fileCount: number
   checksum: string
   previousRemoteVersion: string | null
+  warnings: string[]
   skipped: Array<{ path: string; reason: string }>
 }
 
@@ -320,7 +321,7 @@ export function PublishSkillToTeamModal({
       {skill == null ? null : result == null ? (
         <div className="team-publish-form">
           <p className="team-publish-hint">
-            即将把 <b>{skill.name}</b> 发布到团队 Nacos 注册中心（group SPARK_TEAM）。
+            即将把 <b>{skill.name}</b> 发布到团队 Nacos 注册中心（原生 AI Skill 包）。
             技能目录内的文本文件会完整共享；二进制 / 超限文件会在发布结果中列出。
           </p>
           <label className="team-publish-field">
@@ -346,8 +347,8 @@ export function PublishSkillToTeamModal({
             </b>
           </div>
           <div className="team-publish-result-row">
-            <span>配置项</span>
-            <b>{result.dataId}</b>
+            <span>共享范围</span>
+            <b>团队可见（PUBLIC）</b>
           </div>
           <div className="team-publish-result-row">
             <span>文件数</span>
@@ -357,6 +358,16 @@ export function PublishSkillToTeamModal({
             <span>内容校验</span>
             <b className="team-publish-checksum">{result.checksum.slice(0, 16)}…</b>
           </div>
+          {result.warnings.length > 0 ? (
+            <div className="team-publish-skipped">
+              <div className="team-publish-skipped-title">警告：</div>
+              <ul>
+                {result.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {result.skipped.length > 0 ? (
             <div className="team-publish-skipped">
               <div className="team-publish-skipped-title">已跳过 {result.skipped.length} 个文件：</div>
@@ -377,7 +388,7 @@ export function PublishSkillToTeamModal({
 }
 
 function skippedReasonLabel(reason: string): string {
-  if (reason === 'binary') return '二进制文件，M1 不共享'
+  if (reason === 'binary') return '二进制文件不共享'
   if (reason === 'too-large') return '超过单文件 1MB 上限'
   if (reason === 'ignored') return '命中忽略规则'
   return reason

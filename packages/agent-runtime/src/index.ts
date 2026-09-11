@@ -311,6 +311,13 @@ export type {
   CommandListItem,
 } from './core/index.js'
 export { TeamRegistryService, collectSkillFiles } from './services/team-registry/index.js'
+export { TeamMcpService, mcpSlugOf, pickLatestTeamVersion } from './services/team-registry/index.js'
+export type {
+  TeamMcpInstallResult,
+  TeamMcpListItem,
+  TeamMcpPublishResult,
+  TeamMcpUpdateInfo,
+} from './services/team-registry/index.js'
 export { TeamRegistryConfigStore } from './services/team-registry/team-registry-config.js'
 export type { TeamRegistryConfigInput, TeamRegistryConfigSnapshot } from './services/team-registry/team-registry-config.js'
 export { SkillRegistryService } from './services/skill-registry/index.js'

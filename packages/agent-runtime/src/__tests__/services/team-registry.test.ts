@@ -208,7 +208,7 @@ describe('NacosClient', () => {
     const fetchImpl = makeMockFetch(
       [
         {
-          match: (url, method) => url.endsWith('/v3/auth/login') && method === 'POST',
+          match: (url, method) => url.endsWith('/v3/auth/user/login') && method === 'POST',
           respond: () => {
             loginCount += 1
             return {
@@ -244,7 +244,7 @@ describe('NacosClient', () => {
     const fetchImpl = makeMockFetch(
       [
         {
-          match: (url) => url.endsWith('/v3/auth/login'),
+          match: (url) => url.endsWith('/v3/auth/user/login'),
           respond: () => ({
             status: 200,
             body: JSON.stringify({ code: 0, data: { accessToken: 'tk' } }),
@@ -289,7 +289,7 @@ describe('NacosClient', () => {
     const fetchImpl = makeMockFetch(
       [
         {
-          match: (url) => url.endsWith('/v3/auth/login'),
+          match: (url) => url.endsWith('/v3/auth/user/login'),
           respond: () => ({
             status: 200,
             body: JSON.stringify({ code: 0, data: { accessToken: 'tk' } }),
@@ -319,7 +319,7 @@ describe('NacosClient', () => {
     const fetchImpl = makeMockFetch(
       [
         {
-          match: (url) => url.endsWith('/v3/auth/login'),
+          match: (url) => url.endsWith('/v3/auth/user/login'),
           respond: () => ({
             status: 200,
             body: JSON.stringify({ code: 0, data: { accessToken: 'tk-fresh' } }),

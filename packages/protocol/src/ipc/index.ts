@@ -2403,14 +2403,16 @@ export interface TeamRegistryPublishSkillRequest {
 export interface TeamRegistryPublishSkillResponse {
   slug: string
   version: string
-  /** 配置中心 dataId（skill/<slug> @ SPARK_TEAM） */
-  dataId: string
+  /** 服务端确认的技能名（= slug） */
+  skillName: string
   fileCount: number
   checksum: string
   /** 发布前远端已有版本（null = 首发） */
   previousRemoteVersion: string | null
   /** 发布时被跳过的文件（二进制/超限/忽略规则） */
   skipped: Array<{ path: string; reason: string }>
+  /** 非阻断告警（online 降级 / scope 设置失败等） */
+  warnings: string[]
 }
 
 export interface TeamRegistryInstallSkillRequest {
@@ -2448,6 +2450,64 @@ export interface TeamRegistryConfigHistoryRequest {
 export interface TeamRegistryConfigHistoryResponse {
   /** Nacos 原生配置历史（倒序，最新在前），无历史返回空数组 */
   history: Array<{ modifiedAt?: number; md5?: string }>
+}
+
+// ─── Team Registry MCP（团队 MCP 推拉，M2） ─────────────────────────────
+
+export interface TeamRegistryMcpListItemDto {
+  slug: string
+  name: string
+  description: string
+  version: string
+  protocol: string
+}
+
+export interface TeamRegistryListMcpRequest {}
+
+export interface TeamRegistryListMcpResponse {
+  servers: TeamRegistryMcpListItemDto[]
+}
+
+export interface TeamRegistryPublishMcpRequest {
+  mcpServerId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishMcpResponse {
+  slug: string
+  version: string
+  /** spec 里携带的敏感命名变量键（env/headers；只报键名不报值） */
+  sensitiveKeys: string[]
+  previousRemoteVersion: string | null
+}
+
+export interface TeamRegistryInstallMcpRequest {
+  slug: string
+}
+
+export interface TeamRegistryInstallMcpResponse {
+  slug: string
+  version: string
+  localServerId: string
+  updatedExisting: boolean
+  requiresRestart: boolean
+}
+
+export interface TeamRegistryMcpUpdateItemDto {
+  slug: string
+  localServerId: string | null
+  name: string
+  localVersion: string | null
+  remoteVersion: string
+  /** not-installed | up-to-date | remote-newer | local-newer | version-equal-content-differs | remote-missing */
+  state: string
+}
+
+export interface TeamRegistryListMcpUpdatesRequest {}
+
+export interface TeamRegistryListMcpUpdatesResponse {
+  updates: TeamRegistryMcpUpdateItemDto[]
 }
 
 // ─── Installable Skill Catalog（内置可安装技能卡片） ─────────────────────
@@ -6650,6 +6710,13 @@ export interface IpcChannelMap
     TeamRegistryInstallSkillResponse,
   ]
   'team-registry:list-updates': [TeamRegistryListUpdatesRequest, TeamRegistryListUpdatesResponse]
+  'team-registry:list-mcp': [TeamRegistryListMcpRequest, TeamRegistryListMcpResponse]
+  'team-registry:publish-mcp': [TeamRegistryPublishMcpRequest, TeamRegistryPublishMcpResponse]
+  'team-registry:install-mcp': [TeamRegistryInstallMcpRequest, TeamRegistryInstallMcpResponse]
+  'team-registry:list-mcp-updates': [
+    TeamRegistryListMcpUpdatesRequest,
+    TeamRegistryListMcpUpdatesResponse
+  ]
   'team-registry:config-history': [
     TeamRegistryConfigHistoryRequest,
     TeamRegistryConfigHistoryResponse,

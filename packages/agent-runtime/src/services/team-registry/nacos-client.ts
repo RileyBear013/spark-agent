@@ -3,19 +3,23 @@
  *
  * Nacos v3 控制台 OpenAPI 客户端（团队注册中心专用）
  *
- * 认证：POST /v3/auth/login (username/password) → accessToken，
- * 后续请求带 `Authorization: Bearer <token>`；token 缓存并按 TTL 提前重登。
+ * 认证：POST /v3/auth/user/login（form：username/password）→ accessToken（TTL 5h），
+ * 后续请求带 `Authorization: Bearer <token>`；token 缓存、提前过期、401 自动重登一轮。
  *
- * 已实测（2026-09-10，192.168.163.174:8080 / v3.3.0-SNAPSHOT）：
- *   GET  /v3/console/cs/config/list          配置列表（public 现存 6 条 nacos.ai.resource.search.*）
- *   GET  /v3/console/ai/skills/list           AI Skill 列表（当前为空）
- *   GET  /v3/console/ai/skills?skillName=     AI Skill 详情
- *   POST /v3/console/ai/mcp                   存在（空载荷 400「serverSpecification 不能为空」）
- * 写端点（发布配置 / AI skill 写入）按 v3 标准 shape 实现，字段以服务端
- * 错误信息为准现场修正——本客户端把服务端 code/message 原样透出，便于诊断。
+ * 传输事实（2026-09-11 真机联调核实，见 docs/plan/team-registry-sharing.md）：
+ *   - 写端点一律 form 编码（x-www-form-urlencoded / multipart），不是 JSON body；
+ *   - 读端点 JSON 信封 {code, message, data}，code!==0 视为业务失败；
+ *   - 技能包为 zip（upload multipart / download 返回二进制）；
+ *   - MCP list 必须带 search 参数，否则服务端版本 join 异常。
+ *
+ * 端点分组：
+ *   - 配置中心（cs/config）：工作流 / 子应用信封运输（M3/M4 用）
+ *   - AI Skill 原生 API：技能推拉（M1.5 起为权威路径）
+ *   - AI MCP 原生 API：MCP 推拉（M2）
  */
 
 import { fetchJson, HttpError } from '@spark/shared'
+import type { McpPublishDraftFields } from './mcp-mapping.js'
 
 /** 团队资产在配置中心的固定 group */
 export const TEAM_NACOS_GROUP = 'SPARK_TEAM'
@@ -52,6 +56,53 @@ export interface NacosConfigContent {
   type?: string
 }
 
+/** precheck 返回的服务端解析结果（字段按 2026-09-11 真机响应） */
+export interface SkillUploadPrecheck {
+  skillName: string
+  targetVersion: string
+  parsedVersion: string | null
+  /** READY | ...（其他值视为不可上传，透传给上层展示 reason） */
+  precheckCode: string
+  reason: string | null
+  exists: boolean
+  maxPublishedVersion: string | null
+  editingVersion: string | null
+  reviewingVersion: string | null
+  entryPath: string | null
+  owner: string | null
+}
+
+/** 技能版本行（详情接口 data.versions 元素，宽容提取） */
+export interface TeamSkillVersionInfo {
+  version: string
+  status: string
+}
+
+/** 技能详情（详情接口 data，宽容提取） */
+export interface TeamSkillDetail {
+  skillName: string
+  name: string
+  scope: string
+  description: string
+  versions: TeamSkillVersionInfo[]
+  raw: Record<string, unknown>
+}
+
+/** MCP 版本行 */
+export interface TeamMcpVersionInfo {
+  version: string
+  status: string
+}
+
+/** MCP 详情（详情接口 data，宽容提取；serverSpecification 为原始对象） */
+export interface TeamMcpDetail {
+  mcpName: string
+  description: string
+  versions: TeamMcpVersionInfo[]
+  serverSpecification: Record<string, unknown> | null
+  raw: Record<string, unknown>
+}
+
 interface NacosApiEnvelope {
   code?: number
   message?: string
@@ -61,7 +112,7 @@ interface NacosApiEnvelope {
   tokenTtlMs?: number
 }
 
-const DEFAULT_TOKEN_TTL_MS = 10 * 60 * 1000
+const DEFAULT_TOKEN_TTL_MS = 4 * 60 * 60 * 1000
 /** 提前 60s 过期，避免临界请求失败 */
 const TOKEN_EXPIRY_MARGIN_MS = 60 * 1000
 
@@ -116,15 +167,17 @@ export class NacosClient {
         '团队注册中心未配置账号密码，无法登录获取 token（请到 设置 → 团队注册中心 补全凭据）',
       )
     }
-    const res = await this.rawRequest('POST', '/v3/auth/login', {
-      body: { username: this.username, password: this.password },
+    // 真机核实的登录端点与编码（form）；token 位置做多重兜底
+    const res = await this.rawRequest('POST', '/v3/auth/user/login', {
+      form: { username: this.username, password: this.password },
       auth: false,
     })
     const token =
       pickString(res, ['accessToken', 'data.accessToken']) ??
-      pickString(res, ['token', 'data.token'])
+      pickString(res, ['token', 'data.token']) ??
+      pickString(res, ['data.accessTokenValue', 'accessTokenValue'])
     if (!token) throw new NacosClientError('Nacos 登录响应中没有 accessToken')
-    const ttl = pickNumber(res, ['tokenTtlMs', 'data.tokenTtlMs'])
+    const ttl = pickNumber(res, ['tokenTtlMs', 'data.tokenTtlMs', 'data.tokenTtl'])
     this.token = token
     this.tokenExpiresAt = Date.now() + (ttl && ttl > 0 ? ttl : this.tokenTtlMs) - TOKEN_EXPIRY_MARGIN_MS
     return token
@@ -136,7 +189,7 @@ export class NacosClient {
     this.tokenExpiresAt = 0
   }
 
-  // ─── 配置中心 ───────────────────────────────────────────────────────
+  // ─── 配置中心（工作流 / 子应用信封，M3/M4 用） ───────────────────────
 
   /** 列出团队 group 下的配置（按 dataId 前缀过滤可选） */
   async listConfigs(opts: {
@@ -240,47 +293,182 @@ export class NacosClient {
     }>
   }
 
-  // ─── AI 资源（发现层，best-effort） ──────────────────────────────────
+  // ─── AI Skill 原生 API（技能推拉权威路径） ──────────────────────────
 
-  /** AI Skill 列表（团队源发现卡片数据；失败由调用方降级为配置中心信封） */
-  async listAiSkills(): Promise<Array<Record<string, unknown>>> {
+  /** 团队技能列表（原生发现数据源） */
+  async listTeamSkills(): Promise<Array<Record<string, unknown>>> {
     const query = new URLSearchParams({ namespaceId: this.namespace, pageNo: '1', pageSize: '200' })
     const res = await this.apiRequest('GET', '/v3/console/ai/skills/list', { query })
-    const items = pickArray(res, ['data.pageItems', 'pageItems', 'data'])
-    return items.filter((item) => item != null && typeof item === 'object') as Array<
-      Record<string, unknown>
-    >
+    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
+      (item) => item != null && typeof item === 'object',
+    ) as Array<Record<string, unknown>>
+  }
+
+  /** 技能详情（含 versions/scope）；不存在返回 null */
+  async getTeamSkill(skillName: string): Promise<TeamSkillDetail | null> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, skillName })
+    try {
+      const res = await this.apiRequest('GET', '/v3/console/ai/skills', { query })
+      const data = asRecord(getPath(res, 'data')) ?? asRecord(res)
+      if (!data) return null
+      return normalizeSkillDetail(data, skillName)
+    } catch (err) {
+      if (err instanceof NacosClientError && skillMissing(err)) return null
+      throw err
+    }
   }
 
   /**
-   * 写入/更新一条 AI Skill 元数据条目（发现层，best-effort）。
-   * 字段结构按 v3 控制台 `skillSpecification` 惯例拼装；服务端校验失败抛
-   * NacosClientError（消息含服务端 code/message），调用方降级不阻断信封发布。
+   * 上传前预检：服务端解 zip 解析 SKILL.md frontmatter，返回
+   * skillName/targetVersion/exists/maxPublishedVersion 等（用于版本决策与防御）。
    */
-  async publishAiSkill(meta: {
-    skillName: string
-    version: string
-    name: string
-    description: string
-    author?: string
-    skillMd?: string
-  }): Promise<void> {
-    const body = {
-      namespaceId: this.namespace,
-      skillName: meta.skillName,
-      skillSpecification: JSON.stringify({
-        syncRun: false,
-        skillVersion: meta.version,
-        skillDescriptor: {
-          name: meta.name,
-          description: meta.description,
-          version: meta.version,
-          ...(meta.author ? { author: meta.author } : {}),
-        },
-        sourceContent: meta.skillMd ?? '',
-      }),
+  async precheckTeamSkillUpload(zip: Buffer): Promise<SkillUploadPrecheck | null> {
+    const res = await this.apiRequest('POST', '/v3/console/ai/skills/upload/precheck', {
+      multipart: buildSkillZipMultipart(zip, this.namespace),
+    })
+    // 真机响应 data 为数组（单包单元素）
+    const data = pickArray(res, ['data'])
+    const first = asRecord(data[0])
+    if (!first) return null
+    return {
+      skillName: pickString(first, ['skillName']) ?? '',
+      targetVersion: pickString(first, ['targetVersion']) ?? '',
+      parsedVersion: pickString(first, ['parsedVersion']),
+      precheckCode: pickString(first, ['precheckCode']) ?? '',
+      reason: pickString(first, ['reason']),
+      exists: pickBoolean(first, ['exists']) ?? false,
+      maxPublishedVersion: pickString(first, ['maxPublishedVersion']),
+      editingVersion: pickString(first, ['editingVersion']),
+      reviewingVersion: pickString(first, ['reviewingVersion']),
+      entryPath: pickString(first, ['entryPath']),
+      owner: pickString(first, ['owner']),
     }
-    await this.apiRequest('POST', '/v3/console/ai/skills', { body })
+  }
+
+  /** 上传技能 zip（服务端解析 frontmatter 建草稿）；返回服务端确认的 skillName */
+  async uploadTeamSkillZip(args: {
+    zip: Buffer
+    overwrite: boolean
+    commitMsg: string
+  }): Promise<string> {
+    const res = await this.apiRequest('POST', '/v3/console/ai/skills/upload', {
+      multipart: buildSkillZipMultipart(args.zip, this.namespace, {
+        overwrite: String(args.overwrite),
+        commitMsg: args.commitMsg,
+      }),
+    })
+    return pickString(res, ['data']) ?? ''
+  }
+
+  /** 草稿 → 提交审核（form） */
+  async submitTeamSkillVersion(skillName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/skills/submit', {
+      form: { namespaceId: this.namespace, skillName, version },
+    })
+  }
+
+  /** 提交 → 发布（form） */
+  async publishTeamSkillVersion(skillName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/skills/publish', {
+      form: { namespaceId: this.namespace, skillName, version },
+    })
+  }
+
+  /** 发布 → 上线（form）；已是终态时服务端可能拒绝，由调用方决定是否容忍 */
+  async onlineTeamSkillVersion(skillName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/skills/online', {
+      form: { namespaceId: this.namespace, skillName, version },
+    })
+  }
+
+  /** 共享范围：PRIVATE → PUBLIC（团队可见的前提） */
+  async setTeamSkillScope(skillName: string, scope: 'PRIVATE' | 'PUBLIC'): Promise<void> {
+    await this.apiRequest('PUT', '/v3/console/ai/skills/scope', {
+      form: { namespaceId: this.namespace, skillName, scope },
+    })
+  }
+
+  /** 下载指定版本技能包 zip（二进制） */
+  async downloadTeamSkillVersion(skillName: string, version: string): Promise<Buffer> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, skillName, version })
+    const token = await this.ensureToken()
+    return this.rawBinaryRequest('GET', '/v3/console/ai/skills/version/download', { query, token })
+  }
+
+  /** 删除整个技能（清理/撤回用；调用方必须先取得用户确认） */
+  async deleteTeamSkill(skillName: string): Promise<boolean> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, skillName })
+    const res = await this.apiRequest('DELETE', '/v3/console/ai/skills', { query })
+    return res != null
+  }
+
+  // ─── AI MCP 原生 API（MCP 推拉） ────────────────────────────────────
+
+  /**
+   * 团队 MCP 列表。注意：list 必须带 search 参数（缺失会触发服务端版本 join
+   * 异常，整个接口 404——真机复现过的坑）。
+   */
+  async listTeamMcpServers(search = 'blur'): Promise<Array<Record<string, unknown>>> {
+    const query = new URLSearchParams({
+      namespaceId: this.namespace,
+      search,
+      pageNo: '1',
+      pageSize: '200',
+    })
+    const res = await this.apiRequest('GET', '/v3/console/ai/mcp/list', { query })
+    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
+      (item) => item != null && typeof item === 'object',
+    ) as Array<Record<string, unknown>>
+  }
+
+  /** MCP 详情（含 versions/serverSpecification）；不存在返回 null */
+  async getTeamMcpServer(mcpName: string): Promise<TeamMcpDetail | null> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, mcpName })
+    try {
+      const res = await this.apiRequest('GET', '/v3/console/ai/mcp', { query })
+      const data = asRecord(getPath(res, 'data')) ?? asRecord(res)
+      if (!data) return null
+      return normalizeMcpDetail(data, mcpName)
+    } catch (err) {
+      if (err instanceof NacosClientError && mcpMissing(err)) return null
+      throw err
+    }
+  }
+
+  /**
+   * 创建 MCP 草稿（form）。
+   *
+   * ⚠️ 孤儿行陷阱（真机复现）：spec 校验不过时 server 行已建、version 行缺失，
+   * 且会卡死整个 /mcp/list。调用方（service 层）创建后必须立即回读校验，
+   * 失败即调用 deleteTeamMcpServer 清理——本方法只做传输。
+   */
+  async createTeamMcpDraft(fields: McpPublishDraftFields): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/mcp/draft', { form: { ...fields } })
+  }
+
+  async submitTeamMcpVersion(mcpName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/mcp/submit', {
+      form: { namespaceId: this.namespace, mcpName, version },
+    })
+  }
+
+  async publishTeamMcpVersion(mcpName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/mcp/publish', {
+      form: { namespaceId: this.namespace, mcpName, version },
+    })
+  }
+
+  async onlineTeamMcpVersion(mcpName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', '/v3/console/ai/mcp/online', {
+      form: { namespaceId: this.namespace, mcpName, version },
+    })
+  }
+
+  /** 删除 MCP（含孤儿行清理；调用方必须先取得用户确认或用于失败回滚） */
+  async deleteTeamMcpServer(mcpName: string): Promise<boolean> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, mcpName })
+    const res = await this.apiRequest('DELETE', '/v3/console/ai/mcp', { query })
+    return res != null
   }
 
   // ─── 健康 ───────────────────────────────────────────────────────────
@@ -321,7 +509,13 @@ export class NacosClient {
   private async apiRequest(
     method: string,
     path: string,
-    opts: { query?: URLSearchParams; body?: unknown; auth?: boolean } = {},
+    opts: {
+      query?: URLSearchParams
+      body?: unknown
+      form?: Record<string, string>
+      multipart?: { body: Buffer; contentType: string }
+      auth?: boolean
+    } = {},
   ): Promise<unknown> {
     const useAuth = opts.auth !== false
     let token: string | undefined
@@ -344,25 +538,42 @@ export class NacosClient {
   private async rawRequest(
     method: string,
     path: string,
-    opts: { query?: URLSearchParams; body?: unknown; token?: string; auth?: boolean } = {},
+    opts: {
+      query?: URLSearchParams
+      body?: unknown
+      form?: Record<string, string>
+      multipart?: { body: Buffer; contentType: string }
+      token?: string
+      auth?: boolean
+    } = {},
   ): Promise<unknown> {
     const url = new URL(`${this.serverUrl}${path}`)
     if (opts.query) for (const [k, v] of opts.query.entries()) url.searchParams.set(k, v)
     const headers: Record<string, string> = { Accept: 'application/json' }
     if (opts.token) headers.Authorization = `Bearer ${opts.token}`
-    let body: string | undefined
-    if (opts.body !== undefined) {
+
+    // 三种载荷：JSON（配置中心）/ form（AI 写端点统一形态）/ multipart（zip 上传）
+    let body: string | Buffer | undefined
+    if (opts.multipart != null) {
+      headers['Content-Type'] = opts.multipart.contentType
+      body = opts.multipart.body
+    } else if (opts.form != null) {
+      headers['Content-Type'] = 'application/x-www-form-urlencoded'
+      body = new URLSearchParams(opts.form).toString()
+    } else if (opts.body !== undefined) {
       body = JSON.stringify(opts.body)
       headers['Content-Type'] = 'application/json'
     }
+
     let res: unknown
     try {
       res = await fetchJson<unknown>(url.toString(), {
         method,
         headers,
         ...(body !== undefined ? { body } : {}),
-        timeoutMs: 15_000,
-        maxRetries: 1,
+        timeoutMs: 20_000,
+        // 写端点非幂等：只在 GET/DELETE 上允许一次重试
+        maxRetries: method === 'GET' ? 1 : 0,
         retryBackoffMs: 300,
         fetchImpl: this.fetchImpl,
       })
@@ -390,6 +601,94 @@ export class NacosClient {
     }
     return res
   }
+
+  /** 二进制下载（zip），无业务信封；非 2xx 报错并带响应体摘要 */
+  private async rawBinaryRequest(
+    method: string,
+    path: string,
+    opts: { query?: URLSearchParams; token?: string },
+  ): Promise<Buffer> {
+    const url = new URL(`${this.serverUrl}${path}`)
+    if (opts.query) for (const [k, v] of opts.query.entries()) url.searchParams.set(k, v)
+    try {
+      return await fetchJson<Buffer>(url.toString(), {
+        method,
+        headers: {
+          Accept: 'application/zip, application/octet-stream, */*',
+          ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+        },
+        binary: true,
+        timeoutMs: 30_000,
+        maxRetries: 1,
+        retryBackoffMs: 300,
+        fetchImpl: this.fetchImpl,
+      })
+    } catch (err) {
+      if (err instanceof HttpError) {
+        throw new NacosClientError(
+          `Nacos ${method} ${path} 下载失败：HTTP ${err.statusCode ?? 'network'} ${err.message}`,
+          err.statusCode,
+        )
+      }
+      throw err
+    }
+  }
+}
+
+// ─── multipart 编码（zip 上传；手写以复用 fetchJson 的超时/重试/错误包装） ──
+
+interface MultipartPart {
+  name: string
+  value: string | Buffer
+  filename?: string
+  contentType?: string
+}
+
+function buildMultipartBody(parts: MultipartPart[], boundary: string): Buffer {
+  const chunks: Buffer[] = []
+  const preamble = (s: string) => Buffer.from(s, 'utf-8')
+  for (const part of parts) {
+    chunks.push(preamble(`--${boundary}\r\n`))
+    if (part.filename != null) {
+      chunks.push(
+        preamble(
+          `Content-Disposition: form-data; name="${part.name}"; filename="${part.filename}"\r\n` +
+            `Content-Type: ${part.contentType ?? 'application/octet-stream'}\r\n\r\n`,
+        ),
+      )
+    } else {
+      chunks.push(preamble(`Content-Disposition: form-data; name="${part.name}"\r\n\r\n`))
+    }
+    chunks.push(Buffer.isBuffer(part.value) ? part.value : Buffer.from(part.value, 'utf-8'))
+    chunks.push(preamble('\r\n'))
+  }
+  chunks.push(preamble(`--${boundary}--\r\n`))
+  return Buffer.concat(chunks)
+}
+
+function buildSkillZipMultipart(
+  zip: Buffer,
+  namespaceId: string,
+  extra: { overwrite?: string; commitMsg?: string } = {},
+): { body: Buffer; contentType: string } {
+  const boundary = `spark-team-${Math.abs(hashString(`${zip.length}-${namespaceId}`))}-${partCounter++}`
+  const parts: MultipartPart[] = [
+    { name: 'file', value: zip, filename: 'skill-package.zip', contentType: 'application/zip' },
+    { name: 'namespaceId', value: namespaceId },
+  ]
+  if (extra.overwrite != null) parts.push({ name: 'overwrite', value: extra.overwrite })
+  if (extra.commitMsg != null) parts.push({ name: 'commitMsg', value: extra.commitMsg })
+  return { body: buildMultipartBody(parts, boundary), contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
+let partCounter = 0
+
+function hashString(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i += 1) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0
+  }
+  return h
 }
 
 // ─── 响应字段宽容提取（v3 各端点 shape 不一，多重兜底） ─────────────────
@@ -435,6 +734,80 @@ function getPath(source: unknown, dottedPath: string): unknown {
   return current
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function normalizeSkillDetail(data: Record<string, unknown>, fallbackName: string): TeamSkillDetail {
+  const versions = pickArray(data, ['versions', 'data.versions'])
+    .map((v) => asRecord(v))
+    .filter((v): v is Record<string, unknown> => v != null)
+    .map((v) => ({
+      version: pickString(v, ['version']) ?? '',
+      status: pickString(v, ['status']) ?? '',
+    }))
+    .filter((v) => v.version)
+  const out: TeamSkillDetail = {
+    skillName: pickString(data, ['skillName', 'name']) ?? fallbackName,
+    name: pickString(data, ['name', 'displayName']) ?? fallbackName,
+    scope: pickString(data, ['scope']) ?? 'PRIVATE',
+    description: pickString(data, ['description']) ?? '',
+    versions,
+    raw: data,
+  }
+  return out
+}
+
+function normalizeMcpDetail(data: Record<string, unknown>, fallbackName: string): TeamMcpDetail {
+  // 真机形态：详情 data.versions 不存在，版本列表在 allVersions（无 status）；
+  // spec 相关字段（protocol/localServerConfig/...）平铺在 data 顶层。
+  const versionsRaw = (() => {
+    for (const key of ['allVersions', 'versions', 'versionDetails']) {
+      const arr = data[key]
+      if (Array.isArray(arr)) return arr
+    }
+    return []
+  })()
+  const versions = (versionsRaw as unknown[])
+    .map((v) => asRecord(v))
+    .filter((v): v is Record<string, unknown> => v != null)
+    .map((v) => ({
+      version: pickString(v, ['version']) ?? '',
+      status: pickString(v, ['status']) ?? '',
+    }))
+    .filter((v) => v.version)
+  const explicitSpec = asRecord(data.serverSpecification)
+  const spec =
+    explicitSpec ??
+    (() => {
+      // 平铺形态：提取 spec 相关顶层字段组成视图
+      const view: Record<string, unknown> = {}
+      for (const key of [
+        'protocol',
+        'frontProtocol',
+        'localServerConfig',
+        'remoteServerConfig',
+        'endpointSpecification',
+        'versionDetail',
+        'description',
+        'name',
+      ]) {
+        if (data[key] !== undefined) view[key] = data[key]
+      }
+      return Object.keys(view).length > 0 ? view : null
+    })()
+  const out: TeamMcpDetail = {
+    mcpName: pickString(data, ['mcpName', 'name', 'serverName']) ?? fallbackName,
+    description: pickString(data, ['description']) ?? '',
+    versions,
+    serverSpecification: spec,
+    raw: data,
+  }
+  return out
+}
+
 function normalizeConfigSummary(item: unknown): NacosConfigSummary | null {
   if (item == null || typeof item !== 'object') return null
   const record = item as Record<string, unknown>
@@ -459,5 +832,23 @@ function isNotFound(err: NacosClientError): boolean {
     err.statusCode === 404 ||
     err.nacosCode === 404 ||
     /config not exist|config is not exist|配置不存在|配置信息不存在/i.test(msg)
+  )
+}
+
+/** 技能不存在的确定语义（详情接口） */
+function skillMissing(err: NacosClientError): boolean {
+  return (
+    err.statusCode === 404 ||
+    err.nacosCode === 404 ||
+    /skill (not|is not) exist|skillName not exist|技能不存在/i.test(err.message)
+  )
+}
+
+/** MCP 不存在的确定语义（详情接口） */
+function mcpMissing(err: NacosClientError): boolean {
+  return (
+    err.statusCode === 404 ||
+    err.nacosCode === 404 ||
+    /(mcp|server) (not|is not) exist|mcpName not exist|no server/i.test(err.message)
   )
 }

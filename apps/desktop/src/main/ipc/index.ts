@@ -112,6 +112,7 @@ import {
   PermissionProfileRepository,
   ModelProfileRepository,
   McpServerRepository,
+  TeamAssetPinsRepository,
   SkillRepository,
   SettingsRepository,
   UsageLedgerRepository,
@@ -151,6 +152,7 @@ import {
   SkillRegistryService,
   TeamRegistryConfigStore,
   TeamRegistryService,
+  TeamMcpService,
   SettingsService,
   UsageLedgerService,
   RuntimeCompositionService,
@@ -1796,6 +1798,18 @@ function getTeamRegistryService(): TeamRegistryService {
     _teamRegistryService = new TeamRegistryService(new TeamRegistryConfigStore(getDatabase()))
   }
   return _teamRegistryService
+}
+
+let _teamMcpService: TeamMcpService | null = null
+function getTeamMcpService(): TeamMcpService {
+  if (_teamMcpService == null) {
+    _teamMcpService = new TeamMcpService(
+      new TeamRegistryConfigStore(getDatabase()),
+      new McpServerRepository(getDatabase()),
+      new TeamAssetPinsRepository(getDatabase()),
+    )
+  }
+  return _teamMcpService
 }
 
 let _skillRegistryService: SkillRegistryService | null = null
@@ -7429,10 +7443,11 @@ export function registerAllIpcHandlers(): void {
     return {
       slug: result.slug,
       version: result.version,
-      dataId: result.dataId,
+      skillName: result.skillName,
       fileCount: result.fileCount,
       checksum: result.checksum,
       previousRemoteVersion: result.previousRemoteVersion,
+      warnings: result.warnings,
       skipped: result.skipped.map((item) => ({ path: item.path, reason: item.reason })),
     }
   })
@@ -7445,6 +7460,37 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('team-registry:list-updates', async () => {
     const updates = await getSkillRegistryService().listTeamUpdates()
+    return { updates }
+  })
+
+  typedIpcHandle('team-registry:list-mcp', async () => {
+    const servers = await getTeamMcpService().listTeamServers()
+    return { servers }
+  })
+
+  typedIpcHandle('team-registry:publish-mcp', async (req) => {
+    log.info(
+      `team-registry:publish-mcp requested, mcpServerId=${req.mcpServerId}, version=${req.version ?? 'auto-bump'}`,
+    )
+    const result = await getTeamMcpService().publishToTeam(req.mcpServerId, {
+      ...(req.version !== undefined ? { version: req.version } : {}),
+    })
+    return {
+      slug: result.slug,
+      version: result.version,
+      sensitiveKeys: result.sensitiveKeys,
+      previousRemoteVersion: result.previousRemoteVersion,
+    }
+  })
+
+  typedIpcHandle('team-registry:install-mcp', async (req) => {
+    log.info(`team-registry:install-mcp requested, slug=${req.slug}`)
+    const result = await getTeamMcpService().installFromTeam(req.slug)
+    return result
+  })
+
+  typedIpcHandle('team-registry:list-mcp-updates', async () => {
+    const updates = await getTeamMcpService().listTeamUpdates()
     return { updates }
   })
 

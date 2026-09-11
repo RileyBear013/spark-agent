@@ -28,6 +28,7 @@ import { useRefreshable } from '../hooks/useRefreshable'
 import { useApp } from '../AppContext'
 import './McpView.less'
 import { McpFilterPopover, SCOPES, type StatusFilter } from './McpFilterPopover'
+import { McpTeamPublishModal, TeamMcpSection } from './McpTeamMarket'
 import { PluginMarketplaceView } from './PluginMarketplaceView'
 import { CustomToolsSection } from './CustomToolsSection'
 import {
@@ -279,6 +280,7 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
   const { invoke: createMcp } = useIpcInvoke('mcp:create')
   const { invoke: updateMcp } = useIpcInvoke('mcp:update')
   const { invoke: deleteMcp } = useIpcInvoke('mcp:delete')
+  const [teamPublishTarget, setTeamPublishTarget] = useState<McpServerItem | null>(null)
   const { invoke: authorizeMcp } = useIpcInvoke('mcp:authorize')
   const { invoke: deauthorizeMcp } = useIpcInvoke('mcp:deauthorize')
   const { invoke: getAuthStatus } = useIpcInvoke('mcp:auth-status')
@@ -560,6 +562,7 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
           <CustomToolsSection />
         ) : (
           <>
+            <TeamMcpSection onInstalled={refresh} />
             {/* ── 卡片网格 ─────────────────────────────────────────────── */}
             <div className="mv_grid_wrap">
               {loading && derived.length === 0 ? (
@@ -585,6 +588,9 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
                         onToggle={(next) => void handleToggle(item, next)}
                         onEdit={() => openEdit(item)}
                         onDelete={() => void handleDelete(item)}
+                        onPublishTeam={
+                          item.scope === 'user' ? () => setTeamPublishTarget(item) : undefined
+                        }
                         onAuthorize={() => void handleAuthorize(item)}
                         onDeauthorize={() => void handleDeauthorize(item)}
                         authorizing={authorizingId === item.id}
@@ -624,6 +630,13 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
       >
         <McpForm draft={draft} setDraft={setDraft} error={draftError} />
       </Drawer>
+
+      <McpTeamPublishModal
+        open={teamPublishTarget != null}
+        server={teamPublishTarget}
+        onClose={() => setTeamPublishTarget(null)}
+        onPublished={refresh}
+      />
     </>
   )
 }
@@ -635,6 +648,7 @@ function McpCard({
   onToggle,
   onEdit,
   onDelete,
+  onPublishTeam,
   onAuthorize,
   onDeauthorize,
   authorizing,
@@ -643,6 +657,7 @@ function McpCard({
   onToggle: (next: boolean) => void
   onEdit: () => void
   onDelete: () => void
+  onPublishTeam: (() => void) | undefined
   onAuthorize: () => void
   onDeauthorize: () => void
   authorizing: boolean
@@ -712,6 +727,11 @@ function McpCard({
               {server.authStatus === 'failed' ? '重新授权' : '连接授权'}
             </Button>
           ))}
+        {onPublishTeam != null && (
+          <Tooltip title="发布到团队">
+            <Button type="text" size="small" icon={<Icons.Upload />} onClick={onPublishTeam} />
+          </Tooltip>
+        )}
         <Tooltip title="编辑">
           <Button type="text" size="small" icon={<Icons.Edit />} onClick={onEdit} />
         </Tooltip>

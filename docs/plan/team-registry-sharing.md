@@ -173,8 +173,8 @@ installed_at、published_version、published_checksum、published_at。
 | 期 | 内容 | 状态 |
 |---|---|---|
 | M1 | 配置 UI + Nacos 客户端 + 技能推拉 + 版本比对 + pins 表 | 代码完成；写链路已真机验证；**待按原生 zip API 重构推拉（M1.5）** |
-| M1.5 | 技能推拉重构为原生 AI Skill zip 上传/下载（替代配置中心信封载荷） | 待开发（联调结论驱动的架构修正） |
-| M2 | MCP 发布/安装（映射 AI MCP 资源，payload 结构已实测） | 待开发 |
+| M1.5 | 技能推拉重构为原生 AI Skill zip 上传/下载（替代配置中心信封载荷） | 已完成（2026-09-11，真机探针通过） |
+| M2 | MCP 发布/安装（映射 AI MCP 资源，payload 结构已实测） | 已完成（2026-09-11，真机探针通过） |
 | M3 | 工作流团队库（导入升级为按版本 upsert） | 待开发 |
 | M4 | 子应用团队库（复用 sub_app_releases 快照作 payload） | 待开发 |
 | M5 | 更新提醒（启动/手动刷新比对）→ 实时 listen 推送 | 待开发 |
@@ -220,6 +220,23 @@ installed_at、published_version、published_checksum、published_at。
 - **孤儿行防御**：MCP/Skill 创建失败可能留下无版本的孤儿行并卡死列表（MCP 已实测复现），
   客户端创建后必须回读校验，失败即按 name 删除清理。
 
+## M1.5 / M2 实施记录（2026-09-11）
+
+- **客户端能力**：NacosClient 支持登录（v3/auth/user/login，token 顶层返回）、form/multipart/
+  二进制三种载荷；原生 Skill API（precheck/upload/submit/publish/online/scope/download/delete）
+  与原生 MCP API（list/get/draft/submit/publish/online/delete）。
+- **zip 零依赖**：team-registry/zip.ts 手写 STORE 构造 + STORE/DEFLATE 解析
+  （node:zlib inflateRawSync），确定性输出；stripZipCommonRoot 处理服务端下载包的
+  `<skillName>/` 顶层目录包裹。
+- **发布链路**（技能）：frontmatter 写版本 → zip → precheck（校验 skillName/targetVersion
+  与本地意图一致）→ upload（exists 时 overwrite）→ submit → publish → online（降级 warning）→
+  scope=PUBLIC（失败降级 warning 并在结果中展示）。
+- **MCP 链路**：draft → 回读校验（孤儿行防御，失败即删）→ submit → publish → online；
+  本地 config_json ↔ serverSpecification 双向映射（stdio/http/sse，mcp-mapping.ts）。
+- **M2 UI**：MCP 管理页卡片「发布到团队」入口 + 顶部「团队 MCP」折叠区块（安装/更新徽标）；
+  发布确认弹窗列出敏感命名变量键（只报键名不报值）。
+- **IPC**：team-registry:list-mcp / publish-mcp / install-mcp / list-mcp-updates。
+
 ## 真机联调记录（2026-09-11）
 
 - 登录：`v3/auth/user/login`（form），accessToken TTL 5h；测试机凭据 nacos/nacos（测试环境）。
@@ -230,3 +247,18 @@ installed_at、published_version、published_checksum、published_at。
   /mcp/list 全员 404」，按 mcpName DELETE 清理后恢复 ✅。
 - 探针数据（spark-probe-zip / spark-probe-test / spark-probe-mcp）验证后已全部删除，
   注册中心还原为空。
+
+### M1.5/M2 集成探针补充（2026-09-11，vitest TEAM_REGISTRY_LIVE=1，2/2 通过）
+
+- **登录响应**：accessToken 在顶层（与 globalAdmin/username/tokenTtl 平级），data 为空对象。
+- **技能下载 zip**：内容为 DEFLATE 压缩且带 `<skillName>/` 顶层目录——安装/解析侧必须
+  stripZipCommonRoot（上传平铺 zip 服务端可正常解析）。
+- **MCP 详情**：版本列表字段是 `allVersions`（元素无 status，状态在 /mcp/versions）；
+  spec 字段平铺在 data 顶层（protocol/localServerConfig/remoteServerConfig...），
+  `serverSpecification` 键不存在——客户端做了双形态兼容。
+- **MCP 列表**：条目主键是 `name`（非 mcpName）；已发布最高版本在 `latestPublishedVersion`
+  （草稿态为 null），`version` 是当前编辑版本。
+- 探针（spark-live-probe / spark-live-probe-mcp / diag 用例）用后即删，已验证清理。
+- 未决：本地 vitest 全量受环境牵制（better-sqlite3 于当日 09:02 被 Electron ABI 重编译，
+  Node 侧 SQLite 测试挂载失败；属环境状态非代码回归），本次验证范围为 team-registry /
+  skill-registry 非 DB 单测 21/21 与真机探针 2/2。
