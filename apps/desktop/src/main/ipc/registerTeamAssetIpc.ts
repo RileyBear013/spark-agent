@@ -29,7 +29,7 @@ import {
 import type { WorkflowItem } from '@spark/storage'
 import type { SubAppManifest } from '@spark/protocol'
 
-import { getDatabase } from './db.js'
+import { getDatabase } from '../db.js'
 import { typedIpcHandle } from './typed-ipc.js'
 import { SparkError } from '@spark/shared'
 
