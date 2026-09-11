@@ -114,9 +114,12 @@
   M1 已实现的信封推拉在 M1.5 重构为原生 API。
 - **MCP：完全走原生 AI MCP 资源**——`serverSpecification` 与本地 config_json 结构吻合，
   M2 按上表已验证的 draft→publish→online 链路实现。
-- **工作流 / 子应用：配置中心信封**（无原生类型）——`group=SPARK_TEAM`，
+- **工作流 / 子应用 / 平台 Agent：配置中心信封**（无匹配的原生类型）——`group=SPARK_TEAM`，
   `dataId=<assetType>/<slug>`，`spark.team.asset.v1` 信封（semver + checksum）。
   Nacos 配置中心原生保留每次发布的 revision 历史，构成版本链。
+  平台 Agent **不走**原生 Agent 资源的原因见下节：SparkWork Agent 是配置型
+  （prompt + 技能/MCP/工作流/模型绑定），无网络端点，不满足 A2A AgentCard 的
+  可调用服务语义，硬套会产生假 URL 污染公司的 A2A 服务注册表。
 
 ### 资产信封（spark.team.asset.v1）
 
@@ -138,7 +141,7 @@
 版本判定（四态）：`up-to-date`（checksum 相同）/ `remote-newer`（semver 远端高）/
 `local-modified`（本地内容与安装时 checksum 不一致，已分叉）/ `local-newer`（本地 semver 更高）。
 
-### 本地跟踪表 `team_asset_pins`（migration 093）
+### 本地跟踪表 `team_asset_pins`（migration 098）
 
 记录每项团队资产的安装/发布锚点：asset_type、slug、installed_version、installed_checksum、
 installed_at、published_version、published_checksum、published_at。
@@ -149,6 +152,45 @@ installed_at、published_version、published_checksum、published_at。
 - token/密码只进 keystore，永不进聊天、日志与 IPC 响应（config-get 只回 `hasPassword`）。
 - 推送前在 UI 展示变更摘要（版本、文件数、checksum）；写团队注册中心的操作一律经用户点击触发。
 - 团队注册中心写操作失败显式报错，不做静默重试写。
+
+## Nacos 原生资源全貌与「是否需要改 Nacos」评估（2026-09-11 第二轮真机联调）
+
+控制台菜单 + API 实测确认，该 Nacos（v3.3.0-SNAPSHOT，standalone）原生支持五类 AI 资源：
+
+| 原生资源 | 状态 | 数据模型（实测） | 对 SparkWork 资产的适配判定 |
+|---|---|---|---|
+| Skill | 稳定（new） | SKILL.md frontmatter + zip 多文件 + 版本生命周期 + 下载量 | ✅ 技能直用（M1.5 已实现） |
+| Prompt | 稳定（new） | prompt 模板资源（列表端点已通，未深探） | 预留：平台 Prompt 模板共享可用（暂无此需求） |
+| Agent | 稳定 | **A2A 0.3 AgentCard 注册**：元数据（name/展示名/图标/标签/provider/扩展字段）→ 版本 → 多协议配置（完整 AgentCard 粘贴，自动生成声明端点）；`callInterfaces[].nativeDescriptor` 即完整 A2A Card；运行时端点挂 naming 服务（group `agent-endpoints`，服务名 `rad-<agentName>-<protocol>`），声明端点 + 运行时端点双源（`endpointSourceOrder`） | ❌ 平台 Agent 不适配：SparkWork Agent 是配置型（prompt + 绑定），无网络端点、无可调用接口；A2A 资源是给「独立运行、可被发现的 Agent 服务」用的。平台 Agent 共享走配置中心信封 |
+| AgentSpec | Beta | **AGENTS.md + 资源文件**的包格式（与 SKILL.md 包完全同构），版本生命周期（draft→submit→publish→online 已实测 200）、上传、下载量统计、权限管理 | ◐ 可选增强：把平台 Agent 定义导出为 AGENTS.md 包发布（跨平台可读——Claude Code 等也认 AGENTS.md），白拿版本管理/下载量；Beta 阶段不作为依赖，列为后期可选项 |
+| MCP | 稳定 | serverSpecification + 生命周期 | ✅ MCP 直用（M2 已实现） |
+
+端点形态补充（agentspec 实测）：生命周期动作用「集合层 + query 参数」形态——
+`POST /v3/console/ai/agentspecs/submit|publish|online?namespaceId&agentSpecName&version`（form/空体均可，200），
+删除 `DELETE /v3/console/ai/agentspecs?agentSpecName=&namespaceId=`（200）；
+与 skill/mcp 的「资源层 + form」形态并存，客户端按资源类型分别适配。
+
+**配置中心单条大小上限（实测）**：100KB / 512KB / 1MB 写入成功；2MB → `413 Content Too Large`。
+结论：子应用快照（发布巡检中心 v20 源码数百 KB）整包可存；超限时先 gzip+base64
+（HTML 压缩比 4~8x，净效果仍缩小），再不够则按调研结论引入 MinIO 存字节。
+
+### 结论：不需要改 Nacos 源码（fork 成本 > 收益）
+
+用户已确认该 Nacos 为闲置服务器上的自部署开源版、允许调整，但评估后**建议不改源码**：
+
+1. **四类资产都有合适的存储**：技能/MCP 有原生类型（含版本、审核、下载量、共享范围），
+   工作流/子应用/Agent 用配置中心信封（原生 revision 历史即版本链 + listen 推送 + 命名空间隔离）。
+2. **原生类型的真正价值是生态语义**（A2A 互通、跨系统 MCP 发现），工作流/子应用/平台 Agent
+   是 SparkWork 私有概念，无跨系统互通需求——为它们在 Nacos 加自定义资源类型，收益只有
+   「控制台里能看到」，而团队真正的店面是 SparkWork 客户端的团队商店聚合页（M4）。
+3. **fork 长期负债**：3.3.0-SNAPSHOT 本身是快照版；改源码意味着自编译部署 + 每次升级 rebase
+   补丁，运维成本持续，与「闲置服务器轻量共用」的定位不符。
+
+允许调整的正确用法（均为**配置/部署层调整**，非改码）：若子应用包超 1MB 上限，调
+Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上文 gzip 方案；auth 接入
+公司统一认证、standalone 升集群，均属部署演进，随时可做、不影响客户端协议。
+
+
 
 ## 替代方案调研结论（2026-09-11，Docker 自部署资产商店）
 
@@ -175,8 +217,9 @@ installed_at、published_version、published_checksum、published_at。
 | M1 | 配置 UI + Nacos 客户端 + 技能推拉 + 版本比对 + pins 表 | 代码完成；写链路已真机验证；**待按原生 zip API 重构推拉（M1.5）** |
 | M1.5 | 技能推拉重构为原生 AI Skill zip 上传/下载（替代配置中心信封载荷） | 已完成（2026-09-11，真机探针通过） |
 | M2 | MCP 发布/安装（映射 AI MCP 资源，payload 结构已实测） | 已完成（2026-09-11，真机探针通过） |
-| M3 | 工作流团队库（导入升级为按版本 upsert） | 待开发 |
-| M4 | 子应用团队库（复用 sub_app_releases 快照作 payload） | 待开发 |
+| M3 | 工作流团队库（导入升级为按版本 upsert）+ 平台 Agent 团队库（同走信封，assetType 增枚举） | 待开发 |
+| M3.5（可选） | 平台 Agent 导出为 AGENTS.md 包发布到原生 AgentSpec（Beta，跨平台可读） | 待评估 |
+| M4 | 子应用团队库（复用 sub_app_releases 快照作 payload；超 1MB 先 gzip+base64） | 待开发 |
 | M5 | 更新提醒（启动/手动刷新比对）→ 实时 listen 推送 | 待开发 |
 
 ## M1 实施清单
