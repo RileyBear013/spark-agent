@@ -1,6 +1,6 @@
 # 团队注册中心（Nacos）共享方案 — Skills / MCP / 工作流 / 子应用的推拉与版本管理
 
-> 状态: 实施中 | 最后核对: 2026-09-11
+> 状态: 实施中 | 最后核对: 2026-09-12
 
 ## 背景与目标
 
@@ -416,3 +416,32 @@ Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上�
 - 迁移：5 条资产（1 工作流 + 4 应用）已重发为原生 AgentSpec（PUBLIC，v0.0.2，
   checksum 字节级校验通过），5 条 SPARK_TEAM 裸配置已删除清零
 - 已知边界：V2 多文件子应用不支持（发布入口明确报错）；上游 AgentSpec 为 Beta
+
+## 2026-09-12 追加：包格式 v2（AGENTS.md 完整介绍）与 Nacos 控制台补丁
+
+用户实测反馈：控制台 AgentSpec 详情页「AGENTS.md 预览区空白（暂无内容）」、资源文件
+只有文件名没有内容、工作流/应用/助手混在一个列表、卡片介绍被截断。逐项核查与处理：
+
+### 1. 包格式 v2（buildAgentSpecPackage）
+- 控制台预览区**只渲染名为 `AGENTS.md` 的资源文件**（真机实测，manifest.json 不进预览）。
+  包内新增 `AGENTS.md`：完整未截断介绍 + 元数据表（类型/团队版本/发布者/更新时间/
+  校验/安装名称）+ 包内文件说明 + 安装方式，控制台以 markdown 完整渲染。
+- `manifest.json`（含 x-spark）与 `payload.json` 不变；checksum 仅覆盖 payload，
+  AGENTS.md 不影响信封指纹与 pins 连续性。
+- 5 条资产已删除旧条目并以 v2 格式重新发布（全新 0.0.1，PUBLIC）；回读三方校验：
+  pins.published_checksum == 远端 x-spark.checksum == payload 重算 checksum，逐条一致。
+
+### 2. Nacos 控制台补丁（console-ui-next 分叉，基线 3.3.0-beta-develop）
+分叉位置 `D:\harness平台\nacos-console-fork\nacos`（稀疏克隆）。改动：
+- **分类展示**：侧边栏新增「Spark 团队资产」分组（Spark 应用 / Spark 工作流 / Spark 助手，
+  深链 `/agentspec?category=app|workflow|agent`）；列表页新增分类 tab（带计数），
+  基于 `spark-<category>-` 命名前缀客户端过滤（服务端 pageSize=500 全量拉取）；
+  卡片增加分类角标与图标、介绍 clamp-2→3。侧边栏 navTo/isActive 改为查询参数感知。
+- **文件查看器**：上游 ResourceViewer（文件树 + Monaco + 每文件复制/下载）在本环境
+  挂载时容器 0 尺寸导致编辑器卡 5px 不渲染；修复为宿主 ResizeObserver 测量显式像素
+  高度 + onMount 多时机强制 layout()。真机验证 manifest.json 全文渲染、文件可切换。
+- 兼容性：console-ui-next 的 API 层与本服务器（3.3.0-SNAPSHOT）端点一致，实测可用；
+  构建产物 `spark-console-next-patch.zip`（108 文件，STORE zip，内容字节级明文验证），
+  部署方式见交付说明（替换 nacos 部署目录 console 模块 static/next 后重启）。
+- 残留边界：上游无 zip 下载端点（安装走版本内容回读，不受影响）；「助手」类资产
+  尚未发布过条目（客户端已支持 agent 类型发布，发布后自动归入对应分类）。

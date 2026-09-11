@@ -71,6 +71,54 @@ const TYPE_LABEL: Record<AgentSpecAssetType, string> = {
 const MAX_DESCRIPTION = 200
 
 /**
+ * 构建 AGENTS.md（控制台预览区按 markdown 渲染的唯一入口，真机实测：
+ * 只渲染名为 AGENTS.md 的资源文件，manifest.json 不进预览）。
+ * 携带完整未截断介绍 + 元数据表 + 包内文件说明，保证「介绍能看全」。
+ */
+export function buildAgentSpecReadme(
+  envelope: TeamAssetEnvelope,
+  agentSpecName: string,
+  fullDescription: string,
+): string {
+  const updated = envelope.updatedAt ? envelope.updatedAt.slice(0, 19).replace('T', ' ') : '—'
+  const checksumShort = envelope.checksum.slice(0, 16)
+  return [
+    '# ' + envelope.name,
+    '',
+    '> SparkWork ' + TYPE_LABEL[assetTypeLabel(envelope.assetType)] + ' · 团队共享资产',
+    '',
+    fullDescription || '（暂无介绍）',
+    '',
+    '## 基本信息',
+    '',
+    '| 项 | 值 |',
+    '| --- | --- |',
+    '| 资产类型 | ' + TYPE_LABEL[assetTypeLabel(envelope.assetType)] + ' |',
+    '| 团队版本 | ' + envelope.version + ' |',
+    '| 发布者 | ' + (envelope.author || '—') + ' |',
+    '| 更新时间 | ' + updated + ' |',
+    '| 内容校验 | ' + checksumShort + ' |',
+    '| 安装名称 | ' + agentSpecName + ' |',
+    '',
+    '## 包内文件',
+    '',
+    '- `manifest.json` — 身份与元数据（含 x-spark 扩展字段）',
+    '- `payload.json` — 完整载荷数据',
+    '',
+    '## 安装方式',
+    '',
+    '在 SparkWork 客户端对应管理页（工作流 / Agent / 子应用）的「团队」区块一键安装；',
+    '安装后为草稿/停用态，确认可用后手动启用。版本更新同样在团队区块内比对与一键升级。',
+    '',
+  ].join('\n')
+}
+
+function assetTypeLabel(t: string): 'workflow' | 'agent' | 'app' {
+  if (t === 'workflow' || t === 'agent' || t === 'app') return t
+  throw new Error('AgentSpec 承载不支持该资产类型：' + t)
+}
+
+/**
  * 构建上传包：manifest.json（含 x-spark 信封元数据）+ payload.json。
  * STORE zip 确定性输出；zip 体积上限沿用信封限制（发布前拦截）。
  */
@@ -110,6 +158,7 @@ export function buildAgentSpecPackage(envelope: TeamAssetEnvelope): {
     },
   }
   const zip = buildZip([
+    { path: 'AGENTS.md', content: Buffer.from(buildAgentSpecReadme(envelope, agentSpecName, fullDesc), 'utf-8') },
     { path: 'manifest.json', content: Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8') },
     { path: 'payload.json', content: Buffer.from(JSON.stringify(envelope.payload), 'utf-8') },
   ])
