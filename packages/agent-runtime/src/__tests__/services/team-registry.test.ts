@@ -51,7 +51,10 @@ describe('team-registry types', () => {
     }
     const parsed = parseTeamAssetEnvelope(JSON.stringify(envelope))
     expect(parsed?.slug).toBe('demo')
-    expect(parsed?.payload.files[0]?.path).toBe('SKILL.md')
+    expect(parsed?.payload.kind).toBe('skill-files')
+  if (parsed?.payload.kind === 'skill-files') {
+    expect(parsed.payload.files[0]?.path).toBe('SKILL.md')
+  }
   })
 
   it('parseTeamAssetEnvelope：损坏/篡改/缺字段 → null', () => {

@@ -306,6 +306,7 @@ import { registerFilePreviewIpc } from './registerFilePreviewIpc.js'
 import { registerFileOperationsIpc } from './registerFileOperationsIpc.js'
 import { registerPromptLibraryPackageIpc } from './registerPromptLibraryPackageIpc.js'
 import { registerWorkflowBundleIpc } from './registerWorkflowBundleIpc.js'
+import { registerTeamAssetIpc } from './registerTeamAssetIpc.js'
 import { registerPastedTextIpc } from './registerPastedTextIpc.js'
 import { registerSessionImageOptimizerIpc } from './registerSessionImageOptimizerIpc.js'
 import { createComputerUseMcpProvider } from '../services/computer-use/ComputerUseMcpProvider.js'
@@ -7833,7 +7834,7 @@ export function registerAllIpcHandlers(): void {
     log.info(`team-registry:config-history requested, slug=${req.slug}`)
     const client = await getTeamRegistryService().client()
     if (!client) return { history: [] }
-    const raw = await client.listConfigHistory(`skill/${req.slug}`)
+    const raw = await client.listConfigHistory(`skill:${req.slug}`)
     return {
       history: raw.map((item) => ({
         ...(item.modifyTimestamp !== undefined ? { modifiedAt: item.modifyTimestamp } : {}),
@@ -7843,6 +7844,22 @@ export function registerAllIpcHandlers(): void {
   }))
 
 
+
+  // ─── Team Registry 信封资产（工作流/Agent/子应用 推拉，M3/M4） ──────────
+  // 放在 team-registry handler 块之后：依赖上方声明的 assertWorkflowGraphValid 闭包
+  registerTeamAssetIpc({
+    assertWorkflowGraphValid,
+    refreshAgentRuntime: (agentId, prompt, skillIds, disabledSkillIds) => {
+      const composition = getRuntimeCompositionService()
+      if (prompt.trim().length > 0) {
+        composition.updatePromptConfig('agent', agentId, { enabled: true, content: prompt })
+      }
+      if (skillIds.length > 0 || disabledSkillIds.length > 0) {
+        composition.updateSkillConfig('agent', agentId, skillIds, disabledSkillIds)
+      }
+    },
+    pushConfigChanged,
+  })
   // ─── Installable Skill Catalog（内置可安装技能卡片） ───────────────────
 
   typedIpcHandle('skill:list-installable', async () => {

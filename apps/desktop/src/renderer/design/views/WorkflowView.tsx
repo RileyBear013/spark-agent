@@ -78,6 +78,7 @@ import type { WorkflowTemplate } from './workflow/workflow-templates'
 import { WorkflowBundleImportButton } from './workflow/WorkflowBundleImportButton'
 import { WorkflowBundlePanelButton } from './workflow/WorkflowBundlePanelButton'
 import { WorkflowExportModal } from './workflow/WorkflowExportModal'
+import { TeamAssetPublishModal, TeamAssetSection } from './TeamAssetMarket'
 import {
   Button,
   Dropdown,
@@ -230,6 +231,8 @@ function WorkflowViewInner() {
   const { invoke: listRules } = useIpcInvoke('rules:list')
   const { invoke: listAgents } = useIpcInvoke('agent:list')
 
+  // 团队发布弹窗(M3):null = 关闭
+  const [teamPublishFor, setTeamPublishFor] = useState<WorkflowItem | null>(null)
   // 工作流导出弹窗(格式二选一:完整包 .sparkflow / 兼容 JSON),null = 关闭
   const [exportModal, setExportModal] = useState<{ ids: string[] } | null>(null)
 
@@ -949,6 +952,7 @@ function WorkflowViewInner() {
             </Button>
           </div>
         </div>
+        <TeamAssetSection assetType="workflow" onInstalled={() => void refresh()} />
         {workflows.length > 0 ? (
           <>
             {selectionMode && visibleSelectedIds.size > 0 && (
@@ -992,6 +996,7 @@ function WorkflowViewInner() {
                   onToggleSelect={() => toggleSelect(workflow.id)}
                   onOpen={() => openWorkflow(workflow)}
                   onExport={() => exportWorkflowIds([workflow.id])}
+                  onPublishToTeam={() => setTeamPublishFor(workflow)}
                   onDelete={() =>
                     confirmDeleteWorkflow(workflow.name, () => void performDelete(workflow.id))
                   }
@@ -1039,6 +1044,15 @@ function WorkflowViewInner() {
           workflowIds={exportModal?.ids ?? []}
           workflows={workflows}
           onClose={() => setExportModal(null)}
+        />
+        <TeamAssetPublishModal
+          key={teamPublishFor?.id ?? 'closed'}
+          open={teamPublishFor != null}
+          assetType="workflow"
+          localId={teamPublishFor?.id ?? null}
+          localName={teamPublishFor?.name ?? ''}
+          onClose={() => setTeamPublishFor(null)}
+          onPublished={() => void refresh()}
         />
       </div>
     )
@@ -1310,6 +1324,7 @@ function WorkflowListCard({
   onToggleSelect,
   onOpen,
   onExport,
+  onPublishToTeam,
   onDelete,
 }: {
   workflow: WorkflowItem
@@ -1319,6 +1334,7 @@ function WorkflowListCard({
   onToggleSelect: () => void
   onOpen: () => void
   onExport: () => void
+  onPublishToTeam: () => void
   onDelete: () => void
 }) {
   const visibleNodes = workflow.graph.nodes.slice(0, 4)
@@ -1342,6 +1358,15 @@ function WorkflowListCard({
           </span>
         ),
         onClick: onExport,
+      },
+      {
+        key: 'team-publish',
+        label: (
+          <span className="agent-context-menu-item">
+            <Icons.Users size={14} /> 发布到团队
+          </span>
+        ),
+        onClick: onPublishToTeam,
       },
       {
         key: 'delete',

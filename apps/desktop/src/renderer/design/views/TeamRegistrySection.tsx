@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button, Input, InputPassword } from '@lobehub/ui'
 import type { TeamRegistryConfigSnapshotDto } from '@spark/protocol'
 import { useIpcInvoke } from '../hooks/useIpc'
+import type { TeamRegistryAssetTypeDto } from '@spark/protocol'
 import { useToast } from '../components/Toast'
 import './TeamRegistrySection.less'
 
@@ -189,6 +190,8 @@ export function TeamRegistrySection() {
         </Button>
       </div>
 
+      {snapshot?.configured ? <TeamAssetOverview /> : null}
+
       <div className="team-registry-note">
         说明：发布 / 更新团队资产会在 Nacos 配置中心留下完整历史（group
         SPARK_TEAM）；所有团队写操作都由你在界面上明确触发。
@@ -200,4 +203,83 @@ export function TeamRegistrySection() {
 function describeError(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
+}
+
+// ─── 团队资产总览（五类资产的可更新计数；入口在各管理页） ───────────────
+
+const OVERVIEW_TYPES: Array<{
+  assetType: 'skill' | 'mcp' | TeamRegistryAssetTypeDto
+  label: string
+  where: string
+}> = [
+  { assetType: 'skill', label: '技能', where: '技能商店 → 团队源' },
+  { assetType: 'mcp', label: 'MCP', where: 'MCP 管理 → 团队 MCP' },
+  { assetType: 'workflow', label: '工作流', where: 'Workflows → 团队工作流' },
+  { assetType: 'agent', label: 'Agent', where: 'Agent 管理 → 团队 Agent' },
+  { assetType: 'app', label: '应用', where: '子应用 → 团队应用' },
+]
+
+function TeamAssetOverview() {
+  const { invoke: listSkillUpdates } = useIpcInvoke('team-registry:list-updates')
+  const { invoke: listMcpUpdates } = useIpcInvoke('team-registry:list-mcp-updates')
+  const { invoke: listAssetUpdates } = useIpcInvoke('team-registry:list-asset-updates')
+  const [counts, setCounts] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      const entries = await Promise.all(
+        OVERVIEW_TYPES.map(async (t) => {
+          try {
+            if (t.assetType === 'skill') {
+              const res = await listSkillUpdates({})
+              return [t.assetType, res.updates.filter((u) => u.state === 'remote-newer').length] as const
+            }
+            if (t.assetType === 'mcp') {
+              const res = await listMcpUpdates({})
+              return [t.assetType, res.updates.filter((u) => u.state === 'remote-newer').length] as const
+            }
+            const res = await listAssetUpdates({ assetType: t.assetType })
+            return [t.assetType, res.updates.filter((u) => u.state === 'remote-newer').length] as const
+          } catch {
+            return [t.assetType, -1] as const
+          }
+        }),
+      )
+      if (!cancelled) setCounts(Object.fromEntries(entries))
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [listSkillUpdates, listMcpUpdates, listAssetUpdates])
+
+  return (
+    <div className="team-registry-overview" role="group" aria-label="团队资产总览">
+      <span className="team-registry-overview__title">团队资产</span>
+      {OVERVIEW_TYPES.map((t) => {
+        const count = counts[t.assetType]
+        return (
+          <span
+            key={t.assetType}
+            className={
+              'team-registry-overview__chip' +
+              (count == null ? '' : count > 0 ? ' is-updatable' : ' is-clear')
+            }
+            title={t.where}
+          >
+            {t.label}
+            {count == null
+              ? '…'
+              : count < 0
+                ? '不可用'
+                : count > 0
+                  ? '可更新 ' + count
+                  : '已是最新'}
+          </span>
+        )
+      })}
+      <span className="team-registry-overview__hint">入口：技能商店 / MCP 管理 / Workflows / Agent 管理 / 子应用 对应的「团队」区块</span>
+    </div>
+  )
 }

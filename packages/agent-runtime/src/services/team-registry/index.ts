@@ -29,8 +29,20 @@ import {
   computeSkillFilesChecksum,
   parseTeamAssetEnvelope,
   type TeamAssetEnvelope,
+  type TeamAssetType,
   type TeamSkillFile,
 } from './types.js'
+export {
+  TeamAssetService,
+  slugifyAssetName,
+  type TeamAssetPort,
+  type TeamAssetBuildResult,
+  type TeamAssetListItem,
+  type TeamAssetUpdateInfo,
+  type TeamAssetPublishResult,
+  type TeamAssetInstallResult,
+  type EnvelopeAssetType,
+} from './asset-service.js'
 
 export { NacosClient, TEAM_NACOS_GROUP } from './nacos-client.js'
 export type {
@@ -188,13 +200,14 @@ export class TeamRegistryService {
 
   /** dataId 规则：`<assetType>/<slug>` */
   static dataIdFor(assetType: string, slug: string): string {
-    return `${assetType}/${slug}`
+    // Nacos dataId 非法字符含 /（真机实测 400）：用 : 分隔
+    return `${assetType}:${slug}`
   }
 
   /** 列出远端某类资产的全部信封（解析失败/校验不过的条目跳过） */
-  async listEnvelopes(assetType: 'skill' | 'mcp' | 'workflow' | 'app'): Promise<TeamAssetEnvelope[]> {
+  async listEnvelopes(assetType: TeamAssetType): Promise<TeamAssetEnvelope[]> {
     const client = await this.requireClient()
-    const summaries = await client.listConfigs({ dataIdPrefix: `${assetType}/` })
+    const summaries = await client.listConfigs({ dataIdPrefix: `${assetType}:` })
     const envelopes: TeamAssetEnvelope[] = []
     for (const summary of summaries) {
       const config = await client.getConfig(summary.dataId)
@@ -206,10 +219,7 @@ export class TeamRegistryService {
   }
 
   /** 读取单个信封；不存在或损坏返回 null */
-  async getEnvelope(
-    assetType: 'skill' | 'mcp' | 'workflow' | 'app',
-    slug: string,
-  ): Promise<TeamAssetEnvelope | null> {
+  async getEnvelope(assetType: TeamAssetType, slug: string): Promise<TeamAssetEnvelope | null> {
     if (!slug || slug.includes('/') || slug.includes('\\') || slug.includes('..')) {
       throw new Error(`非法的资产 slug：${slug}`)
     }
@@ -238,10 +248,7 @@ export class TeamRegistryService {
   }
 
   /** 删除远端信封（撤回发布；调用方必须先取得用户确认） */
-  async deleteEnvelope(
-    assetType: 'skill' | 'mcp' | 'workflow' | 'app',
-    slug: string,
-  ): Promise<boolean> {
+  async deleteEnvelope(assetType: TeamAssetType, slug: string): Promise<boolean> {
     const client = await this.requireClient()
     return client.deleteConfig(TeamRegistryService.dataIdFor(assetType, slug))
   }

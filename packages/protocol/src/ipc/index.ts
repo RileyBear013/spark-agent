@@ -2733,6 +2733,76 @@ export interface TeamRegistryListMcpUpdatesResponse {
   updates: TeamRegistryMcpUpdateItemDto[]
 }
 
+// ─── Team Registry 信封资产（工作流/平台 Agent/子应用 推拉，M3/M4） ────────
+
+/** 信封型团队资产类型（skill/mcp 走 Nacos 原生资源，不经此组通道） */
+export type TeamRegistryAssetTypeDto = 'workflow' | 'agent' | 'app'
+
+export interface TeamRegistryAssetListItemDto {
+  slug: string
+  name: string
+  description: string
+  version: string
+  author: string
+  updatedAt: string
+}
+
+export interface TeamRegistryListAssetsRequest {
+  assetType: TeamRegistryAssetTypeDto
+}
+
+export interface TeamRegistryListAssetsResponse {
+  items: TeamRegistryAssetListItemDto[]
+}
+
+export interface TeamRegistryPublishAssetRequest {
+  assetType: TeamRegistryAssetTypeDto
+  /** 本地实体 id（工作流 id / agent id / 子应用 id） */
+  localId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishAssetResponse {
+  slug: string
+  name: string
+  version: string
+  previousRemoteVersion: string | null
+  /** 发布确认提示（引用为机器本地 id、V2 限制等） */
+  warnings: string[]
+}
+
+export interface TeamRegistryInstallAssetRequest {
+  assetType: TeamRegistryAssetTypeDto
+  slug: string
+}
+
+export interface TeamRegistryInstallAssetResponse {
+  slug: string
+  name: string
+  version: string
+  localId: string
+  updatedExisting: boolean
+}
+
+export interface TeamRegistryAssetUpdateItemDto {
+  slug: string
+  name: string
+  localId: string | null
+  localVersion: string | null
+  remoteVersion: string
+  /** not-installed | up-to-date | remote-newer | local-newer | local-modified | version-equal-content-differs | remote-missing */
+  state: string
+}
+
+export interface TeamRegistryListAssetUpdatesRequest {
+  assetType: TeamRegistryAssetTypeDto
+}
+
+export interface TeamRegistryListAssetUpdatesResponse {
+  updates: TeamRegistryAssetUpdateItemDto[]
+}
+
 // ─── Installable Skill Catalog（内置可安装技能卡片） ─────────────────────
 
 /** 可安装技能的来源（与 InstallableSkillSource 运行时定义对齐） */
@@ -7004,6 +7074,22 @@ export interface IpcChannelMap
     TeamRegistryListMcpUpdatesRequest,
     TeamRegistryListMcpUpdatesResponse
   ]
+  'team-registry:list-assets': [
+    TeamRegistryListAssetsRequest,
+    TeamRegistryListAssetsResponse
+  ],
+  'team-registry:publish-asset': [
+    TeamRegistryPublishAssetRequest,
+    TeamRegistryPublishAssetResponse
+  ],
+  'team-registry:install-asset': [
+    TeamRegistryInstallAssetRequest,
+    TeamRegistryInstallAssetResponse
+  ],
+  'team-registry:list-asset-updates': [
+    TeamRegistryListAssetUpdatesRequest,
+    TeamRegistryListAssetUpdatesResponse
+  ],
   'team-registry:config-history': [
     TeamRegistryConfigHistoryRequest,
     TeamRegistryConfigHistoryResponse,

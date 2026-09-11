@@ -22,6 +22,7 @@ import { SkillsPickerModal } from '../components/SkillsPickerModal'
 import { getAgentAvatarConfig, resolveAvatarSrc, type SparkAvatarConfig } from '../avatar'
 import { DEFAULT_AGENT_AVATAR_ID } from '../builtinAvatars'
 import { TeamsPanel } from './TeamsPanel'
+import { TeamAssetPublishModal, TeamAssetSection } from './TeamAssetMarket'
 import {
   AGENTS_TARGET_TAB_EVENT,
   AGENTS_TARGET_TAB_STORAGE_KEY,
@@ -258,6 +259,7 @@ function AgentsTabContent({
   onAgentsChange?: (agents: ManagedAgent[]) => void
 }) {
   const { toast } = useToast()
+  const [teamPublishFor, setTeamPublishFor] = useState<ManagedAgent | null>(null)
   const { registerNavGuard, requestConfirm, setTweak, setHasUnsavedChanges } = useApp()
   const sessionSidebar = useSessionSidebar()
   const { handleNewSession, setActiveSession, workspaces, refreshData } = sessionSidebar
@@ -990,6 +992,14 @@ function AgentsTabContent({
   if (screen === 'list') {
     return (
       <>
+        <TeamAssetPublishModal
+          open={teamPublishFor != null}
+          assetType="agent"
+          localId={teamPublishFor?.id ?? null}
+          localName={teamPublishFor?.name ?? ''}
+          onClose={() => setTeamPublishFor(null)}
+          onPublished={() => void refresh()}
+        />
         <div className="agents-home">
           <div className="agents-home-head">
             <div className="agents-home-title-block">
@@ -1020,6 +1030,7 @@ function AgentsTabContent({
             </div>
           </div>
 
+          <TeamAssetSection assetType="agent" onInstalled={() => void refresh()} />
           <div className="agents-home-filterbar">
             <div className="agents-home-tabs" role="tablist">
               {FILTER_TABS.map((tab) => {
@@ -1173,6 +1184,7 @@ function AgentsTabContent({
                     onOpen={() => openAgent(agent)}
                     onQuickChat={() => handleQuickChat(agent)}
                     onExport={() => void handleExportAgent(agent)}
+                    onPublishToTeam={agent.builtIn ? undefined : () => setTeamPublishFor(agent)}
                     onCopy={() => void handleCardCopy(agent)}
                     onEdit={() => openAgent(agent)}
                     onDelete={agent.builtIn ? noop : () => void handleCardDelete(agent)}
@@ -1767,6 +1779,7 @@ type AgentCardProps = {
   onOpen: () => void
   onQuickChat: () => void
   onExport: () => void
+  onPublishToTeam?: (() => void) | undefined
   onCopy: () => void
   onEdit: () => void
   onDelete: () => void
@@ -1788,6 +1801,7 @@ function AgentCard({
   onOpen,
   onQuickChat,
   onExport,
+  onPublishToTeam,
   onCopy,
   onEdit,
   onDelete,
@@ -1826,6 +1840,19 @@ function AgentCard({
         ),
         onClick: () => onExport(),
       },
+      ...(onPublishToTeam != null
+        ? [
+            {
+              key: 'team-publish',
+              label: (
+                <span className="agent-context-menu-item">
+                  <Icons.Users size={14} /> 发布到团队
+                </span>
+              ),
+              onClick: () => onPublishToTeam(),
+            },
+          ]
+        : []),
       {
         key: 'copy',
         label: (

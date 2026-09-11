@@ -207,19 +207,19 @@ Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上�
 | Smithery / Glama / mcp-get | 排除 | 闭源 SaaS / 已归档 |
 
 补充：**MinIO（S3）作为可选字节存储**——子应用 HTML 快照可能超出 Nacos 配置中心单条
-大小限制，M4 实施时若超限则字节进 MinIO、元数据仍进 Nacos；工作流 JSON 体量小，配置
+大小限制（实测 2026-09-11：单条 1MB 可写 / 2MB 报 413；客户端信封上限收紧到 900KB），超限资产暂不支持（V2 多文件应用明确报错），后续可选 gzip+base64 或 MinIO；工作流/Agent 配置体量小，配置
 中心足够。店面体验按原方案做在 Electron 客户端（团队商店聚合页）。
 
 ## 分期
 
 | 期 | 内容 | 状态 |
 |---|---|---|
-| M1 | 配置 UI + Nacos 客户端 + 技能推拉 + 版本比对 + pins 表 | 代码完成；写链路已真机验证；**待按原生 zip API 重构推拉（M1.5）** |
+| M1 | 配置 UI + Nacos 客户端 + 技能推拉 + 版本比对 + pins 表 | 已完成（技能推拉已按 M1.5 重构为原生 zip API） |
 | M1.5 | 技能推拉重构为原生 AI Skill zip 上传/下载（替代配置中心信封载荷） | 已完成（2026-09-11，真机探针通过） |
 | M2 | MCP 发布/安装（映射 AI MCP 资源，payload 结构已实测） | 已完成（2026-09-11，真机探针通过） |
-| M3 | 工作流团队库（导入升级为按版本 upsert）+ 平台 Agent 团队库（同走信封，assetType 增枚举） | 待开发 |
+| M3 | 工作流团队库 + 平台 Agent 团队库（信封通道，assetType 增 agent 枚举） | 已完成（2026-09-11，真机探针通过） |
 | M3.5（可选） | 平台 Agent 导出为 AGENTS.md 包发布到原生 AgentSpec（Beta，跨平台可读） | 待评估 |
-| M4 | 子应用团队库（复用 sub_app_releases 快照作 payload；超 1MB 先 gzip+base64） | 待开发 |
+| M4 | 子应用团队库（V1 单文件草稿快照 payload）+ 各管理页团队区块 + 设置页五类资产总览 | 已完成（2026-09-11，真机探针通过；V2 多文件应用暂不支持，明确报错） |
 | M5 | 更新提醒（启动/手动刷新比对）→ 实时 listen 推送 | 待开发 |
 
 ## M1 实施清单
@@ -329,3 +329,55 @@ Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上�
   Electron-as-Node 跑）全部通过；重建产物明文；e2e 4/4 通过。
 - **导航备注**：侧边栏 MCP 管理入口的实际可访问名是「扩展中心」（`nav.extensions`），
   i18n 的 `nav.mcp`（「连接器」）不用于该侧边栏按钮。
+
+## M3/M4 实施与真机记录（2026-09-11）
+
+### 交付
+
+- **agent-runtime**：`team-registry/asset-service.ts` 新增 `TeamAssetService`——信封型资产
+  （workflow / agent / app）的发布（默认 patch+1、防版本回退）、安装/更新（端口落地 + pins
+  锚点）、列表与六态更新比对（复用 `classifyTeamAssetState`）。本地落地经 `TeamAssetPort`
+  接口由 desktop 主进程适配（workflow→WorkflowRepository / agent→AgentRepository /
+  app→SubAppRepository），agent 安装后的 RuntimeComposition 刷新与 configChanged 广播在
+  handler 层补触发。`slugifyAssetName`：纯 ASCII 名干净归一；含中文的名字走
+  「ASCII 残段 + sha256 前 8 位」防塌缩（「数据分析Agent」「报表Agent」不同 slug）。
+- **协议**：`team-registry:list-assets / publish-asset / install-asset / list-asset-updates`
+  四通道（DTO 含 assetType 联合类型）。
+- **desktop**：`registerTeamAssetIpc.ts` 独立注册模块（不往 10k 行的 ipc/index.ts 加代码）；
+  工作流安装图校验复用 `assertWorkflowGraphValid` 闭包（deps 注入）；Agent 载荷与
+  `agent:export-to-file` 的 AgentExportPayload 单条目形状一致（与文件导入互认）；子应用安装
+  经 `SubAppRepository.importApp`（releases 为空 → 落成草稿，需对方确认发布），更新走
+  `updateDraft`（CAS 保护）。
+- **UI**：`TeamAssetMarket.tsx` 通用组件（TeamAssetSection 浏览/安装/更新 + 发布弹窗）接入
+  三处——Workflows 列表页（卡片菜单「发布到团队」+「团队工作流」区块）、Agent 管理页（同）、
+  子应用页（同）；设置 → 团队注册中心新增五类资产「可更新」总览条（技能/MCP 复用既有更新
+  通道）。
+
+### 真机探针抓出的三个 bug（均已修复并回归）
+
+1. **Nacos dataId 禁止 `/`**（HTTP 400 code 20002）：M1 设计的
+   `<assetType>/<slug>` 寻址在真机上不成立。实测 `:` `_` `.` 合法，定
+   `<assetType>:<slug>`；`config-history` 通道同步修正。
+2. **配置中心写端点是 form 编码**：`publishConfig` 原用 JSON body，服务端报
+   Required parameter（code 10000）——与 AI 写端点同形态，改 form 后真机写入/回读成功。
+3. **CJK 名塌缩**：`团队探针Agent` 原 slug 规则推出 `agent`，所有「XX agent」命名互相
+   覆盖；改为「ASCII 残段 + 名称哈希」。
+
+### 验证（2026-09-11）
+
+- agent-runtime / protocol / desktop 三包 typecheck 0 错误；改动面 lint 0 errors。
+- 聚焦单测 29/29 通过（含 asset-service 8 项：发布递增/防回退/中文 slug/安装锚点/校验/
+  更新/六态/未配置降级）。
+- 真机探针（`TEAM_REGISTRY_LIVE=1 asset-service-live.test.ts`）1/1 通过：三类资产发布 →
+  回读 checksum → 防回退 → patch+1 → 独立「第二机器」安装/更新 → up-to-date /
+  remote-newer / local-modified 判定 → 严格清理（清理失败显式报错），注册中心还原为空。
+- 未验证：UI 端到端点击（typecheck + 组件模式与 M1/M2 已验证组件同构）；子应用 V2 多文件
+  团队共享（明确报错，未实现）。
+
+### 已知行为约定
+
+- 信封安装「新建」一律落草稿/禁用态（工作流 draft、子应用草稿），由使用者确认后启用；
+  「更新」只覆盖内容字段，保留本地运行状态（status/enabled）。
+- Agent 载荷不含 mcpServerIds（与文件导出一致：MCP id 是机器本地概念）；skillIds/ruleIds/
+  workflowId 随包共享但依赖对方机器存在同 id 资产，发布弹窗有提示。
+- 配置中心信封上限 900KB（留余量于实测 1MB）；超限报错提示后续 gzip/MinIO 方向。

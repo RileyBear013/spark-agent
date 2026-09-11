@@ -255,7 +255,16 @@ export class NacosClient {
       content: args.content,
       type: args.type ?? 'JSON',
     }
-    const res = await this.apiRequest('POST', '/v3/console/cs/config', { body })
+    // 配置中心写端点与 AI 写端点同形态：form 编码（JSON body 会报 Required parameter）
+    const res = await this.apiRequest('POST', '/v3/console/cs/config', {
+      form: {
+        dataId: args.dataId,
+        groupName: args.group ?? TEAM_NACOS_GROUP,
+        namespaceId: this.namespace,
+        content: args.content,
+        type: args.type ?? 'JSON',
+      },
+    })
     return pickBoolean(res, ['data', 'success']) ?? true
   }
 

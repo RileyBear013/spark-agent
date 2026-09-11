@@ -326,6 +326,17 @@ export type {
 } from './core/index.js'
 export { TeamRegistryService, collectSkillFiles } from './services/team-registry/index.js'
 export { TeamMcpService, mcpSlugOf, pickLatestTeamVersion } from './services/team-registry/index.js'
+export {
+  TeamAssetService,
+  slugifyAssetName,
+  type TeamAssetPort,
+  type TeamAssetBuildResult,
+  type TeamAssetListItem,
+  type TeamAssetUpdateInfo,
+  type TeamAssetPublishResult,
+  type TeamAssetInstallResult,
+  type EnvelopeAssetType,
+} from './services/team-registry/index.js'
 export type {
   TeamMcpInstallResult,
   TeamMcpListItem,

@@ -12,8 +12,12 @@ import crypto from 'node:crypto'
 
 export const TEAM_ASSET_SCHEMA = 'spark.team.asset.v1' as const
 
-/** 团队资产类型（M1 仅落地 skill，其余为 M2-M4 预留） */
-export type TeamAssetType = 'skill' | 'mcp' | 'workflow' | 'app'
+/**
+ * 团队资产类型：
+ *   skill/mcp 走 Nacos 原生 AI 资源（zip API / serverSpecification）；
+ *   workflow/agent/app 走配置中心统一信封（M3/M4）。
+ */
+export type TeamAssetType = 'skill' | 'mcp' | 'workflow' | 'agent' | 'app'
 
 /** 技能载荷：相对路径 → utf-8 文本（M1 不携带二进制） */
 export interface TeamSkillFile {
@@ -28,7 +32,44 @@ export interface TeamSkillPayload {
   files: TeamSkillFile[]
 }
 
-export type TeamAssetPayload = TeamSkillPayload
+/** 工作流载荷：完整流程图 DAG + 展示元数据（M3） */
+export interface TeamWorkflowPayload {
+  kind: 'workflow'
+  graph: Record<string, unknown>
+  meta?: Record<string, unknown>
+}
+
+/** 平台 Agent 载荷：Agent 配置（prompt/技能/MCP/工作流绑定等）（M3） */
+export interface TeamAgentPayload {
+  kind: 'agent-config'
+  config: Record<string, unknown>
+}
+
+/** 子应用载荷：源码文件树 + 入口 + manifest 摘要（M4） */
+export interface TeamAppPayload {
+  kind: 'app-release'
+  files: TeamSkillFile[]
+  entry: string
+  manifest?: Record<string, unknown>
+}
+
+export type TeamAssetPayload =
+  | TeamSkillPayload
+  | TeamWorkflowPayload
+  | TeamAgentPayload
+  | TeamAppPayload
+
+/** 按 kind 收窄 payload（信封解析后使用） */
+export function payloadOf<T extends TeamAssetPayload['kind']>(
+  envelope: TeamAssetEnvelope,
+  kind: T,
+): Extract<TeamAssetPayload, { kind: T }> | null {
+  return envelope.payload != null &&
+    typeof envelope.payload === 'object' &&
+    (envelope.payload as { kind?: unknown }).kind === kind
+    ? (envelope.payload as Extract<TeamAssetPayload, { kind: T }>)
+    : null
+}
 
 export interface TeamAssetEnvelope {
   schema: typeof TEAM_ASSET_SCHEMA
@@ -54,8 +95,11 @@ export const TEAM_ASSET_LIMITS = {
   maxFileBytes: 1_000_000,
   /** 单资产文件数上限 */
   maxFileCount: 200,
-  /** 信封整体（序列化后）上限 5MB */
-  maxEnvelopeBytes: 5_000_000,
+  /**
+   * 信封整体（序列化后）上限。Nacos 配置中心实测 1MB 可写 / 2MB 报 413，
+   * 留余量取 900KB；子应用快照超限时发布侧会给出明确报错（后续可选 gzip/MinIO）。
+   */
+  maxEnvelopeBytes: 900_000,
 } as const
 
 // ─── checksum ───────────────────────────────────────────────────────────
