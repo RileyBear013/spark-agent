@@ -75,7 +75,10 @@ final class MacAccessibilityController: @unchecked Sendable {
 
     var raw: [NativeAXRawElement] = []
     var elements: [String: AXUIElement] = [:]
-    try collect(window, path: "window", depth: 0, output: &raw, elements: &elements)
+    let windowFrame = elementBounds(window)
+    try collect(
+      window, path: "window", depth: 0, windowFrame: windowFrame, output: &raw,
+      elements: &elements)
     // Chromium populates the web-content tree asynchronously after we flip
     // AXManualAccessibility. A near-empty first pass on a real window usually
     // means the tree is still being built — wait briefly and retry a couple
@@ -86,10 +89,21 @@ final class MacAccessibilityController: @unchecked Sendable {
         Thread.sleep(forTimeInterval: 0.15)
         raw.removeAll(keepingCapacity: true)
         elements.removeAll(keepingCapacity: true)
-        try collect(window, path: "window", depth: 0, output: &raw, elements: &elements)
+        try collect(
+          window, path: "window", depth: 0, windowFrame: windowFrame, output: &raw,
+          elements: &elements)
         if raw.count > 3 { break }
       }
     }
+    // Open menus / native dropdown lists are owned by the APPLICATION, not the
+    // window, so a window-rooted traversal never sees them — after the agent
+    // opens a menu the model would face a tree with zero menu items. Codex
+    // merges open menus into its state; we do the same by walking the app's
+    // focused element up to its root and, when that root is an AXMenu,
+    // appending the whole menu tree BEFORE publishing (so ids, hit-testing and
+    // semantic actions all cover the menu items). Defensive by design: any
+    // miss simply leaves the tree unchanged.
+    mergeOpenMenus(application: application, raw: &raw, elements: &elements)
     let snapshot = try publishCached(
       raw,
       previousTreeVersion: previousTreeVersion,
@@ -105,6 +119,29 @@ final class MacAccessibilityController: @unchecked Sendable {
     lastTraversalUptime = ProcessInfo.processInfo.systemUptime
     cachedGeneration = generation
     return snapshot
+  }
+
+  /// Collects the app's currently open menu (menu-bar menus and native
+  /// dropdown lists) into the shared buffers, bypassing offscreen pruning —
+  /// menus render outside the window frame by design. See observe().
+  private func mergeOpenMenus(
+    application: AXUIElement,
+    raw: inout [NativeAXRawElement],
+    elements: inout [String: AXUIElement]
+  ) {
+    guard
+      let focused: AXUIElement = copyAttribute(
+        application, kAXFocusedUIElementAttribute)
+    else { return }
+    var node = focused
+    for _ in 0..<32 {
+      guard let parent: AXUIElement = copyAttribute(node, kAXParentAttribute) else { break }
+      node = parent
+    }
+    let rootRole = copyAttribute(node, kAXRoleAttribute) ?? ""
+    guard rootRole == "AXMenu" else { return }
+    try? collect(
+      node, path: "menu", depth: 0, windowFrame: nil, output: &raw, elements: &elements)
   }
 
   private func recordPublishedSnapshot(_ snapshot: NativeAXTreeSnapshot) {
@@ -169,6 +206,15 @@ final class MacAccessibilityController: @unchecked Sendable {
   private func windowDistance(_ left: NativeRect, _ right: NativeRect) -> Double {
     abs(left.x - right.x) + abs(left.y - right.y)
       + abs(left.width - right.width) + abs(left.height - right.height)
+  }
+
+  /// True when `bounds` overlaps `frame` grown by `margin` on every side.
+  private func intersects(_ bounds: NativeRect, expanded frame: NativeRect, margin: Double) -> Bool
+  {
+    bounds.x < frame.x + frame.width + margin
+      && bounds.x + bounds.width > frame.x - margin
+      && bounds.y < frame.y + frame.height + margin
+      && bounds.y + bounds.height > frame.y - margin
   }
 
   func execute(_ action: NativeComputerAction, treeVersion: String) throws -> NativeActionStatus {
@@ -331,9 +377,41 @@ final class MacAccessibilityController: @unchecked Sendable {
 
   func loadingStopped(processID: pid_t) -> Bool {
     let application = AXUIElementCreateApplication(processID)
+    // No focused window means no loader exists to watch — that is "not busy",
+    // not "still loading". Treating it as busy pinned every background action
+    // (the primary non-frontmost control path) to the full settle hard cap.
     guard let window: AXUIElement = copyAttribute(application, kAXFocusedWindowAttribute)
-    else { return false }
+    else { return true }
     return !((copyAttribute(window, "AXElementBusy") as NSNumber?)?.boolValue ?? false)
+  }
+
+  /// Waits until the target app stops reacting to an injected action: no AX
+  /// change notifications for a quiet window and no busy indicator, bounded by
+  /// the policy's hard cap. Called between an action and its post-action
+  /// observation so the returned tree/screenshot describe a settled UI instead
+  /// of a mid-animation frame.
+  func waitForSettle(processID: pid_t) async {
+    let start = ProcessInfo.processInfo.systemUptime
+    var lastGeneration = currentDirtyGeneration()
+    var lastChange = start
+    try? await Task.sleep(for: .milliseconds(NativeSettlePolicy.defaultBaselineMs))
+    while true {
+      let now = ProcessInfo.processInfo.systemUptime
+      let generation = currentDirtyGeneration()
+      if generation != lastGeneration {
+        lastGeneration = generation
+        lastChange = now
+      }
+      let busy = !loadingStopped(processID: processID)
+      if NativeSettlePolicy.decide(
+        elapsedMs: Int((now - start) * 1_000),
+        msSinceLastChange: Int((now - lastChange) * 1_000),
+        busy: busy) == .settled
+      {
+        return
+      }
+      try? await Task.sleep(for: .milliseconds(80))
+    }
   }
 
   func focusedElementIsSecure(processID: pid_t) -> Bool {
@@ -452,6 +530,7 @@ final class MacAccessibilityController: @unchecked Sendable {
     _ element: AXUIElement,
     path: String,
     depth: Int,
+    windowFrame: NativeRect?,
     output: inout [NativeAXRawElement],
     elements: inout [String: AXUIElement]
   ) throws {
@@ -481,22 +560,57 @@ final class MacAccessibilityController: @unchecked Sendable {
     let focused: Bool =
       (copyAttribute(element, kAXFocusedAttribute) as NSNumber?)?.boolValue ?? false
     let bounds = elementBounds(element)
+    // Offscreen pruning: a fully offscreen subtree (native table views expose
+    // every row, on- and offscreen alike) is invisible to the model and only
+    // burns traversal budget. Conservative — degenerate (0-size) elements are
+    // kept because web layouts report them with live children, and the margin
+    // absorbs shadows/popovers that poke outside the window frame.
+    if depth > 0, let windowFrame,
+      bounds.width > 0, bounds.height > 0,
+      !intersects(bounds, expanded: windowFrame, margin: Self.offscreenMargin)
+    {
+      return
+    }
     let actions = supportedActions(element, secure: secure)
+    // Targeted extra attributes — fetched only for roles that can use them so
+    // the per-element XPC cost stays bounded on 2000-element trees.
+    let roleDescription: String? = copyAttribute(element, kAXRoleDescriptionAttribute)
+    let placeholder: String?
+    if Self.placeholderRoles.contains(role), name.isEmpty, (value ?? "").isEmpty {
+      placeholder = copyAttribute(element, "AXPlaceholderValue")
+    } else {
+      placeholder = nil
+    }
+    let selected: Bool =
+      Self.selectableRoles.contains(role)
+      ? (copyAttribute(element, "AXSelected") as NSNumber?)?.boolValue ?? false : false
+    let children: [AXUIElement] = copyAttribute(element, kAXChildrenAttribute) ?? []
     output.append(
       NativeAXRawElement(
         runtimeID: runtimeID, role: role, name: name, value: value, bounds: bounds,
-        enabled: enabled, focused: focused, actions: actions, secure: secure
+        enabled: enabled, focused: focused, actions: actions, secure: secure, depth: depth,
+        roleDescription: roleDescription, placeholder: placeholder, selected: selected,
+        childCount: children.count
       )
     )
     elements[runtimeID] = element
-    let children: [AXUIElement] = copyAttribute(element, kAXChildrenAttribute) ?? []
     for (index, child) in children.enumerated() {
+      if index >= NativeAXTreeRenderer.maxChildrenPerContainer { break }
       if output.count >= Self.maxElements { break }
       try collect(
-        child, path: "\(path).\(index)", depth: depth + 1, output: &output,
-        elements: &elements)
+        child, path: "\(path).\(index)", depth: depth + 1, windowFrame: windowFrame,
+        output: &output, elements: &elements)
     }
   }
+
+  private static let placeholderRoles: Set<String> = [
+    "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox",
+  ]
+  private static let selectableRoles: Set<String> = [
+    "AXRow", "AXCell", "AXColumn", "AXTab", "AXMenuItem", "AXMenuItemMarker", "AXListItem",
+    "AXOutlineItem",
+  ]
+  private static let offscreenMargin: Double = 96
 
   private func supportedActions(_ element: AXUIElement, secure: Bool) -> [String] {
     var rawNames: CFArray?
@@ -674,11 +788,13 @@ enum MacCGEventController {
   ) async throws -> NativeActionStatus {
     guard isAvailable else { throw NativeHostPlatformError.accessibilityPermissionDenied }
     switch action {
-    case .click(let normalized, let button, let count):
+    case .click(let normalized, let button, let count, let modifiers):
       let point = try map(normalized, bounds: windowBounds)
       let mouseButton = cgButton(button)
       let types = mouseTypes(button)
-      for index in 0..<(count ?? 1) {
+      let chordFlags = NativeMouseChord.flags(for: modifiers)
+      let total = max(1, min(3, count ?? 1))
+      for index in 0..<total {
         try await validateTarget()
         guard
           let down = CGEvent(
@@ -688,10 +804,19 @@ enum MacCGEventController {
             mouseEventSource: nil, mouseType: types.1, mouseCursorPosition: point,
             mouseButton: mouseButton)
         else { throw NativeHostPlatformError.actionNoop }
+        down.flags = chordFlags
+        up.flags = chordFlags
         down.setIntegerValueField(.mouseEventClickState, value: Int64(index + 1))
         up.setIntegerValueField(.mouseEventClickState, value: Int64(index + 1))
         postTagged(down)
+        // Codex's measured human rhythm: a short press (~40ms) inside the
+        // down→up pair and ~100ms between consecutive clicks. Instant
+        // down/up pairs read as synthetic to some apps and drop double-clicks.
+        try await Task.sleep(for: .milliseconds(40))
         postTagged(up)
+        if index < total - 1 {
+          try await Task.sleep(for: .milliseconds(100))
+        }
       }
     case .move(let normalized):
       try await validateTarget()
@@ -812,8 +937,11 @@ enum MacCGEventController {
       if let code = keyCode(key) {
         var keyFlags = flags
         // A shifted symbol ("!", "@", "{", ...) shares the base key's virtual keycode
-        // and only produces the symbol with the shift modifier applied.
-        if NativeKeySymbols.isShiftedSymbol(key) { keyFlags.insert(.maskShift) }
+        // and only produces the symbol with the shift modifier applied — the
+        // layout resolver reports the same for uppercase on any layout.
+        if NativeKeySymbols.isShiftedSymbol(key) || keyRequiresShift(key) {
+          keyFlags.insert(.maskShift)
+        }
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
           let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)
         else { throw NativeHostPlatformError.actionNoop }
@@ -836,7 +964,9 @@ enum MacCGEventController {
       if chunk.utf16.count + value.utf16.count > 32 {
         try await validateTarget()
         try postUnicode(chunk, flags: [])
-        try await Task.sleep(for: .milliseconds(2))
+        // 8ms between chunks: 2ms measurably dropped characters on slower apps
+        // (Electron text fields round-trip each HID event through the renderer).
+        try await Task.sleep(for: .milliseconds(8))
         chunk = ""
       }
       chunk.append(value)
@@ -868,7 +998,15 @@ enum MacCGEventController {
     event.post(tap: .cghidEventTap)
   }
 
-  private static func keyCode(_ value: String) -> CGKeyCode? {
+  /// True when the current keyboard layout needs Shift held to produce the
+  /// character (uppercase letters on every layout; layout-specific symbols).
+  private static func keyRequiresShift(_ key: String) -> Bool {
+    let base = NativeKeySymbols.baseCharacter(for: key) ?? key
+    guard let character = base.first, base.count == 1 else { return false }
+    return NativeKeyCodeLayout.resolve(character: character)?.shift == true
+  }
+
+  static func keyCode(_ value: String) -> CGKeyCode? {
     let named: [String: CGKeyCode] = [
       "Backspace": 51, "Delete": 117, "End": 119, "Enter": 36, "Escape": 53,
       "Home": 115, "PageDown": 121, "PageUp": 116, "Space": 49, "Tab": 48,
@@ -879,19 +1017,18 @@ enum MacCGEventController {
       "F19": 80, "F20": 90,
     ]
     if let code = named[value] { return code }
-    let ascii: [Character: CGKeyCode] = [
-      "A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5, "Z": 6, "X": 7,
-      "C": 8, "V": 9, "B": 11, "Q": 12, "W": 13, "E": 14, "R": 15, "Y": 16,
-      "T": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
-      "=": 24, "9": 25, "7": 26, "-": 27, "8": 28, "0": 29, "]": 30,
-      "O": 31, "U": 32, "[": 33, "I": 34, "P": 35, "L": 37, "J": 38,
-      "'": 39, "K": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "N": 45,
-      "M": 46, ".": 47, "`": 50,
-    ]
-    if let base = NativeKeySymbols.baseCharacter(for: value), let character = base.first {
-      return ascii[character]
+    // Layout-aware resolution first (non-US layouts map characters to
+    // different physical keys); the US table inside NativeKeyCodeLayout is
+    // the fallback.
+    let character: Character?
+    if let base = NativeKeySymbols.baseCharacter(for: value), let first = base.first {
+      character = first
+    } else if value.count == 1 {
+      character = value.first
+    } else {
+      character = nil
     }
-    guard value.count == 1, let character = value.uppercased().first else { return nil }
-    return ascii[character]
+    guard let character else { return nil }
+    return NativeKeyCodeLayout.resolve(character: character)?.code
   }
 }

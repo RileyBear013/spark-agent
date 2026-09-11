@@ -15,7 +15,10 @@ import {
   McpServerRepository,
   ProviderProfileRepository,
   SubAppRepository,
+  SubAppPackageService,
+  SubAppPlatformRepository,
   ScheduledTaskRepository,
+  SessionHistoryRepository,
   SettingsRepository,
   TaskExecutionRepository,
   WorkflowRepository,
@@ -24,7 +27,7 @@ import type { SparkDatabase } from '@spark/storage'
 import { createLogger } from '@spark/shared'
 import type { SDKMcpServerConfig } from '../../sdk/index.js'
 import type { McpService, McpOAuthTokenProvider } from '../mcp-server.service.js'
-import type { PlatformBridgeService } from '../platform-bridge.service.js'
+import type { PlatformBridgeDeps, PlatformBridgeService } from '../platform-bridge.service.js'
 import type { PluginManager } from '../plugins/plugin-manager.service.js'
 import type { CustomToolService } from '../custom-tools/custom-tool.service.js'
 import type { ToolPackageService } from '../tool-packages/tool-package.service.js'
@@ -38,6 +41,7 @@ import { getDebugLogServer } from '../debug-log-server.service.js'
 import { resolveProviderApiKey } from '../provider-credential-resolver.js'
 import { ScheduledTaskService } from '../scheduled-task.service.js'
 import { SessionScheduleAgentTools } from '../session-schedule-agent-tools.js'
+import { SessionHistoryRetrievalTools } from './session-history-retrieval-tools.js'
 import {
   resolveMediaMcpProviderRoutes,
   writeMediaMcpRuntimeConfig,
@@ -80,6 +84,7 @@ export interface SessionMcpToolingHost {
   getPlatformConfigChangedHandler(): PlatformConfigChangedHandler | undefined
   /** Platform Bridge deps 需回调会话服务公共方法（引用/运行时切换/记忆桥等）。 */
   getSessionService(): SessionService
+  getSubAppRuntimeBridge(): PlatformBridgeDeps['subAppRuntime']
 }
 
 export class SessionMcpTooling {
@@ -88,12 +93,15 @@ export class SessionMcpTooling {
     private readonly host: SessionMcpToolingHost,
   ) {}
 
-  async buildMcpServersForSDK(): Promise<Record<string, SDKMcpServerConfig>> {
+  async buildMcpServersForSDK(
+    allowedServerIds?: ReadonlySet<string>,
+  ): Promise<Record<string, SDKMcpServerConfig>> {
     const result: Record<string, SDKMcpServerConfig> = {}
     const servers = this.host.getMcpService().listServers()
 
     for (const server of servers) {
       if (!server.enabled) continue
+      if (allowedServerIds != null && !allowedServerIds.has(server.id)) continue
       try {
         const cfg = JSON.parse(server.configJson) as Record<string, unknown>
         // 归一化：兼容 `transport`/`type` 字段名，支持 http(Streamable HTTP)/sse/stdio。
@@ -178,6 +186,7 @@ export class SessionMcpTooling {
       /* non-critical */
     }
 
+    const subAppRuntime = this.host.getSubAppRuntimeBridge()
     const deps = {
       skillService: new SkillService(skillRepo),
       skillLoader,
@@ -196,6 +205,9 @@ export class SessionMcpTooling {
       settingsRepo,
       // spark_app MCP 桥（subapp.* RPC）直访子应用仓库
       subAppRepo: new SubAppRepository(this.db),
+      subAppPackageService: new SubAppPackageService(this.db),
+      subAppPlatformRepo: new SubAppPlatformRepository(this.db),
+      ...(subAppRuntime != null ? { subAppRuntime } : {}),
       pluginManager,
       sessionScheduleTools: new SessionScheduleAgentTools(
         new ScheduledTaskService(
@@ -204,6 +216,8 @@ export class SessionMcpTooling {
         ),
         (action, id) => this.host.getPlatformConfigChangedHandler()?.('scheduled-task', action, id),
       ),
+      // 会话全量历史检索（session_history.* RPC）：直读 append-only 的 agent_events
+      sessionHistoryTools: new SessionHistoryRetrievalTools(new SessionHistoryRepository(this.db)),
       githubConnectorService: new GitHubConnectorService(
         new ConnectorConnectionRepository(this.db),
         () => pluginManager.isRuntimeEnabled('github'),

@@ -7,6 +7,7 @@ import type {
   CanvasMediaTaskStreamPayload,
   OptionalCapabilityProgress,
 } from '@spark/protocol'
+import { registerAppShutdownCleanup } from '../app-shutdown.js'
 import { DEPTH_MODEL_PACKAGE_ID } from '../services/DepthModelIntegrityService.js'
 import {
   DepthVideoRunner,
@@ -61,7 +62,7 @@ export function registerCanvasDepthTaskIpc(options: RegisterCanvasDepthTaskIpcOp
         `${runtimeTaskId}.mp4`,
       ))
   const runningTasks = new Map<string, AbortController>()
-  app.once('before-quit', () => {
+  registerAppShutdownCleanup('canvas depth tasks', () => {
     for (const controller of runningTasks.values()) controller.abort()
     runningTasks.clear()
   })
@@ -154,6 +155,7 @@ export function registerCanvasDepthTaskIpc(options: RegisterCanvasDepthTaskIpcOp
           modelDir: resources.modelDir,
           runtimeEntryPath: resources.runtimeEntryPath,
           preserveAudio: request.preserveAudio === true,
+          ...(request.renderOptions ? { renderOptions: request.renderOptions } : {}),
           signal: controller.signal,
           onProgress: (progress: DepthVideoProgress) => {
             const mappedProgress = 20 + Math.round(progress.percent * 0.8)

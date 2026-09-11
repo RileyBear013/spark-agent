@@ -9,7 +9,7 @@
   padding-bottom: 0;
 
   .ant-modal-content {
-    height: min(800px, calc(100vh - 48px));
+    height: min(600px, calc(100vh - 88px));
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -21,11 +21,11 @@
 
   .ant-modal-header {
     flex: 0 0 auto;
-    min-height: 74px;
+    min-height: 64px;
     margin: 0;
     justify-content: flex-start;
     padding: 15px 56px 15px 22px;
-    border-bottom: 1px solid var(--divider, #efede8);
+    // border-bottom: 1px solid var(--divider, #efede8);
     background: var(--bg-soft, #fff);
   }
 
@@ -117,7 +117,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 36px 24px 24px;
+  padding: 16px 24px 24px;
   overflow: hidden;
   color: var(--text, #23231f);
   background:
@@ -167,14 +167,17 @@
   box-shadow: var(--shadow-sm);
 }
 
-.hi-scan-source-claude-code {
-  top: 23px;
-}
+// 三卡纵向排布（与 Tab 顺序一致：codex → claude-code → zcode），槽位 103px。
+// 连线起点对齐各卡纵向中心（卡高约 78px → center ≈ top + 39），
+// 终点汇聚到 collector 中心（top:77 + 83 ≈ y160）。
 .hi-scan-source-codex {
-  top: 120px;
+  top: 9px;
+}
+.hi-scan-source-claude-code {
+  top: 112px;
 }
 .hi-scan-source-zcode {
-  top: 217px;
+  top: 215px;
 }
 
 .hi-scan-source-head {
@@ -280,12 +283,16 @@
 }
 
 .hi-scan-lines-top {
-  top: 81px;
-  transform: rotate(17deg);
+  top: 48px;
+  transform: rotate(22deg);
+}
+.hi-scan-lines-middle {
+  top: 151px;
+  transform: rotate(2deg);
 }
 .hi-scan-lines-bottom {
-  top: 250px;
-  transform: rotate(-17deg);
+  top: 254px;
+  transform: rotate(-18deg);
 }
 
 .hi-scan-collector {
@@ -572,8 +579,8 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px 18px;
-  min-height: 84px;
-  padding: 14px 22px;
+  min-height: 44px;
+  padding: 6px 22px;
   border-bottom: 1px solid var(--divider, #efede8);
   background: transparent;
 }
@@ -605,20 +612,6 @@
   span {
     color: var(--text, #23231f);
     font-size: 12px;
-  }
-}
-
-.hi-overview-detail {
-  display: grid;
-  gap: 3px;
-
-  strong {
-    color: var(--text-muted, #6f6a61);
-    font-size: 10.5px;
-  }
-  span {
-    color: var(--text-faint, #9b9489);
-    font-size: 9.5px;
   }
 }
 
@@ -656,6 +649,38 @@
   font-size: 9.5px;
   white-space: nowrap;
   cursor: pointer;
+}
+
+// 扫描时间 + 重新检索（icon-only）
+.hi-rescan {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint, #9b9489);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.hi-rescan-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #6f6a61);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+
+  &:hover {
+    background: var(--hover);
+    color: var(--text-strong, #11100e);
+  }
 }
 
 .hi-body {
@@ -753,11 +778,6 @@
   &.is-imported {
     opacity: 0.58;
   }
-
-  // zcode 回退分支条目：弱化边框提示这是 rewind 产生的旧线路
-  &.is-branch {
-    border-style: dashed;
-  }
 }
 
 .hi-row-check {
@@ -832,10 +852,6 @@
 }
 
 .hi-tag-imported {
-  flex: 0 0 auto;
-}
-
-.hi-tag-branch {
   flex: 0 0 auto;
 }
 
@@ -1293,6 +1309,9 @@
     display: none;
   }
   .hi-selection-summary small {
+    display: none;
+  }
+  .hi-rescan > span {
     display: none;
   }
 }

@@ -50,6 +50,48 @@ describe('ModelPicker', () => {
     expect(onSelect).toHaveBeenCalledWith('local-main')
   })
 
+  it('keeps all catalog entries selectable instead of stopping at fifteen', async () => {
+    const onSelect = vi.fn()
+    const entries = Array.from({ length: 17 }, (_, index) => ({
+      id: `model-${index + 1}`,
+      source: 'sparkwork' as const,
+      providerId: 'provider',
+      providerName: 'Provider',
+      protocol: 'openai-responses' as const,
+      model: `model-${index + 1}`,
+      selected: false,
+    }))
+    const app = render(
+      <ModelPicker
+        catalog={{
+          entries,
+          sparkWorkConnected: true,
+          sparkWorkStaleBridgeDescriptors: 0,
+        }}
+        refreshing={false}
+        busy={false}
+        notice={undefined}
+        error={undefined}
+        selectedModel={undefined}
+        theme={defaultTheme}
+        canClose={false}
+        onSelect={onSelect}
+        onConfigureLocal={vi.fn()}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    )
+
+    expect(app.lastFrame()).toContain('model-17')
+    for (let index = 0; index < 16; index += 1) app.stdin.write('\u001b[B')
+    await flush()
+    app.stdin.write('\r')
+    await flush()
+    expect(onSelect).toHaveBeenCalledWith('model-17')
+    app.unmount()
+  })
+
   it('exposes configure and refresh shortcuts and closes only when allowed', async () => {
     const onConfigureLocal = vi.fn()
     const onRefresh = vi.fn()
@@ -158,6 +200,11 @@ describe('unconfigured TUI onboarding', () => {
       cwd: expect.any(String),
       model: 'sparkwork:p1:gpt-host',
     })
+    // The selection is remembered in the global config for the next launch.
+    expect(harness.seams.persist).toHaveBeenCalledWith({
+      sparkHome: '/tmp/spark-test-home',
+      model: 'sparkwork:p1:gpt-host',
+    })
     expect(harness.app.lastFrame() ?? '').toContain('gpt-host')
 
     harness.app.stdin.write('hi')
@@ -166,6 +213,21 @@ describe('unconfigured TUI onboarding', () => {
     await flush(40)
     const frame2 = harness.app.lastFrame() ?? ''
     expect(frame2).toContain('host done')
+    harness.app.unmount()
+  })
+
+  it('keeps the picker open with the reason when persisting the selection fails', async () => {
+    const harness = await createHarness()
+    harness.seams.persist.mockRejectedValueOnce(new Error('EACCES: config.toml not writable'))
+    harness.app.stdin.write('\r') // select the first SparkWork route
+    await flush(20)
+    const frame = harness.app.lastFrame() ?? ''
+    expect(frame).toContain('写入默认模型配置失败')
+    expect(frame).toContain('EACCES: config.toml not writable')
+    // The runtime still applied, so esc returns to a usable session.
+    harness.app.stdin.write('')
+    await flush(10)
+    expect(harness.app.lastFrame() ?? '').not.toContain('选择模型')
     harness.app.unmount()
   })
 
@@ -188,9 +250,40 @@ describe('unconfigured TUI onboarding', () => {
         modelId: 'gpt-5.6',
       }),
     )
+    expect(harness.seams.persist).toHaveBeenCalledWith({
+      sparkHome: '/tmp/spark-test-home',
+      model: 'gpt-5-6',
+    })
     const frame = harness.app.lastFrame() ?? ''
     expect(frame).not.toContain('配置本地模型渠道')
     expect(frame).not.toContain('选择模型')
+    harness.app.unmount()
+  })
+
+  it('persists permission and reasoning selections for the next launch', async () => {
+    const persistPreferences = vi.fn(async () => undefined)
+    const harness = await createHarness(persistPreferences)
+
+    harness.app.stdin.write('\r') // select the first model
+    await flush(20)
+    harness.app.stdin.write('\u001b[Z') // Shift+Tab: manual -> auto
+    await flush(10)
+    expect(persistPreferences).toHaveBeenLastCalledWith({
+      permissionMode: 'auto',
+      reasoningEffort: 'high',
+    })
+
+    harness.app.stdin.write('/effort')
+    await flush(5)
+    harness.app.stdin.write('\r')
+    await flush(10)
+    expect(harness.app.lastFrame()).toContain('推理强度')
+    harness.app.stdin.write('4') // max
+    await flush(10)
+    expect(persistPreferences).toHaveBeenLastCalledWith({
+      permissionMode: 'auto',
+      reasoningEffort: 'max',
+    })
     harness.app.unmount()
   })
 })
@@ -205,9 +298,15 @@ interface FakeSeams extends ModelRuntimeSeams {
   readonly createRuntime: ReturnType<typeof vi.fn>
   readonly configure: ReturnType<typeof vi.fn>
   readonly inspect: ReturnType<typeof vi.fn>
+  readonly persist: ReturnType<typeof vi.fn>
 }
 
-async function createHarness(): Promise<Harness> {
+async function createHarness(
+  persistPreferences?: (preferences: {
+    readonly permissionMode: 'manual' | 'auto' | 'bypass'
+    readonly reasoningEffort: 'off' | 'low' | 'medium' | 'high' | 'max'
+  }) => Promise<void>,
+): Promise<Harness> {
   const llm = new FakeModel([text('host done')])
   const seams: FakeSeams = {
     cwd: '/workspace',
@@ -223,6 +322,7 @@ async function createHarness(): Promise<Harness> {
       configPath: '/tmp/spark-test-home/config.toml',
       modelEntryId: input.alias,
     })),
+    persist: vi.fn(async () => undefined),
   }
   // The second runtime (after configureLocal) reuses the same fake service.
   seams.createRuntime.mockImplementation(async (options: { model: string }) => ({
@@ -252,6 +352,7 @@ async function createHarness(): Promise<Harness> {
       createSession={async () => agent.newSession()}
       seams={seams}
       switchable={switchable}
+      {...(persistPreferences === undefined ? {} : { persistPreferences })}
     />,
   )
   await flush(10)
@@ -265,6 +366,10 @@ interface HarnessAppProps {
   readonly createSession: () => Promise<AgentSession>
   readonly seams: ModelRuntimeSeams
   readonly switchable: SwitchableLlmService
+  readonly persistPreferences?: (preferences: {
+    readonly permissionMode: 'manual' | 'auto' | 'bypass'
+    readonly reasoningEffort: 'off' | 'low' | 'medium' | 'high' | 'max'
+  }) => Promise<void>
 }
 
 function HarnessApp(props: HarnessAppProps): React.ReactElement {
@@ -277,6 +382,9 @@ function HarnessApp(props: HarnessAppProps): React.ReactElement {
       createSession={props.createSession}
       modelRuntime={modelRuntime}
       capabilities={CAPABILITIES}
+      {...(props.persistPreferences === undefined
+        ? {}
+        : { persistPreferences: props.persistPreferences })}
     />
   )
 }

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import './ChatInspectorPanel.less'
+import './SessionPanelDesign.less'
 import { CheckCircle, Save } from 'lucide-react'
 import { Popover } from '@lobehub/ui'
 import { Switch } from 'antd'
@@ -52,6 +53,7 @@ import type {
 } from './ChatUsageTypes'
 import type { UIMessage } from '../../services/event-mapper'
 import { getVisibleTurnPromptSnapshotUserMessage } from './internal-turn-message-visibility'
+import { parseEnvVarsJson, serializeEnvVarsJson } from './chat-config-env-json'
 
 const EMPTY_PROMPT_LAYER: PromptConfigGetResponse['system'] = { enabled: false, content: '' }
 const EMPTY_ENV_LAYER: EnvConfigGetResponse['project'] = { enabled: true, vars: [] }
@@ -68,31 +70,44 @@ type EnvVarRowProps = {
 function EnvVarRow({ item, onUpdate, onRemove, onBlurPersist }: EnvVarRowProps) {
   return (
     <div className="runtime-env-row">
-      <input
-        className="form-input runtime-env-key"
-        placeholder="KEY"
-        value={item.key}
-        onChange={(event) => onUpdate({ key: event.target.value })}
-        onBlur={onBlurPersist}
-      />
-      <input
-        className="form-input runtime-env-value"
-        placeholder="VALUE"
-        value={item.value}
-        onChange={(event) => onUpdate({ value: event.target.value })}
-        onBlur={onBlurPersist}
-      />
-      <input
-        className="form-input runtime-env-description"
-        placeholder="说明（可选）"
-        value={item.description ?? ''}
-        onChange={(event) => onUpdate({ description: event.target.value })}
-        onBlur={onBlurPersist}
-      />
+      <label className="session-env-field session-env-field--key">
+        <span>键名</span>
+        <input
+          aria-label="环境变量键名"
+          className="form-input runtime-env-key"
+          placeholder="KEY"
+          value={item.key}
+          onChange={(event) => onUpdate({ key: event.target.value })}
+          onBlur={onBlurPersist}
+        />
+      </label>
+      <label className="session-env-field session-env-field--value">
+        <span>值</span>
+        <input
+          aria-label={`${item.key.trim() || '环境变量'}的值`}
+          className="form-input runtime-env-value"
+          placeholder="VALUE"
+          value={item.value}
+          onChange={(event) => onUpdate({ value: event.target.value })}
+          onBlur={onBlurPersist}
+        />
+      </label>
+      <label className="session-env-field session-env-field--description">
+        <span>说明 · 可选</span>
+        <input
+          aria-label={`${item.key.trim() || '环境变量'}的说明`}
+          className="form-input runtime-env-description"
+          placeholder="说明（可选）"
+          value={item.description ?? ''}
+          onChange={(event) => onUpdate({ description: event.target.value })}
+          onBlur={onBlurPersist}
+        />
+      </label>
       <button
         type="button"
         className="btn ghost sm runtime-env-remove"
         onClick={onRemove}
+        aria-label={`删除${item.key.trim() || '该环境变量'}`}
         title="删除"
       >
         <Icons.Trash size={12} />
@@ -225,11 +240,14 @@ export function ChatConfigPanel({
           value: { enabled: content.trim().length > 0, content },
         })
         await loadRuntimeConfig()
+        toast.success(`${scope === 'project' ? '项目' : '会话'}提示词已保存`)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '提示词保存失败')
       } finally {
         setSavingRuntime(false)
       }
     },
-    [loadRuntimeConfig, updatePromptConfig],
+    [loadRuntimeConfig, updatePromptConfig, toast],
   )
 
   const saveEnvLayer = useCallback(
@@ -237,7 +255,7 @@ export function ChatConfigPanel({
       scope: 'project' | 'session',
       scopeRef: string,
       vars: EnvVarItem[],
-      options?: { silent?: boolean },
+      options?: { silent?: boolean; successMessage?: string },
     ) => {
       // 仅保留键名非空的条目；键名两端空白去除。
       const cleaned = vars
@@ -258,7 +276,13 @@ export function ChatConfigPanel({
           scopeRef,
           value: { enabled: true, vars: cleaned },
         })
-        if (!options?.silent) await loadRuntimeConfig()
+        if (!options?.silent) {
+          await loadRuntimeConfig()
+          toast.success(
+            options?.successMessage ?? `${scope === 'project' ? '项目' : '会话'}环境变量已保存`,
+          )
+        }
+        return true
       } catch (err) {
         // 失败必须可见，否则用户以为「失焦已保存」实际丢了。
         // silent 路径触发频率高，用 console.warn 记录即可；显式保存失败弹 toast。
@@ -267,11 +291,62 @@ export function ChatConfigPanel({
         } else {
           toast.error(err instanceof Error ? err.message : '环境变量保存失败')
         }
+        return false
       } finally {
         if (!options?.silent) setSavingRuntime(false)
       }
     },
     [loadRuntimeConfig, updateEnvConfig, toast],
+  )
+
+  const copyEnvJson = useCallback(
+    async (scope: 'project' | 'session', vars: EnvVarItem[]) => {
+      try {
+        const json = serializeEnvVarsJson(vars)
+        await navigator.clipboard.writeText(json)
+        const count = parseEnvVarsJson(json).length
+        toast.success(`已复制 ${count} 个${scope === 'project' ? '项目' : '会话'}环境变量`)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '复制环境变量失败')
+      }
+    },
+    [toast],
+  )
+
+  const pasteEnvJson = useCallback(
+    async (
+      scope: 'project' | 'session',
+      scopeRef: string,
+      setVars: React.Dispatch<React.SetStateAction<EnvVarItem[]>>,
+    ) => {
+      let text: string
+      try {
+        text = await navigator.clipboard.readText()
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '读取剪贴板失败')
+        return
+      }
+
+      if (text.trim().length === 0) {
+        toast.warning('剪贴板为空')
+        return
+      }
+
+      let imported: EnvVarItem[]
+      try {
+        imported = parseEnvVarsJson(text)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '环境变量 JSON 导入失败')
+        return
+      }
+
+      const scopeLabel = scope === 'project' ? '项目' : '会话'
+      const saved = await saveEnvLayer(scope, scopeRef, imported, {
+        successMessage: `已导入并保存 ${imported.length} 个${scopeLabel}环境变量`,
+      })
+      if (saved) setVars(imported)
+    },
+    [saveEnvLayer, toast],
   )
 
   const handleResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -319,7 +394,13 @@ export function ChatConfigPanel({
     }
     return (
       <div className="runtime-prompt-block">
-        <div className="runtime-prompt-title">{label}</div>
+        <div className="runtime-prompt-title">
+          {label}
+          <span className="session-panel-count">{vars.length} 项</span>
+        </div>
+        <div className="session-panel-caption">
+          {scope === 'project' ? '项目内所有会话共享' : '仅当前会话生效，覆盖同名项目变量'}
+        </div>
         {vars.length === 0 && <div className="runtime-env-empty">{placeholder}</div>}
         {vars.map((item, index) => (
           <EnvVarRow
@@ -331,17 +412,39 @@ export function ChatConfigPanel({
           />
         ))}
         <div className="runtime-env-actions">
-          <button className="btn ghost sm runtime-env-add" onClick={addVar}>
+          <button type="button" className="btn ghost sm runtime-env-add" onClick={addVar}>
             <Icons.Plus size={12} /> 添加变量
           </button>
-          <button
-            className="btn primary sm runtime-save-btn"
-            disabled={savingRuntime}
-            onClick={() => void saveEnvLayer(scope, scopeRef, vars)}
-          >
-            <Save size={12} />
-            {scope === 'project' ? '保存项目' : '保存会话'}
-          </button>
+          <div className="runtime-env-transfer-actions">
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={`复制${label} JSON`}
+              title={`复制${label}明文 JSON`}
+              onClick={() => void copyEnvJson(scope, vars)}
+            >
+              <Icons.Copy size={12} />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label={`粘贴${label} JSON`}
+              disabled={savingRuntime}
+              title={`从剪贴板导入并保存${label}`}
+              onClick={() => void pasteEnvJson(scope, scopeRef, setVars)}
+            >
+              <Icons.Clipboard size={12} />
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm runtime-save-btn"
+              disabled={savingRuntime}
+              onClick={() => void saveEnvLayer(scope, scopeRef, vars)}
+            >
+              <Save size={12} />
+              {scope === 'project' ? '保存项目' : '保存会话'}
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -351,8 +454,8 @@ export function ChatConfigPanel({
     <div
       className={
         embedded
-          ? 'inspector-frame embedded config-panel-frame'
-          : 'inspector-frame config-panel-frame'
+          ? 'inspector-frame embedded config-panel-frame session-panel'
+          : 'inspector-frame config-panel-frame session-panel'
       }
       style={{ '--inspector-width': `${width}px` } as React.CSSProperties}
     >
@@ -367,19 +470,34 @@ export function ChatConfigPanel({
         />
       )}
       <div className="inspector scroll">
+        <header className="session-panel-heading">
+          <strong>配置面板</strong>
+          <span>管理项目与当前会话的运行配置</span>
+        </header>
         {/* 环境变量 */}
         {hasChatConfigScope(sessionId, workspaceId) && envConfig != null && (
           <div className="inspector-section">
-            <h4 className="config-panel-header" onClick={() => setEnvCollapsed(!envCollapsed)}>
-              <Icons.Lock size={11} />
-              环境变量
-              <span className="spacer" />
-              <Icons.ChevronRight size={10} className={`chev ${envCollapsed ? '' : 'chev-open'}`} />
+            <h4 className="config-panel-header">
+              <button
+                type="button"
+                className="session-panel-toggle"
+                aria-expanded={!envCollapsed}
+                onClick={() => setEnvCollapsed(!envCollapsed)}
+              >
+                <Icons.Lock size={11} />
+                环境变量
+                <span className="spacer" />
+                <Icons.ChevronRight
+                  size={10}
+                  className={`chev ${envCollapsed ? '' : 'chev-open'}`}
+                />
+              </button>
             </h4>
             {!envCollapsed && (
               <>
                 <div className="runtime-env-hint">
-                  键值仅保存在本机并注入运行环境，提示词中只暴露脱敏后的键名与描述，避免敏感信息泄露。修改后失焦或删除即自动保存，无需手动点保存。
+                  修改后失焦自动保存。变量值仅保存在本机并注入运行环境，提示词只包含键名与说明。
+                  复制 JSON 会将当前层级的明文值写入系统剪贴板，请妥善保管。
                 </div>
                 {workspaceId != null &&
                   renderEnvBlock(
@@ -407,17 +525,21 @@ export function ChatConfigPanel({
         {/* 提示词 */}
         {hasChatConfigScope(sessionId, workspaceId) && promptConfig != null && (
           <div className="inspector-section">
-            <h4
-              className="config-panel-header"
-              onClick={() => setPromptsCollapsed(!promptsCollapsed)}
-            >
-              <Icons.Edit size={11} />
-              提示词
-              <span className="spacer" />
-              <Icons.ChevronRight
-                size={10}
-                className={`chev ${promptsCollapsed ? '' : 'chev-open'}`}
-              />
+            <h4 className="config-panel-header">
+              <button
+                type="button"
+                className="session-panel-toggle"
+                aria-expanded={!promptsCollapsed}
+                onClick={() => setPromptsCollapsed(!promptsCollapsed)}
+              >
+                <Icons.Edit size={11} />
+                提示词
+                <span className="spacer" />
+                <Icons.ChevronRight
+                  size={10}
+                  className={`chev ${promptsCollapsed ? '' : 'chev-open'}`}
+                />
+              </button>
             </h4>
             {!promptsCollapsed && (
               <>
@@ -426,17 +548,20 @@ export function ChatConfigPanel({
                     <div className="runtime-prompt-title">项目提示词</div>
                     <textarea
                       className="spark-textarea inspector-textarea"
+                      aria-label="项目提示词"
                       value={projectPromptDraft}
                       onChange={(event) => setProjectPromptDraft(event.target.value)}
                       placeholder="当前项目会话通用提示词..."
                     />
                     <button
+                      type="button"
                       className="btn ghost sm runtime-save-btn"
                       disabled={savingRuntime}
                       onClick={() =>
                         void savePromptLayer('project', workspaceId, projectPromptDraft)
                       }
                     >
+                      <Save size={12} />
                       保存项目
                     </button>
                   </div>
@@ -446,15 +571,18 @@ export function ChatConfigPanel({
                     <div className="runtime-prompt-title">会话提示词</div>
                     <textarea
                       className="spark-textarea inspector-textarea"
+                      aria-label="会话提示词"
                       value={sessionPromptDraft}
                       onChange={(event) => setSessionPromptDraft(event.target.value)}
                       placeholder="仅对当前会话生效..."
                     />
                     <button
+                      type="button"
                       className="btn ghost sm runtime-save-btn"
                       disabled={savingRuntime}
                       onClick={() => void savePromptLayer('session', sessionId, sessionPromptDraft)}
                     >
+                      <Save size={12} />
                       保存会话
                     </button>
                   </div>
@@ -613,7 +741,7 @@ export function ChatInspector({
 
   return (
     <div
-      className="inspector-frame"
+      className="inspector-frame session-panel"
       style={{ '--inspector-width': `${width}px` } as React.CSSProperties}
     >
       <div
@@ -625,6 +753,10 @@ export function ChatInspector({
         onPointerCancel={handleResizeEnd}
       />
       <div className="inspector scroll">
+        <header className="session-panel-heading">
+          <strong>会话检查器</strong>
+          <span>查看执行状态、用量与上下文</span>
+        </header>
         {teamConfig.enabled && (
           <>
             <div className="inspector-section team-log-visibility-section">

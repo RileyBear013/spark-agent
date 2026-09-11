@@ -32,7 +32,10 @@ import {
 } from '../sub-app/subAppEvents'
 import { SubAppIcon } from '../sub-app/SubAppIcon'
 import { SUB_APP_ICON_OPTIONS } from '../sub-app/subAppIconOptions'
+import { SubAppExportModal, SubAppImportModal } from '../sub-app/SubAppShareModals'
+import { SubAppOperationsDrawer } from '../sub-app/SubAppOperationsDrawer'
 import { useApp } from '../AppContext'
+import { GLOBAL_DIALOG_Z_INDEX } from '../components/dialogZIndex'
 import { useI18n } from '../i18n'
 import { Icons } from '../Icons'
 import './SubAppsView.less'
@@ -40,6 +43,7 @@ import './SubAppsView.less'
 // ─── 状态展示 ────────────────────────────────────────────────────────────────
 
 type StatusBadge = { text: string; color: string }
+type AppStatusFilter = 'all' | 'published' | 'draft'
 
 function statusBadgeOf(app: SubAppSummary): StatusBadge {
   // 归档操作会同时置 enabled=0——archived 必须最先判断，
@@ -97,6 +101,7 @@ export function SubAppsView(): React.ReactElement {
   const [loading, setLoading] = useState(true)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<AppStatusFilter>('all')
   const [includeArchived, setIncludeArchived] = useState(false)
   const [busyAppId, setBusyAppId] = useState<string | null>(null)
 
@@ -109,6 +114,11 @@ export function SubAppsView(): React.ReactElement {
   const [guideOpen, setGuideOpen] = useState(false)
   const [iconEditorFor, setIconEditorFor] = useState<SubAppSummary | null>(null)
   const [iconSaving, setIconSaving] = useState(false)
+
+  // 分享 / 导入
+  const [exportFor, setExportFor] = useState<SubAppSummary | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [operationsFor, setOperationsFor] = useState<SubAppSummary | null>(null)
 
   const reload = useCallback(async (): Promise<void> => {
     setLoading(true)
@@ -216,17 +226,48 @@ export function SubAppsView(): React.ReactElement {
   const handlePublish = useCallback(
     (app: SubAppSummary): Promise<void> =>
       withBusy(app.id, async () => {
-        await subAppClient.publish({ appId: app.id, expectedDraftRevision: app.draftRevision })
+        if (app.format === 'v2') {
+          await subAppClient.projectPublish({
+            appId: app.id,
+            expectedDraftRevision: app.draftRevision,
+          })
+        } else {
+          await subAppClient.publish({ appId: app.id, expectedDraftRevision: app.draftRevision })
+        }
         antdMessage.success(`已发布 ${app.name} v${(app.publishedVersion ?? 0) + 1}`)
       }),
     [withBusy],
   )
 
   const handleSetEnabled = useCallback(
-    (app: SubAppSummary, enabled: boolean): Promise<void> =>
-      withBusy(app.id, async () => {
+    async (app: SubAppSummary, enabled: boolean): Promise<void> => {
+      if (enabled && app.format === 'v2') {
+        try {
+          const project = await subAppClient.projectStatus({ appId: app.id })
+          const effects = project.manifest?.permissions.osEffects ?? []
+          const hasService = project.manifest?.service != null
+          if (hasService || effects.length > 0) {
+            const confirmed = await new Promise<boolean>((resolve) => {
+              AntdModal.confirm({
+                title: '启用此 V2 应用？',
+                content: `该应用${hasService ? '包含受管后台服务' : '不含后台服务'}，OS effects：${effects.join('、') || '无'}。后台代码以当前用户权限运行，不是安全沙箱。`,
+                okText: '确认启用',
+                cancelText: '取消',
+                onOk: () => resolve(true),
+                onCancel: () => resolve(false),
+              })
+            })
+            if (!confirmed) return
+          }
+        } catch (err) {
+          antdMessage.error(`无法读取应用权限：${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+      }
+      return withBusy(app.id, async () => {
         await subAppClient.setEnabled({ appId: app.id, enabled })
-      }),
+      })
+    },
     [withBusy],
   )
 
@@ -337,39 +378,35 @@ export function SubAppsView(): React.ReactElement {
     [releasesFor, withBusy],
   )
 
+  const visibleApps = apps.filter((app) => {
+    if (statusFilter === 'all') return true
+    return app.publicationStatus === statusFilter
+  })
+  const draftCount = visibleApps.filter((app) => app.publicationStatus === 'draft').length
+
+  const handleHeaderDoubleClick = useCallback((event: React.MouseEvent<HTMLElement>): void => {
+    const target = event.target
+    if (
+      target instanceof Element &&
+      target.closest('button, input, textarea, select, label, a, [role="button"], [role="switch"]')
+    ) {
+      return
+    }
+    window.spark?.invoke('window:maximize', {}).catch(() => {})
+  }, [])
+
   return (
     <div className="sub-apps-view" data-testid="sub-apps-view">
       {/* macOS 下头部整条承担系统窗口拖拽（见 SubAppsView.less），双击触发最大化，
           与 App.tsx 跳过公用 MacWindowDragHeader 的逻辑配套。 */}
-      <header
-        className="sa-header"
-        onDoubleClick={() => {
-          window.spark?.invoke('window:maximize', {}).catch(() => {})
-        }}
-      >
-        <div className="sa-header-left">
-          <h2>{tr('nav.subApps')}</h2>
-          {!loading && errorMessage == null ? <span className="sa-count">{total}</span> : null}
+      <header className="sa-header" onDoubleClick={handleHeaderDoubleClick}>
+        <div className="sa-header-copy">
+          <div className="sa-header-left">
+            <h2>{tr('nav.subApps')}</h2>
+            {!loading && errorMessage == null ? <span className="sa-count">{total}</span> : null}
+          </div>
         </div>
         <div className="sa-header-right">
-          <Input
-            className="sa-search"
-            allowClear
-            placeholder="搜索应用名称 / 描述"
-            prefix={<Icons.Search size={14} />}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <Tooltip title="显示已归档的应用">
-            <label className="sa-archived-toggle">
-              <Switch
-                size="small"
-                checked={includeArchived}
-                onChange={(setChecked) => setIncludeArchived(setChecked)}
-              />
-              <span>归档</span>
-            </label>
-          </Tooltip>
           <Tooltip title="刷新">
             <Button
               type="text"
@@ -381,6 +418,9 @@ export function SubAppsView(): React.ReactElement {
               刷新
             </Button>
           </Tooltip>
+          <Button icon={<Icons.Upload size={15} />} onClick={() => setImportOpen(true)}>
+            导入
+          </Button>
           <Button
             type="primary"
             icon={<Icons.MessageSquare size={15} />}
@@ -392,6 +432,55 @@ export function SubAppsView(): React.ReactElement {
       </header>
 
       <div className="sa-body">
+        <div className="sa-toolbar" aria-label="应用筛选">
+          <div className="sa-toolbar-start">
+            <Input
+              className="sa-search"
+              allowClear
+              placeholder="搜索应用名称 / 描述"
+              prefix={<Icons.Search size={14} />}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="搜索应用"
+            />
+            <div className="sa-filters" role="group" aria-label="状态筛选">
+              {(
+                [
+                  ['all', '全部'],
+                  ['published', '已发布'],
+                  ['draft', '草稿'],
+                ] as const
+              ).map(([filter, label]) => (
+                <button
+                  key={filter}
+                  type="button"
+                  className={`sa-filter${statusFilter === filter ? ' is-active' : ''}`}
+                  aria-pressed={statusFilter === filter}
+                  onClick={() => setStatusFilter(filter)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="sa-toolbar-end">
+            <span className="sa-toolbar-meta">
+              {visibleApps.length} 个应用
+              {draftCount > 0 ? ` · ${draftCount} 个草稿` : ''}
+            </span>
+            <Tooltip title="显示已归档的应用">
+              <label className="sa-archived-toggle">
+                <Switch
+                  size="small"
+                  checked={includeArchived}
+                  onChange={(setChecked) => setIncludeArchived(setChecked)}
+                />
+                <span>归档</span>
+              </label>
+            </Tooltip>
+          </div>
+        </div>
+
         {errorMessage != null ? (
           <div className="sa-error" role="alert">
             <span>加载失败：{errorMessage}</span>
@@ -425,11 +514,25 @@ export function SubAppsView(): React.ReactElement {
           </div>
         ) : null}
 
-        {apps.length > 0 ? (
+        {apps.length > 0 && visibleApps.length === 0 ? (
+          <div className="sa-filter-empty">
+            <span className="sa-filter-empty-mark" aria-hidden>
+              <Icons.Search size={18} />
+            </span>
+            <strong>没有符合条件的应用</strong>
+            <span>试试切换状态或换个关键词。</span>
+            <Button size="small" type="text" onClick={() => setStatusFilter('all')}>
+              清除筛选
+            </Button>
+          </div>
+        ) : null}
+
+        {visibleApps.length > 0 ? (
           <div className="sa-grid">
-            {apps.map((app) => {
+            {visibleApps.map((app, index) => {
               const badge = statusBadgeOf(app)
               const busy = busyAppId === app.id
+              const featured = index === 0 && statusFilter === 'all' && !query.trim()
 
               // 低频操作收进「更多操作」菜单，卡片平铺区只保留 打开/发布/版本 三个常用入口。
               const moreMenu = {
@@ -466,6 +569,24 @@ export function SubAppsView(): React.ReactElement {
                         },
                       ]
                     : []),
+                  {
+                    key: 'operations',
+                    label: (
+                      <span className="sa-card-menu-item">
+                        <Icons.Activity size={14} /> 开发与运维
+                      </span>
+                    ),
+                    onClick: () => setOperationsFor(app),
+                  },
+                  {
+                    key: 'share',
+                    label: (
+                      <span className="sa-card-menu-item">
+                        <Icons.Download size={14} /> 分享导出
+                      </span>
+                    ),
+                    onClick: () => setExportFor(app),
+                  },
                   { type: 'divider' as const },
                   ...(app.publicationStatus === 'archived'
                     ? []
@@ -495,8 +616,9 @@ export function SubAppsView(): React.ReactElement {
               return (
                 <div
                   key={app.id}
-                  className={`sa-card sa-card-${app.surface}`}
+                  className={`sa-card sa-card-${app.surface}${featured ? ' sa-card-featured' : ''}`}
                   data-testid="sub-app-card"
+                  data-featured={featured ? 'true' : 'false'}
                 >
                   <div className="sa-card-top">
                     <span className="sa-card-icon" aria-hidden>
@@ -523,18 +645,38 @@ export function SubAppsView(): React.ReactElement {
                     </Tooltip>
                   </div>
 
-                  <p className="sa-card-desc" title={app.description}>
-                    {app.description || '暂无描述'}
-                  </p>
+                  {featured ? (
+                    <div className="sa-card-art" aria-hidden>
+                      <span className="sa-card-art-sheet sa-card-art-sheet-back" />
+                      <span className="sa-card-art-sheet sa-card-art-sheet-front">
+                        <i />
+                        <i />
+                        <i />
+                        <b />
+                      </span>
+                    </div>
+                  ) : null}
 
-                  <div className="sa-card-meta">
-                    <span className="sa-surface-tag">{surfaceLabel(app.surface)}</span>
-                    <span className="sa-updated">更新于 {formatTime(app.updatedAt)}</span>
+                  <div className="sa-card-main">
+                    <p className="sa-card-desc" title={app.description}>
+                      {app.description || '暂无描述'}
+                    </p>
+
+                    <div className="sa-card-meta">
+                      <span className="sa-surface-tag">{surfaceLabel(app.surface)}</span>
+                      <span className="sa-updated">更新于 {formatTime(app.updatedAt)}</span>
+                    </div>
                   </div>
 
                   <div className="sa-card-actions">
                     <div className="sa-card-action-main">
-                      <Button size="small" type="text" disabled={busy} onClick={() => openApp(app)}>
+                      <Button
+                        size="small"
+                        type={featured ? 'primary' : 'text'}
+                        className="sa-open-button"
+                        disabled={busy}
+                        onClick={() => openApp(app)}
+                      >
                         打开
                       </Button>
                       <Popconfirm
@@ -563,7 +705,13 @@ export function SubAppsView(): React.ReactElement {
                     </div>
                     <div className="sa-card-action-secondary">
                       <Dropdown menu={moreMenu} trigger={['click']} placement="bottomRight">
-                        <Button size="small" type="text" disabled={busy} title="更多操作">
+                        <Button
+                          size="small"
+                          type="text"
+                          disabled={busy}
+                          title="更多操作"
+                          aria-label={`更多操作：${app.name}`}
+                        >
                           <Icons.More size={16} />
                         </Button>
                       </Dropdown>
@@ -572,6 +720,17 @@ export function SubAppsView(): React.ReactElement {
                 </div>
               )
             })}
+            {!query.trim() && statusFilter === 'all' ? (
+              <button type="button" className="sa-create-card" onClick={() => setGuideOpen(true)}>
+                <span className="sa-create-card-icon" aria-hidden>
+                  <Icons.Plus size={18} />
+                </span>
+                <span>
+                  <strong>创建一个新应用</strong>
+                  <small>从一个想法开始，让 Agent 帮你完成</small>
+                </span>
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -635,8 +794,12 @@ export function SubAppsView(): React.ReactElement {
       </Drawer>
 
       <Modal
+        className="sa-guide-modal"
         title="让 Agent 创建子应用"
         open={guideOpen}
+        zIndex={GLOBAL_DIALOG_Z_INDEX}
+        closable
+        closeIcon={<Icons.X size={18} />}
         onCancel={() => setGuideOpen(false)}
         footer={
           <Button type="primary" onClick={goChatForAgent}>
@@ -655,6 +818,24 @@ export function SubAppsView(): React.ReactElement {
           </ul>
         </div>
       </Modal>
+
+      {/* key 随目标应用变化：切换应用时弹窗重挂载，勾选与结果状态自然复位。 */}
+      <SubAppExportModal
+        key={exportFor?.id ?? 'closed'}
+        app={exportFor}
+        onClose={() => setExportFor(null)}
+      />
+
+      <SubAppImportModal
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={() => {
+          notifySubAppDirectoryChanged()
+          void reload()
+        }}
+      />
+
+      <SubAppOperationsDrawer app={operationsFor} onClose={() => setOperationsFor(null)} />
 
       <Modal
         title={iconEditorFor == null ? '设置应用图标' : `设置「${iconEditorFor.name}」图标`}

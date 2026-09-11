@@ -16,6 +16,7 @@ import type {
   AgentEvent,
   CliSparkOverride,
   SessionChatMode,
+  SessionExtractTitleResponse,
   SessionId,
   SessionListResponse,
   SessionPermissionMode,
@@ -31,6 +32,7 @@ import {
   getDebugModeFromMetadata,
   getFastModeFromMetadata,
   getImportedFromMetadata,
+  getLastRunOutcomeFromMetadata,
   normalizeCliSparkOverride,
   normalizeReasoningEffort,
   toProtocolCandidate,
@@ -40,6 +42,7 @@ import {
   trimHistoryEvent,
 } from './session-pure-utils.js'
 import { getAgentAdapterFromSession, getPermissionModeFromSession } from './engine-kinds.js'
+import { extractSessionTitle } from './session-title-extraction.js'
 import type { AgentAdapterKind } from '../session-resume-gate.js'
 import type { SparkReasoningEffort } from '../../sdk/reasoning-effort.js'
 
@@ -223,6 +226,11 @@ export class SessionCrudController {
     return { events, hasMore }
   }
 
+  /** 重命名弹窗「提取标题」：按会话模型/默认模型从会话内容提取标题（不落库）。 */
+  async extractSessionTitle(sessionId: string): Promise<SessionExtractTitleResponse> {
+    return extractSessionTitle({ db: this.db, sessionId })
+  }
+
   async listSessions(params?: {
     workspaceId?: string
     status?: 'idle' | 'running' | 'error'
@@ -249,6 +257,7 @@ export class SessionCrudController {
       reasoningEffort: normalizeReasoningEffort(row.reasoning_effort),
       fastMode: getFastModeFromMetadata(row.metadata_json),
       status: row.status as 'idle' | 'running' | 'error',
+      lastRunOutcome: getLastRunOutcomeFromMetadata(row.metadata_json),
       pinnedAt: row.pinned_at,
       archivedAt: row.archived_at,
       createdAt: row.created_at,
@@ -429,6 +438,7 @@ export class SessionCrudController {
         reasoningEffort: normalizeReasoningEffort(row.reasoning_effort),
         fastMode: getFastModeFromMetadata(row.metadata_json),
         status: row.status as 'idle' | 'running' | 'error',
+        lastRunOutcome: getLastRunOutcomeFromMetadata(row.metadata_json),
         pinnedAt: row.pinned_at,
         archivedAt: row.archived_at,
         createdAt: row.created_at,

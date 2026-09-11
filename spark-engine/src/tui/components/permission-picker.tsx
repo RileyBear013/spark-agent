@@ -1,25 +1,26 @@
-import { Box, Text, useInput } from 'ink'
+import { Text, useInput } from 'ink'
 import { useEffect, useState, type ReactElement } from 'react'
 
 import type { PermissionMode } from '../../permission/types.js'
-import type { TuiTheme } from '../theme.js'
+import type { TerminalCapabilities, TuiTheme } from '../theme.js'
+import { PickerFrame, PickerRow } from './picker-layout.js'
 
-// Codex-style naming: 请求批准 (ask every time) / 自动权限 (auto) / 完全访问
-// (full access); 计划模式 stays because the engine's plan-approval flow is a
-// first-class feature that codex exposes as a separate toggle.
+// Exactly three approval levels, mirroring the engine's PermissionMode union:
+// manual asks per call, auto approves everything short of explicit deny rules,
+// bypass skips the policy entirely.
 export const PERMISSION_MODES: readonly {
   readonly mode: PermissionMode
   readonly label: string
   readonly hint: string
 }[] = [
-  { mode: 'default', label: '请求批准', hint: '写入/命令逐次审批' },
-  { mode: 'acceptEdits', label: '自动权限', hint: '文件编辑免审批,命令仍需确认' },
-  { mode: 'plan', label: '计划模式', hint: '只读探索并产出计划,批准后转执行' },
-  { mode: 'bypass', label: '完全访问', hint: '危险:所有工具不经审批直接执行' },
+  { mode: 'manual', label: '手动审批', hint: '写入/命令逐次确认,只读工具直接执行' },
+  { mode: 'auto', label: '自动审批', hint: '所有工具自动执行(显式 deny 规则仍生效)' },
+  { mode: 'bypass', label: '完全访问', hint: '危险:跳过全部审批与规则' },
 ]
 
 export interface PermissionPickerProps {
   readonly theme: TuiTheme
+  readonly capabilities?: TerminalCapabilities | undefined
   readonly current: PermissionMode
   /** Selected after the destructive double-confirm; others apply immediately. */
   onPick(mode: PermissionMode): void
@@ -28,8 +29,8 @@ export interface PermissionPickerProps {
 }
 
 /**
- * Interactive permission-mode switcher. Switching is session-scoped: the new
- * policy applies to subsequent turns of this conversation only.
+ * Interactive permission-mode switcher. The new policy applies to subsequent
+ * turns and is persisted as the CLI default by the owning TUI.
  */
 export function PermissionPicker(props: PermissionPickerProps): ReactElement {
   const initialIndex = Math.max(
@@ -80,30 +81,37 @@ export function PermissionPicker(props: PermissionPickerProps): ReactElement {
   }
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={props.theme.accent} paddingX={1}>
-      <Text color={props.theme.accent}>
-        权限策略切换(本会话生效){armingBypass ? ' · 再次按 enter 确认危险选项' : ''}
-      </Text>
+    <PickerFrame
+      title="权限策略切换"
+      titleSuffix={armingBypass ? ' · 再次按 enter 确认危险选项' : ' · 本会话生效'}
+      footer="↑↓/数字 选择 · enter 应用 · esc 关闭"
+      theme={props.theme}
+    >
       {PERMISSION_MODES.map((entry, index) => (
-        <Text key={entry.mode} {...(entry.mode === 'bypass' ? { color: props.theme.warn } : {})}>
+        <PickerRow
+          key={entry.mode}
+          selected={selected === index}
+          theme={props.theme}
+          capabilities={props.capabilities}
+          warning={entry.mode === 'bypass'}
+        >
           {selected === index ? '❯' : ' '} {index + 1} {entry.label}
           <Text color={props.theme.dim}> — {entry.hint}</Text>
           {entry.mode === props.current ? <Text color={props.theme.ok}> ✓当前</Text> : null}
-        </Text>
+        </PickerRow>
       ))}
-      <Text color={props.theme.dim}>↑↓/数字 选择 · enter 应用 · esc 关闭</Text>
-    </Box>
+    </PickerFrame>
   )
 }
 
 /**
- * Cycles through the non-destructive modes only (default → acceptEdits → plan
- * → default), so a single stray keypress can never arm permission bypass.
- * Switching to `bypass` must go through PermissionPicker's double confirm.
+ * Cycles between the non-destructive modes only (manual ↔ auto), so a single
+ * stray keypress can never arm permission bypass. Switching to `bypass` must
+ * go through PermissionPicker's double confirm.
  */
 export function nextPermissionMode(current: PermissionMode): PermissionMode {
-  const safeModes: readonly PermissionMode[] = ['default', 'acceptEdits', 'plan']
-  if (current === 'bypass') return 'default'
+  const safeModes: readonly PermissionMode[] = ['manual', 'auto']
+  if (current === 'bypass') return 'manual'
   const index = safeModes.indexOf(current)
-  return safeModes[(index + 1) % safeModes.length] ?? 'default'
+  return safeModes[(index + 1) % safeModes.length] ?? 'manual'
 }

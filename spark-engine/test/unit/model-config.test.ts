@@ -13,13 +13,34 @@ afterEach(async () => {
 })
 
 describe('model configuration', () => {
+  it('keeps standalone model context and output budgets on the resolved runtime', async () => {
+    const root = await createRoot()
+    const globalPath = join(root, 'home', 'config.toml')
+    await writeFile(
+      globalPath,
+      '[agent]\nmodel = "main"\n\n[providers.local]\nprotocol = "openai-responses"\napi_key_env = "TEST_KEY"\n\n[models.main]\nprovider = "local"\nmodel = "gpt-test"\ncontext_window = 128000\nmax_tokens = 64000\n',
+    )
+
+    const runtime = await loadConfiguredModel({
+      cwd: join(root, 'project'),
+      globalConfigPath: globalPath,
+      projectConfigPath: join(root, 'project', '.spark', 'config.toml'),
+      env: { TEST_KEY: 'secret' },
+    })
+
+    expect(runtime.service.getModelBudget?.()).toEqual({
+      contextWindowTokens: 128_000,
+      maxOutputTokens: 64_000,
+    })
+  })
+
   it('merges global, project, environment, and CLI layers in precedence order', async () => {
     const root = await createRoot()
     const globalPath = join(root, 'home', 'config.toml')
     const projectPath = join(root, 'project', '.spark', 'config.toml')
     await writeFile(
       globalPath,
-      '[agent]\nmodel = "primary"\nfailover = ["backup"]\nmax_retries = 1\n\n[providers.local]\nprotocol = "openai-responses"\nbase_url = "https://global.example/v1"\napi_key_env = "TEST_KEY"\n\n[models.primary]\nprovider = "local"\nmodel = "global-model"\n\n[models.backup]\nprovider = "local"\nmodel = "backup-model"\n',
+      '[agent]\nmodel = "primary"\nfailover = ["backup"]\nmax_retries = 1\nretry_initial_delay_ms = 1000\nretry_max_delay_ms = 30000\nretry_jitter_ratio = 0.1\n\n[providers.local]\nprotocol = "openai-responses"\nbase_url = "https://global.example/v1"\napi_key_env = "TEST_KEY"\n\n[models.primary]\nprovider = "local"\nmodel = "global-model"\n\n[models.backup]\nprovider = "local"\nmodel = "backup-model"\n',
     )
     await writeFile(
       projectPath,
@@ -36,6 +57,12 @@ describe('model configuration', () => {
     expect(runtime.route).toEqual(['primary', 'backup'])
     expect(JSON.stringify(runtime.configSnapshot)).not.toContain('secret')
     expect(runtime.configSnapshot).toMatchObject({
+      agent: {
+        max_retries: 1,
+        retry_initial_delay_ms: 1_000,
+        retry_max_delay_ms: 30_000,
+        retry_jitter_ratio: 0.1,
+      },
       providers: { local: { base_url: 'https://project.example/v1' } },
       models: { primary: { model: 'project-model', provider: 'local' } },
     })
@@ -117,6 +144,8 @@ describe('model configuration', () => {
                 providerName: 'Provider One',
                 protocol: 'openai-responses',
                 model: 'gpt-test',
+                contextWindow: 200_000,
+                maxOutputTokens: 64_000,
               },
             ],
           }),
@@ -126,6 +155,10 @@ describe('model configuration', () => {
 
     expect(runtime.modelId).toBe('sparkwork:provider-1:gpt-test')
     expect(runtime.route).toEqual(['sparkwork:provider-1:gpt-test'])
+    expect(runtime.service.getModelBudget?.()).toEqual({
+      contextWindowTokens: 200_000,
+      maxOutputTokens: 64_000,
+    })
     expect(JSON.stringify(runtime.configSnapshot)).not.toContain('bridge-token')
     expect(runtime.configSnapshot).toMatchObject({
       sparkwork: {
@@ -185,6 +218,65 @@ describe('model configuration', () => {
     })
 
     expect(runtime.modelId).toBe('local')
+  })
+
+  it('keeps a persisted CLI selection above the SparkWork default route', async () => {
+    const root = await createRoot()
+    const globalPath = join(root, 'home', 'config.toml')
+    await writeFile(globalPath, '[agent]\nmodel = "sparkwork:provider-1:picked-model"\n')
+    const descriptorPath = join(root, 'bridge.json')
+    await writeFile(
+      descriptorPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        host: 'sparkwork',
+        instanceId: 'instance-1234567890',
+        endpoint: 'http://127.0.0.1:39876',
+        token: 'bridge-token-that-is-long-enough-to-be-private',
+        pid: 1234,
+        startedAt: '2026-08-26T12:00:00.000Z',
+      }),
+      { mode: 0o600 },
+    )
+    if (process.platform !== 'win32') await chmod(descriptorPath, 0o600)
+    const runtime = await loadConfiguredModel({
+      cwd: join(root, 'project'),
+      globalConfigPath: globalPath,
+      projectConfigPath: join(root, 'project', '.spark', 'config.toml'),
+      sparkWorkBridgePath: descriptorPath,
+      env: {},
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            schemaVersion: 1,
+            host: 'sparkwork',
+            revision: 'c'.repeat(64),
+            generatedAt: '2026-08-26T12:00:00.000Z',
+            defaultRoute: 'sparkwork:provider-1:host-model',
+            routes: [
+              {
+                routeId: 'sparkwork:provider-1:host-model',
+                providerId: 'provider-1',
+                providerName: 'Provider One',
+                protocol: 'openai-responses',
+                model: 'host-model',
+              },
+              {
+                routeId: 'sparkwork:provider-1:picked-model',
+                providerId: 'provider-1',
+                providerName: 'Provider One',
+                protocol: 'openai-responses',
+                model: 'picked-model',
+              },
+            ],
+          }),
+        ),
+    })
+
+    expect(runtime.modelId).toBe('sparkwork:provider-1:picked-model')
+    expect(runtime.configSnapshot).toMatchObject({
+      sparkwork: { selectedRoute: 'sparkwork:provider-1:picked-model' },
+    })
   })
 })
 

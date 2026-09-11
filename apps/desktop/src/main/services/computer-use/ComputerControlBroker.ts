@@ -10,6 +10,7 @@ import {
   ComputerActionEnvelopeSchema,
   ComputerObservationSchema,
   ComputerUseErrorCodeSchema,
+  describeComputerAction,
 } from '@spark/protocol'
 import type { ComputerActionRow, CreateComputerActionParams } from '@spark/storage'
 import type { ComputerApprovalService } from './ComputerApprovalService.js'
@@ -141,7 +142,16 @@ export class ComputerControlBroker {
   }> {
     const parsedEnvelope = ComputerActionEnvelopeSchema.safeParse(envelopeInput)
     if (!parsedEnvelope.success) {
-      throw new ComputerUseBrokerError('action_not_allowed', 'Computer action payload is invalid')
+      // Surface the first concrete schema issue so the caller (and the model
+      // behind it) can self-correct — a bare "payload is invalid" forced whole
+      // tasks to die on a single unrecognized key name.
+      const issue = parsedEnvelope.error.issues[0]
+      const path =
+        issue?.path.length != null && issue.path.length > 0 ? `${issue.path.join('.')}: ` : ''
+      throw new ComputerUseBrokerError(
+        'action_not_allowed',
+        `Computer action payload is invalid — ${path}${issue?.message ?? 'unknown issue'}`,
+      )
     }
     const envelope = parsedEnvelope.data
     if (this.activeDispatches.has(envelope.computerSessionId)) {
@@ -174,6 +184,7 @@ export class ComputerControlBroker {
       observation.foreground.app,
     )
     const actionRow = this.persistRequestedAction(envelope, policyDecision)
+    const summary = describeComputerAction(envelope.action)
     this.timeline?.record({
       type: 'computer_action_requested',
       sessionId: context.session.sessionId,
@@ -181,6 +192,7 @@ export class ComputerControlBroker {
       computerSessionId: envelope.computerSessionId,
       actionId: envelope.actionId,
       riskLevel: policyDecision.riskLevel,
+      summary,
     })
     if (policyDecision.decision === 'deny') {
       const errorCode = toComputerUseErrorCode(policyDecision.reasonCode)
@@ -192,6 +204,7 @@ export class ComputerControlBroker {
         computerSessionId: envelope.computerSessionId,
         actionId: envelope.actionId,
         errorCode,
+        summary,
       })
       throw new ComputerUseBrokerError(errorCode, 'Computer action was denied by policy')
     }
@@ -239,6 +252,7 @@ export class ComputerControlBroker {
           computerSessionId: envelope.computerSessionId,
           actionId: envelope.actionId,
           errorCode: brokerError.code,
+          summary,
         })
         // Never auto-pause/abort on an execution failure: a single failed action must not
         // interrupt the task. Surface the error to the operator/agent so it can choose an
@@ -264,6 +278,7 @@ export class ComputerControlBroker {
         computerSessionId: envelope.computerSessionId,
         actionId: envelope.actionId,
         errorCode: 'action_noop',
+        summary,
       })
       this.sessions.setPhase(envelope.computerSessionId, 'observing')
       throw new ComputerUseBrokerError('action_noop', 'Computer action made no observable change')
@@ -289,6 +304,7 @@ export class ComputerControlBroker {
       actionId: envelope.actionId,
       beforeFrameId: envelope.observedFrameId,
       afterFrameId: result.observation.frameId,
+      summary,
     })
     this.rollout?.recordAction(false)
     this.sessions.setPhase(envelope.computerSessionId, 'observing')

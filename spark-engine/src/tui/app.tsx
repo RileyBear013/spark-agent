@@ -1,25 +1,40 @@
 import { Box, Text, useApp, useStdout } from 'ink'
+import { homedir } from 'node:os'
+import { sep } from 'node:path'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
+import {
+  expandCustomCommand,
+  matchCustomCommand,
+  type CustomCommand,
+} from '../commands/custom-commands.js'
 import type { AgentEvent } from '../events/schema.js'
+import { shortSessionId } from '../events/ledger.js'
+import type { SessionMeta } from '../seams.js'
 import type { LlmDelta, ReasoningEffort } from '../llm/types.js'
 import type { InteractiveApprover, PendingApproval } from '../permission/interactive.js'
 import type { PermissionDecision, PermissionMode } from '../permission/types.js'
 import type { AgentSession } from '../sdk/agent.js'
 import { SPARK_ENGINE_VERSION } from '../version.js'
 import { PermissionCard } from './components/permission-card.js'
-import { PERMISSION_MODES, PermissionPicker, nextPermissionMode } from './components/permission-picker.js'
-import { EffortPicker } from './components/effort-picker.js'
+import {
+  PERMISSION_MODES,
+  PermissionPicker,
+  nextPermissionMode,
+} from './components/permission-picker.js'
+import { DEFAULT_REASONING_EFFORT, EffortPicker } from './components/effort-picker.js'
 import { ActiveTools, Transcript } from './components/rows.js'
+import { SessionPicker } from './components/session-picker.js'
+import { ScrollRegion } from './components/scroll-region.js'
+import { StatusBar } from './components/status-bar.js'
 import { InputEditor } from './components/input-editor.js'
-import { PlanApprovalCard } from './components/plan-card.js'
 import { WorkingLine } from './components/spinner.js'
 import { WelcomeBox } from './components/welcome.js'
 import { ModelPicker, ProviderConfigForm } from './model-flow.js'
 import { displayModelName } from './display-name.js'
-import { effortLabel, helpDetail } from './slash-commands.js'
+import { helpDetail } from './slash-commands.js'
 import type { ModelRuntimeController } from './use-model-runtime.js'
-import { projectTranscript } from './projection.js'
+import { projectTranscript, type ActiveToolProjection } from './projection.js'
 import {
   describeUpdateOutcome,
   type SparkUpdateRunner,
@@ -45,8 +60,23 @@ export interface SparkTuiAppProps {
   /** In-TUI self-update channel; absent disables /update (static/test mode). */
   readonly updateRunner?: SparkUpdateRunner
   readonly permissionMode?: PermissionMode
+  /** Persists the selected CLI defaults for the next launch. */
+  readonly persistPreferences?: (preferences: {
+    readonly permissionMode: PermissionMode
+    readonly reasoningEffort: ReasoningEffort
+  }) => Promise<void>
   /** Initial reasoning effort (from --effort); adjustable via /effort. */
   readonly reasoningEffort?: ReasoningEffort
+  /** Prompt files from `.spark/commands/**`; expanded and sent as the turn input. */
+  readonly customCommands?: readonly CustomCommand[]
+  /** Working directory shown in the status bar; defaults to blank when unknown. */
+  readonly cwd?: string
+  /** Reopen a recorded session by id; absent disables /sessions switching. */
+  readonly openSession?: (sessionId: string) => Promise<AgentSession>
+  /** Resumable sessions for the /sessions picker (most recent first). */
+  readonly listSessions?: () => Promise<readonly SessionMeta[]>
+  /** Open the session picker at startup (bare `spark --resume`). */
+  readonly resumePicker?: boolean
 }
 
 interface NoticeState {
@@ -56,6 +86,59 @@ interface NoticeState {
 
 function permissionLabel(mode: PermissionMode): string {
   return PERMISSION_MODES.find((entry) => entry.mode === mode)?.label ?? mode
+}
+
+/** Collapse the home prefix to `~` so the status bar path stays short. */
+function formatCwd(cwd: string | undefined): string | undefined {
+  if (cwd === undefined || cwd === '') return undefined
+  const home = homedir()
+  if (cwd === home) return '~'
+  if (cwd.startsWith(home + sep)) return '~' + cwd.slice(home.length)
+  return cwd
+}
+
+interface StepPerf {
+  readonly tokensPerSec: number
+  readonly ttftMs: number
+}
+
+/**
+ * Throughput and time-to-first-token of the most recent model call, derived
+ * from the latest assistant event that carries adapter timing.
+ */
+function lastStepPerf(events: readonly AgentEvent[]): StepPerf | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'assistant.completed') continue
+    if (event.llmMs <= 0 && event.ttftMs <= 0) continue
+    return {
+      tokensPerSec: event.llmMs > 0 ? (event.usage.outputTokens / event.llmMs) * 1_000 : 0,
+      ttftMs: event.ttftMs,
+    }
+  }
+  return undefined
+}
+
+/** Compact bar segment, e.g. `38.5 tok/s · ttft 0.8s`; empty parts dropped. */
+function formatPerf(perf: StepPerf): string {
+  const segments: string[] = []
+  if (perf.tokensPerSec > 0) {
+    const rate =
+      perf.tokensPerSec >= 100
+        ? Math.round(perf.tokensPerSec).toString()
+        : perf.tokensPerSec.toFixed(1)
+    segments.push(`${rate} tok/s`)
+  }
+  if (perf.ttftMs > 0) {
+    const ttft =
+      perf.ttftMs >= 10_000
+        ? `${Math.round(perf.ttftMs / 1_000)}s`
+        : perf.ttftMs >= 1_000
+          ? `${(perf.ttftMs / 1_000).toFixed(1)}s`
+          : `${Math.round(perf.ttftMs)}ms`
+    segments.push(`ttft ${ttft}`)
+  }
+  return segments.join(' · ')
 }
 
 function noticeColor(theme: TuiTheme, tone: NoticeState['tone']): string {
@@ -71,16 +154,17 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
   const theme = props.theme ?? defaultTheme
   // Capabilities re-detect on terminal resize so wrapping reflows; the
   // initial value honors the injected prop (tests pin width/color mode).
-  const [capabilities, setCapabilities] = useState(() => props.capabilities ?? detectTerminalCapabilities())
-  // Bumped after a resize repaint: remounts <Static> so already-written rows
-  // are re-emitted at the new width instead of staying at the old one.
-  const [resizeVersion, setResizeVersion] = useState(0)
+  const [capabilities, setCapabilities] = useState(
+    () => props.capabilities ?? detectTerminalCapabilities(),
+  )
   const [session, setSession] = useState(props.initialSession)
   const [events, setEvents] = useState<AgentEvent[]>([...props.initialEvents])
   const [liveText, setLiveText] = useState('')
   const [liveThinking, setLiveThinking] = useState('')
+  const [retrying, setRetrying] = useState<Extract<LlmDelta, { type: 'retry' }>>()
   const [showThinking, setShowThinking] = useState(true)
   const [activeTurns, setActiveTurns] = useState(0)
+  const [cancelling, setCancelling] = useState(false)
   const [pending, setPending] = useState<PendingApproval>()
   const [notice, setNoticeFull] = useState<NoticeState | undefined>(
     props.permissionMode === 'bypass'
@@ -91,44 +175,65 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
   const [configFormOpen, setConfigFormOpen] = useState(false)
   const [permPickerOpen, setPermPickerOpen] = useState(false)
   const [effortPickerOpen, setEffortPickerOpen] = useState(false)
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | undefined>(
-    props.reasoningEffort,
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(props.resumePicker === true)
+  const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
+  // Always explicit: the engine never sends a channel-dependent "auto" effort.
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(
+    props.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
   )
   const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
     props.permissionMode ?? props.initialSession.permissionMode,
   )
   const [updateRunning, setUpdateRunning] = useState(false)
   const [updateCheckOnly, setUpdateCheckOnly] = useState(false)
-  /** Non-empty after a plan-mode turn produced a plan awaiting approval. */
-  const [planProposal, setPlanProposal] = useState<string | undefined>(undefined)
+  const [outputScrolled, setOutputScrolled] = useState(false)
   const controllers = useRef<AbortController[]>([])
   const exitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => props.approver.subscribe(setPending), [props.approver])
 
-  // Terminal-resize repaint: <Static> content is written once and never
-  // reflows, so after the width settles we clear the screen, refresh the
-  // detected capabilities, and remount the transcript (key change) to re-emit
-  // every settled row at the new width. Debounced because drag-resize fires
-  // a burst of events and each repaint rewrites the whole log; height-only
-  // changes reflow natively and are skipped.
+  // Load the session list whenever the picker becomes visible (the startup
+  // picker and /sessions share it); a failed read leaves the picker usable
+  // but empty instead of crashing the render.
   useEffect(() => {
-    let repaint: ReturnType<typeof setTimeout> | undefined
+    if (!sessionPickerOpen || props.listSessions === undefined) return
+    let cancelled = false
+    props
+      .listSessions()
+      .then((found) => {
+        if (!cancelled) setSessions(found)
+      })
+      .catch(() => {
+        if (!cancelled) setSessions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionPickerOpen, props.listSessions])
+
+  // Static transcript rows already live in terminal history. Replaying them
+  // on resize appends duplicate history because clearing the viewport does not
+  // clear scrollback. Let the terminal reflow committed rows and only refresh
+  // capabilities for subsequent/dynamic layout after the width settles.
+  useEffect(() => {
+    let refresh: ReturnType<typeof setTimeout> | undefined
     let lastWidth = stdout.columns
+    let lastHeight = stdout.rows
     const onResize = (): void => {
-      if (stdout.columns === lastWidth) return
-      if (repaint !== undefined) clearTimeout(repaint)
-      repaint = setTimeout(() => {
+      const width = stdout.columns
+      const height = stdout.rows
+      if (width === undefined || (width === lastWidth && height === lastHeight)) return
+      if (refresh !== undefined) clearTimeout(refresh)
+      refresh = setTimeout(() => {
         lastWidth = stdout.columns
-        stdout.write('\x1b[2J\x1b[H')
+        lastHeight = stdout.rows
         setCapabilities(detectTerminalCapabilities(stdout))
-        setResizeVersion((version) => version + 1)
       }, 150)
     }
     stdout.on('resize', onResize)
     return () => {
       stdout.off('resize', onResize)
-      if (repaint !== undefined) clearTimeout(repaint)
+      if (refresh !== undefined) clearTimeout(refresh)
     }
   }, [stdout])
 
@@ -144,17 +249,35 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
     setNoticeFull({ text, tone: 'warn' })
   }, [])
 
+  const persistPreferences = useCallback(
+    (preferences: {
+      readonly permissionMode: PermissionMode
+      readonly reasoningEffort: ReasoningEffort
+    }): void => {
+      if (props.persistPreferences === undefined) return
+      void props.persistPreferences(preferences).catch((error: unknown) => {
+        setNoticeFull({
+          text: `写入 CLI 默认配置失败：${error instanceof Error ? error.message : String(error)}`,
+          tone: 'error',
+        })
+      })
+    },
+    [props.persistPreferences],
+  )
+
   const appendEvent = useCallback((event: AgentEvent) => {
     setEvents((current) =>
       current.some((candidate) => candidate.seq === event.seq) ? current : [...current, event],
     )
     if (
+      event.type === 'assistant.completed' ||
       event.type === 'turn.completed' ||
       event.type === 'turn.cancelled' ||
       event.type === 'turn.failed'
     ) {
       setLiveText('')
       setLiveThinking('')
+      setRetrying(undefined)
     }
   }, [])
 
@@ -164,16 +287,25 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
   const pickerOpen = modelRuntime?.open === true
 
   const handleDelta = useCallback((delta: LlmDelta) => {
-    if (delta.type === 'text') setLiveText((current) => current + delta.text)
-    else if (delta.type === 'thinking') setLiveThinking((current) => current + delta.text)
+    if (delta.type === 'retry') {
+      if (delta.resetOutput) {
+        setLiveText('')
+        setLiveThinking('')
+      }
+      setRetrying(delta)
+    } else if (delta.type === 'text') {
+      setRetrying(undefined)
+      setLiveText((current) => current + delta.text)
+    } else if (delta.type === 'thinking') {
+      setRetrying(undefined)
+      setLiveThinking((current) => current + delta.text)
+    } else if (delta.type === 'tool_call') {
+      setRetrying(undefined)
+    }
   }, [])
 
-  const submit = useCallback(
-    (value: string) => {
-      if (value.startsWith('/')) {
-        void handleCommand(value)
-        return
-      }
+  const startTurn = useCallback(
+    (prompt: string) => {
       if (effectiveModel === undefined) {
         modelRuntime?.openPicker('先选择或配置一个模型，再开始任务')
         return
@@ -182,20 +314,55 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
       controllers.current.push(controller)
       setActiveTurns((count) => count + 1)
       setNoticeFull(undefined)
-      setPlanProposal(undefined)
       void session
-        .turn(value, {
+        .turn(prompt, {
           signal: controller.signal,
-          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+          reasoningEffort,
           onEvent: appendEvent,
           onDelta: handleDelta,
         })
+        .catch((error: unknown) => {
+          setNoticeFull({
+            text: `任务执行失败：${error instanceof Error ? error.message : String(error)}`,
+            tone: 'error',
+          })
+        })
         .finally(() => {
+          if (controller.signal.aborted) setCancelling(false)
           controllers.current = controllers.current.filter((candidate) => candidate !== controller)
           setActiveTurns((count) => Math.max(0, count - 1))
         })
     },
     [appendEvent, effectiveModel, handleDelta, modelRuntime, reasoningEffort, session],
+  )
+
+  const submit = useCallback(
+    (value: string) => {
+      if (value.startsWith('/')) {
+        const custom =
+          props.customCommands === undefined
+            ? undefined
+            : matchCustomCommand(value, props.customCommands)
+        if (custom) {
+          const expanded = expandCustomCommand(custom.command, custom.args)
+          setNoticeFull({
+            text: `已展开自定义命令 /${custom.command.name}，作为任务发送…`,
+            tone: 'info',
+          })
+          startTurn(expanded)
+          return
+        }
+        void handleCommand(value).catch((error: unknown) => {
+          setNoticeFull({
+            text: `操作失败：${error instanceof Error ? error.message : String(error)}`,
+            tone: 'error',
+          })
+        })
+        return
+      }
+      startTurn(value)
+    },
+    [props.customCommands, startTurn],
   )
 
   const runUpdate = useCallback(
@@ -239,13 +406,19 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
   const handleCommand = async (raw: string): Promise<void> => {
     const [command] = raw.trim().split(/\s+/, 1)
     switch (command) {
-      case '/help':
-        setNoticeFull({ text: helpDetail(), tone: 'info' })
+      case '/help': {
+        const custom = props.customCommands ?? []
+        const customText =
+          custom.length === 0
+            ? ''
+            : `\n自定义命令：${custom.map((command) => `/${command.name}${command.description === '' ? '' : ` ${command.description}`}`).join(' · ')}`
+        setNoticeFull({ text: helpDetail() + customText, tone: 'info' })
         break
+      }
       case '/status':
         setNotice(
           `session=${session.sessionId} · queued=${session.queuedTurns()} · events=${events.length}` +
-            ` · 模型=${effectiveModel ?? '未配置'} · 权限=${permissionMode} · 推理=${effortLabel(reasoningEffort)}`,
+            ` · 模型=${effectiveModel ?? '未配置'} · 权限=${permissionMode} · 推理=${reasoningEffort}`,
         )
         break
       case '/model':
@@ -296,6 +469,24 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
         setNotice(`已开启新会话 ${next.sessionId}`)
         break
       }
+      case '/sessions': {
+        if (props.openSession === undefined || props.listSessions === undefined) {
+          setNotice('当前环境未启用会话切换。')
+          break
+        }
+        if (activeTurns > 0) {
+          setNotice('当前仍有 turn 运行；请先中断或等待完成，再切换会话。')
+          break
+        }
+        const found = await props.listSessions().catch(() => undefined)
+        if (found === undefined) {
+          setNotice('读取会话列表失败。')
+          break
+        }
+        setSessions(found)
+        setSessionPickerOpen(true)
+        break
+      }
       case '/exit':
       case '/quit':
         exit()
@@ -307,8 +498,31 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
 
   const interrupt = useCallback(() => {
     const controller = controllers.current[0]
-    if (controller) controller.abort('User interrupted')
+    if (controller && !controller.signal.aborted) {
+      setCancelling(true)
+      controller.abort('User interrupted')
+    }
   }, [])
+
+  /** Switch the live session to a recorded one and replay its transcript. */
+  const pickSession = useCallback(
+    async (sessionId: string): Promise<void> => {
+      if (props.openSession === undefined) return
+      try {
+        const next = await props.openSession(sessionId)
+        const initial: AgentEvent[] = []
+        for await (const event of next.events()) initial.push(event)
+        setSessionPickerOpen(false)
+        setSession(next)
+        setEvents(initial)
+        setNotice(`已切换到会话 ${shortSessionId(sessionId)}`)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        setNotice(`切换会话失败: ${detail}`)
+      }
+    },
+    [props.openSession, setNotice],
+  )
 
   const controlC = useCallback(() => {
     if (activeTurns > 0) {
@@ -335,47 +549,29 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
   )
 
   const projection = useMemo(() => projectTranscript(events, capabilities), [capabilities, events])
-  const metrics = useMemo(() => deriveMetrics(events), [events])
-  const action = deriveAction(events, liveText, liveThinking, pending)
+  const action = retrying
+    ? `正在重试模型 ${retrying.attempt}/${retrying.maxRetries}`
+    : deriveAction(events, projection.activeTools, liveText, liveThinking, pending)
+  const perfText = formatPerf(lastStepPerf(events) ?? { tokensPerSec: 0, ttftMs: 0 })
   const empty = projection.settled.length === 0 && liveText === '' && liveThinking === ''
-  const lastAssistantText = useMemo(() => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]
-      if (event?.type === 'assistant.completed' && (event.message.text ?? '').trim()) {
-        return event.message.text ?? ''
-      }
-    }
-    return undefined
-  }, [events])
-
-  // Plan-mode approval flow: when a plan turn settles while still in plan
-  // mode, surface its proposal for approve/iterate instead of silently ending.
-  const prevActiveTurns = useRef(0)
-  useEffect(() => {
-    const wasRunning = prevActiveTurns.current > 0
-    prevActiveTurns.current = activeTurns
-    if (wasRunning && activeTurns === 0 && permissionMode === 'plan' && lastAssistantText) {
-      setPlanProposal(lastAssistantText)
-    }
-  }, [activeTurns, lastAssistantText, permissionMode])
 
   const applyPermissionMode = useCallback(
     (mode: PermissionMode) => {
       session.setPermissionMode(mode)
       setPermissionModeState(mode)
       setPermPickerOpen(false)
-      setPlanProposal(undefined)
+      persistPreferences({ permissionMode: mode, reasoningEffort })
       setNoticeFull({
         text:
-          mode === 'plan'
-            ? '已切换到计划模式：只读探索，产出计划后会询问是否执行。'
-            : mode === 'bypass'
-              ? '危险：权限绕过已启用（仅本会话），工具将不经审批执行。'
+          mode === 'bypass'
+            ? '完全访问已启用（仅本会话）；宿主强制拒绝的工具仍不可执行。'
+            : mode === 'auto'
+              ? '已切换到自动审批：工具自动执行（显式 deny 规则仍生效）。'
               : `权限策略已切换为 ${permissionLabel(mode)}（本会话生效）。`,
         tone: mode === 'bypass' ? 'warn' : 'info',
       })
     },
-    [session],
+    [persistPreferences, reasoningEffort, session],
   )
 
   // Shift+Tab walks the safe modes only; arming bypass stays behind /perm's
@@ -388,41 +584,67 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
     applyPermissionMode(nextPermissionMode(permissionMode))
   }, [activeTurns, applyPermissionMode, permissionMode, setNotice])
 
-  const approvePlan = useCallback(() => {
-    setPlanProposal(undefined)
-    applyPermissionMode('acceptEdits')
-    submit('请严格按照上面的计划开始执行；逐步使用可用工具完成任务。')
-    // submit depends on this callback through the editor only; calling it here
-    // re-enters the same stable closure captured for the card's lifetime.
-  }, [applyPermissionMode, submit])
-
-  return (
-    <Box flexDirection="column">
+  const scrollableOutput = capabilities.height !== undefined
+  const output = (
+    <>
       {empty && !pickerOpen && (
         <WelcomeBox
           version={props.version ?? SPARK_ENGINE_VERSION}
           model={visibleModelName}
-          cwd={session.cwd}
           capabilities={capabilities}
           theme={theme}
         />
       )}
-      <Transcript key={resizeVersion} rows={projection.settled} theme={theme} capabilities={capabilities} />
-      {showThinking && liveThinking && <Text color={theme.dim}>▍ {liveThinking}</Text>}
-      {liveText && <Text>{liveText}</Text>}
+      {/* Remount on session switch; the Static fallback also needs a reset
+          because a shorter/equal replacement transcript reuses row positions. */}
+      <Transcript
+        key={session.sessionId}
+        rows={
+          !scrollableOutput || showThinking
+            ? projection.settled
+            : projection.settled.filter((row) => row.kind !== 'thinking')
+        }
+        theme={theme}
+        capabilities={capabilities}
+        staticOutput={!scrollableOutput}
+      />
+      {showThinking && liveThinking && (
+        <Box marginTop={1}>
+          <Text color={theme.dim}>▍ {liveThinking}</Text>
+        </Box>
+      )}
+      {liveText && (
+        <Box marginTop={1}>
+          <Text>{liveText}</Text>
+        </Box>
+      )}
       <ActiveTools tools={projection.activeTools} capabilities={capabilities} theme={theme} />
       {activeTurns > 0 && (
         <WorkingLine
-          label={action}
-          detail={`step ${metrics.steps} · ${metrics.tokens} tok${session.queuedTurns() > 0 ? ` · +${session.queuedTurns()} 排队` : ''} · esc 中断`}
+          label={cancelling ? '正在中断 · 等待工具清理' : action}
+          detail={`${
+            cancelling
+              ? '已保留当前输入'
+              : retrying
+                ? `${retrying.resetOutput ? '已丢弃失败尝试的临时输出 · ' : ''}${retrying.error.code ?? 'stream_error'} · ${retrying.error.message} · ${(retrying.delayMs / 1_000).toFixed(1)}s 后重试`
+                : pending
+                  ? 'esc 拒绝当前工具'
+                  : 'esc 中断当前任务'
+          }${session.queuedTurns() > 0 ? ` · +${session.queuedTurns()} 排队` : ''}`}
           capabilities={capabilities}
           theme={theme}
         />
       )}
+    </>
+  )
+
+  const overlays = (
+    <>
       {pending && (
         <PermissionCard
           pending={pending}
           theme={theme}
+          capabilities={capabilities}
           onDecide={decide}
           onNotice={(message) => {
             setNotice(message)
@@ -432,6 +654,7 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
       {permPickerOpen && !pending && (
         <PermissionPicker
           theme={theme}
+          capabilities={capabilities}
           current={permissionMode}
           onPick={applyPermissionMode}
           onClose={() => {
@@ -445,25 +668,30 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
       {effortPickerOpen && !pending && !permPickerOpen && (
         <EffortPicker
           theme={theme}
+          capabilities={capabilities}
           current={reasoningEffort}
           onPick={(effort) => {
             setReasoningEffort(effort)
             setEffortPickerOpen(false)
-            setNotice(`推理强度: ${effortLabel(effort)}（对下一个 turn 生效）`)
+            persistPreferences({ permissionMode, reasoningEffort: effort })
+            setNotice(`推理强度: ${effort}（对下一个 turn 生效）`)
           }}
           onClose={() => {
             setEffortPickerOpen(false)
           }}
         />
       )}
-      {planProposal !== undefined && !permPickerOpen && !pending && (
-        <PlanApprovalCard
-          proposal={planProposal}
+      {sessionPickerOpen && !pending && !permPickerOpen && (
+        <SessionPicker
           theme={theme}
-          onApprove={approvePlan}
-          onDismiss={() => {
-            setPlanProposal(undefined)
-            setNotice('已留在计划模式；继续讨论或输入 /perm 切换策略。')
+          capabilities={capabilities}
+          sessions={sessions}
+          currentSessionId={session.sessionId}
+          onPick={(sessionId) => {
+            void pickSession(sessionId)
+          }}
+          onClose={() => {
+            setSessionPickerOpen(false)
           }}
         />
       )}
@@ -476,6 +704,7 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
           error={modelRuntime.error}
           selectedModel={effectiveModel}
           theme={theme}
+          capabilities={capabilities}
           canClose={effectiveModel !== undefined}
           onSelect={(modelId) => {
             void modelRuntime.select(modelId)
@@ -495,6 +724,7 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
       {pickerOpen && modelRuntime && configFormOpen && (
         <ProviderConfigForm
           theme={theme}
+          capabilities={capabilities}
           error={modelRuntime.error}
           onCancel={() => {
             setConfigFormOpen(false)
@@ -515,9 +745,29 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
           theme={theme}
         />
       )}
-      {notice && (
-        <Text color={noticeColor(theme, notice.tone)}>{notice.text}</Text>
+      {notice && <Text color={noticeColor(theme, notice.tone)}>{notice.text}</Text>}
+    </>
+  )
+
+  return (
+    <Box
+      flexDirection="column"
+      width={capabilities.width}
+      {...(capabilities.height === undefined ? {} : { height: capabilities.height })}
+    >
+      {scrollableOutput ? (
+        <ScrollRegion
+          active={
+            !pending && !pickerOpen && !permPickerOpen && !effortPickerOpen && !sessionPickerOpen
+          }
+          onScrollStateChange={setOutputScrolled}
+        >
+          {output}
+        </ScrollRegion>
+      ) : (
+        output
       )}
+      {overlays}
       <InputEditor
         active={!pickerOpen}
         locked={
@@ -525,11 +775,15 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
           pickerOpen ||
           permPickerOpen ||
           effortPickerOpen ||
-          planProposal !== undefined
+          sessionPickerOpen
         }
         running={activeTurns > 0}
         capabilities={capabilities}
         theme={theme}
+        extraCommands={(props.customCommands ?? []).map((command) => ({
+          name: `/${command.name}`,
+          ...(command.description === '' ? {} : { summary: command.description }),
+        }))}
         onSubmit={submit}
         onEscape={interrupt}
         onControlC={controlC}
@@ -538,46 +792,37 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
           setShowThinking((visible) => !visible)
         }}
       />
-      <Box gap={2} flexWrap="wrap">
-        <Text color={theme.accent}>{visibleModelName ?? '未选择模型'}</Text>
-        <Text color={permissionMode === 'plan' ? theme.ok : theme.dim}>
-          权限:{permissionLabel(permissionMode)}
-        </Text>
-        <Text color={reasoningEffort === undefined ? theme.dim : theme.ok}>
-          推理:{effortLabel(reasoningEffort)}
-        </Text>
-        <Text color={theme.dim}>{metrics.tokens} tok · /help</Text>
-      </Box>
+      <StatusBar
+        model={visibleModelName ?? '未选择模型'}
+        permission={permissionMode}
+        effort={reasoningEffort}
+        perf={perfText || undefined}
+        cwd={formatCwd(props.cwd)}
+        scrollHint={outputScrolled}
+        capabilities={capabilities}
+        theme={theme}
+      />
     </Box>
   )
 }
 
-function deriveMetrics(events: readonly AgentEvent[]): {
-  readonly steps: number
-  readonly tokens: number
-} {
-  let steps = 0
-  let tokens = 0
-  for (const event of events) {
-    if (event.type === 'step.started') steps += 1
-    else if (event.type === 'assistant.completed') {
-      tokens += event.usage.inputTokens + event.usage.outputTokens
-    }
-  }
-  return { steps, tokens }
-}
-
 function deriveAction(
   events: readonly AgentEvent[],
+  activeTools: readonly ActiveToolProjection[],
   liveText: string,
   liveThinking: string,
   pending: PendingApproval | undefined,
 ): string {
   if (pending) return '等待权限确认'
+  const activeTool = activeTools.at(-1)
+  if (activeTool) {
+    if (activeTool.status === 'approval') return `等待审批 · ${activeTool.title}`
+    if (activeTool.status === 'pending') return `准备工具 · ${activeTool.title}`
+    return activeTool.isTask ? `子代理已调度 · ${activeTool.title}` : `运行 ${activeTool.title}`
+  }
   if (liveText) return '生成回答'
   if (liveThinking) return '正在思考'
   const latest = events.at(-1)
-  if (latest?.type === 'tool.intent') return `运行工具 ${latest.callId}`
   if (latest?.type === 'step.started') return '请求模型'
   return '处理中'
 }

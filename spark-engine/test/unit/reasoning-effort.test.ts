@@ -8,8 +8,13 @@ import {
   thinkingConfigFor,
   type LlmRequest,
 } from '../../src/llm/types.js'
-import { helpDetail, helpLine, SLASH_COMMANDS, TUI_SHORTCUTS } from '../../src/tui/slash-commands.js'
-import { EFFORT_OPTIONS } from '../../src/tui/components/effort-picker.js'
+import {
+  helpDetail,
+  helpLine,
+  SLASH_COMMANDS,
+  TUI_SHORTCUTS,
+} from '../../src/tui/slash-commands.js'
+import { DEFAULT_REASONING_EFFORT, EFFORT_OPTIONS } from '../../src/tui/components/effort-picker.js'
 import { nextPermissionMode } from '../../src/tui/components/permission-picker.js'
 
 function baseRequest(): LlmRequest {
@@ -32,6 +37,14 @@ describe('reasoning effort mapping', () => {
       })
     }
     expect(EFFORT_BUDGET_TOKENS.max).toBeGreaterThan(EFFORT_BUDGET_TOKENS.high)
+    expect(thinkingConfigFor('high', 0)).toEqual({
+      type: 'enabled',
+      budgetTokens: EFFORT_BUDGET_TOKENS.high,
+    })
+    expect(thinkingConfigFor('high', 8_192)).toEqual({
+      type: 'enabled',
+      budgetTokens: 8_192,
+    })
   })
 
   it('validates CLI-provided levels strictly', () => {
@@ -80,14 +93,30 @@ describe('reasoning effort mapping', () => {
       true,
     )
     expect(off.thinking).toEqual({ type: 'disabled' })
-    // Any effort level — including max — must stay below the request's own
-    // output ceiling or the API rejects the request outright.
-    const clamped = toAnthropicRequest(
+    // Thinking and visible output share the ceiling. Keep a visible answer
+    // reserve instead of spending the entire request on hidden reasoning.
+    const clampedWithoutTools = toAnthropicRequest(
       { ...baseRequest(), thinking: thinkingConfigFor('max') },
       'claude-test',
       true,
     )
-    expect(clamped.thinking).toEqual({ type: 'enabled', budget_tokens: 8_192 - 1 })
+    expect(clampedWithoutTools.thinking).toEqual({ type: 'enabled', budget_tokens: 6_144 })
+    const clampedWithTools = toAnthropicRequest(
+      {
+        ...baseRequest(),
+        tools: [{ name: 'write', description: 'Write a file', inputSchema: { type: 'object' } }],
+        thinking: thinkingConfigFor('max'),
+      },
+      'claude-test',
+      true,
+    )
+    expect(clampedWithTools.thinking).toEqual({ type: 'enabled', budget_tokens: 5_462 })
+    const tooSmallForThinking = toAnthropicRequest(
+      { ...baseRequest(), maxTokens: 512, thinking: thinkingConfigFor('high') },
+      'claude-test',
+      true,
+    )
+    expect(tooSmallForThinking.thinking).toEqual({ type: 'disabled' })
   })
 
   it('coarsens the max budget onto the OpenAI high effort bucket', () => {
@@ -132,15 +161,15 @@ describe('slash command surface', () => {
 
   it('exposes the effort picker levels as the /effort option set', () => {
     const labels = EFFORT_OPTIONS.map((option) => option.label)
-    expect(labels).toEqual(['auto', 'low', 'medium', 'high', 'max', 'off'])
-    expect(EFFORT_OPTIONS[0]?.value).toBeUndefined()
+    expect(labels).toEqual(['low', 'medium', 'high', 'max', 'off'])
+    expect(EFFORT_OPTIONS.map((option) => option.value)).not.toContain(undefined)
+    expect(DEFAULT_REASONING_EFFORT).toBe('high')
   })
 
   it('keeps one-key permission cycling inside non-destructive modes only', () => {
-    expect(nextPermissionMode('default')).toBe('acceptEdits')
-    expect(nextPermissionMode('acceptEdits')).toBe('plan')
-    expect(nextPermissionMode('plan')).toBe('default')
+    expect(nextPermissionMode('manual')).toBe('auto')
+    expect(nextPermissionMode('auto')).toBe('manual')
     // Bypass can never be reached with a single keypress.
-    expect(nextPermissionMode('bypass')).toBe('default')
+    expect(nextPermissionMode('bypass')).toBe('manual')
   })
 })

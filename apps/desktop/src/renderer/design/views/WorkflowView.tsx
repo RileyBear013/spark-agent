@@ -26,6 +26,7 @@ import { useRefreshable } from '../hooks/useRefreshable'
 import { useSaveShortcut } from '../hooks/useSaveShortcut'
 import { useToast } from '../components/Toast'
 import { filterProvidersForVisibleUi } from '../utils/auto-router-ui'
+import { useSessionSidebar } from '../SessionSidebarContext'
 import { WORKFLOW_RESTRICTABLE_TOOLS } from '@spark/protocol'
 import type {
   ManagedAgent,
@@ -53,6 +54,8 @@ import { SparkNode } from './workflow/SparkNode'
 import { WorkflowContextMenu, type WfContextMenuState } from './workflow/WorkflowContextMenu'
 import { WorkflowLoopBodySummary } from './workflow/WorkflowLoopBodySummary'
 import { WorkflowLoopBodyToolbar } from './workflow/WorkflowLoopBodyToolbar'
+import { WorkflowRunHistory } from './workflow/WorkflowRunHistory'
+import { WorkflowTestRunPanel } from './workflow/WorkflowTestRunPanel'
 import {
   collectWorkflowNodeIds,
   commitLoopBodyGraph,
@@ -67,8 +70,14 @@ import {
   type WorkflowEditorScope,
 } from './workflow/loop-body-editor'
 import { NODE_KIND_META, NODE_KIND_ORDER, getNodeKindMeta } from './workflow/node-kinds'
+import { InspectorField, TagPicker, asStringArray } from './workflow/inspector-fields'
+import { WorkflowToolConfigPanel } from './workflow/WorkflowToolConfigPanel'
+import { openWorkflowTestRunSession } from './workflow/open-test-run-session'
 import { WorkflowTemplatePicker } from './workflow/WorkflowTemplatePicker'
 import type { WorkflowTemplate } from './workflow/workflow-templates'
+import { WorkflowBundleImportButton } from './workflow/WorkflowBundleImportButton'
+import { WorkflowBundlePanelButton } from './workflow/WorkflowBundlePanelButton'
+import { WorkflowExportModal } from './workflow/WorkflowExportModal'
 import {
   Button,
   Dropdown,
@@ -80,16 +89,6 @@ import { Modal as AntdModal, Switch } from 'antd'
 
 const NODE_TYPES: NodeTypes = { spark: SparkNode }
 type WorkflowScreen = 'list' | 'detail'
-type WorkflowExportPayload = {
-  version: 1
-  exportedAt: string
-  workflows: Array<
-    Pick<
-      WorkflowItem,
-      'name' | 'description' | 'status' | 'tags' | 'enabled' | 'graph' | 'scope' | 'version'
-    >
-  >
-}
 let workflowNodeSequence = 0
 
 function deferEffect(task: () => void | Promise<void>): () => void {
@@ -181,7 +180,8 @@ export function WorkflowView() {
 
 function WorkflowViewInner() {
   const { toast } = useToast()
-  const { registerNavGuard, requestConfirm, setHasUnsavedChanges } = useApp()
+  const { registerNavGuard, requestConfirm, setHasUnsavedChanges, setTweak } = useApp()
+  const { refreshData: refreshSessionData, setActiveSession } = useSessionSidebar()
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([])
   const [providers, setProviders] = useState<ProviderProfile[]>([])
   const [skills, setSkills] = useState<SkillItem[]>([])
@@ -215,6 +215,10 @@ function WorkflowViewInner() {
   const flowWrapRef = useRef<HTMLDivElement>(null)
   const flowInstanceRef = useRef<ReactFlowInstance<SparkFlowNode, Edge> | null>(null)
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false)
+  // 运行历史面板（按当前工作流查 workflow_runs 持久化快照）。
+  const [runHistoryOpen, setRunHistoryOpen] = useState(false)
+  // 试跑面板（workflow:test-run：真实会话执行 + 轮询 run-detail 展示节点级进度）。
+  const [testRunOpen, setTestRunOpen] = useState(false)
 
   const { invoke: listWorkflows } = useIpcInvoke('workflow:list')
   const { invoke: createWorkflow } = useIpcInvoke('workflow:create')
@@ -225,10 +229,9 @@ function WorkflowViewInner() {
   const { invoke: listMcp } = useIpcInvoke('mcp:list')
   const { invoke: listRules } = useIpcInvoke('rules:list')
   const { invoke: listAgents } = useIpcInvoke('agent:list')
-  const { invoke: openFileDialog } = useIpcInvoke('dialog:open-file')
-  const { invoke: saveFileDialog } = useIpcInvoke('dialog:save-file')
-  const { invoke: writeTextFile } = useIpcInvoke('file:write-text')
-  const { invoke: readTextFile } = useIpcInvoke('file:read-text')
+
+  // 工作流导出弹窗(格式二选一:完整包 .sparkflow / 兼容 JSON),null = 关闭
+  const [exportModal, setExportModal] = useState<{ ids: string[] } | null>(null)
 
   const loadGraphIntoCanvas = useCallback(
     (graph: WorkflowGraph, selectedNodeId?: string | null) => {
@@ -540,16 +543,23 @@ function WorkflowViewInner() {
       return
     }
     const graph = completeRootGraph
-    const saved = (
-      await updateWorkflow({
-        id: draft.id,
-        name: draft.name,
-        description: draft.description,
-        status: draft.status,
-        tags: draft.tags,
-        graph,
-      })
-    ).workflow
+    let saved: WorkflowItem
+    try {
+      saved = (
+        await updateWorkflow({
+          id: draft.id,
+          name: draft.name,
+          description: draft.description,
+          status: draft.status,
+          tags: draft.tags,
+          graph,
+        })
+      ).workflow
+    } catch (err) {
+      // 保存被主进程环校验等拒绝：展示带节点标题的具体原因，不中断编辑。
+      toast.error(err instanceof Error ? err.message : '工作流保存失败。')
+      return
+    }
     toast.success('工作流已保存')
     activeIdRef.current = saved.id
     setWorkflows((prev) => prev.map((item) => (item.id === saved.id ? saved : item)))
@@ -608,96 +618,17 @@ function WorkflowViewInner() {
     setSelectedIds(new Set())
   }, [])
 
-  const exportWorkflowIds = useCallback(
-    async (ids: string[]) => {
-      const targets =
-        ids.length > 0 ? workflows.filter((workflow) => ids.includes(workflow.id)) : workflows
-      if (targets.length === 0) {
-        toast.warning('没有可导出的工作流')
-        return
-      }
-      const payload: WorkflowExportPayload = {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        workflows: targets.map((workflow) => ({
-          scope: workflow.scope,
-          version: workflow.version,
-          name: workflow.name,
-          description: workflow.description,
-          status: workflow.status,
-          tags: workflow.tags,
-          enabled: workflow.enabled,
-          graph: workflow.graph,
-        })),
-      }
-      const result = await saveFileDialog({
-        title: '导出工作流',
-        defaultPath: `workflows-${new Date().toISOString().slice(0, 10)}.json`,
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      })
-      if (result.canceled || !result.filePath) return
-      await writeTextFile({
-        path: result.filePath,
-        content: JSON.stringify(payload, null, 2),
-      })
-      toast.success(`已导出 ${targets.length} 个工作流`)
-    },
-    [saveFileDialog, toast, workflows, writeTextFile],
-  )
+  const exportWorkflowIds = useCallback((ids: string[]) => {
+    setExportModal({ ids })
+  }, [])
 
-  const handleImport = useCallback(async () => {
-    try {
-      const result = await openFileDialog({
-        title: '导入工作流',
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      })
-      const filePath = result.filePaths?.[0] ?? result.filePath
-      if (result.canceled || !filePath) return
-      const file = await readTextFile({ path: filePath })
-      const parsed = JSON.parse(file.content) as Partial<WorkflowExportPayload>
-      const records = Array.isArray(parsed.workflows) ? parsed.workflows : []
-      if (records.length === 0) {
-        toast.warning('未找到可导入的工作流')
-        return
-      }
-      for (const workflow of records) {
-        await createWorkflow({
-          ...(typeof workflow.scope === 'string' && workflow.scope.trim().length > 0
-            ? { scope: workflow.scope }
-            : {}),
-          ...(typeof workflow.version === 'string' && workflow.version.trim().length > 0
-            ? { version: workflow.version }
-            : {}),
-          name:
-            typeof workflow.name === 'string' && workflow.name.trim().length > 0
-              ? workflow.name
-              : '导入的工作流',
-          description: typeof workflow.description === 'string' ? workflow.description : '',
-          status:
-            workflow.status === 'active' || workflow.status === 'archived'
-              ? workflow.status
-              : 'draft',
-          tags: Array.isArray(workflow.tags)
-            ? workflow.tags.filter((tag): tag is string => typeof tag === 'string')
-            : [],
-          enabled: typeof workflow.enabled === 'boolean' ? workflow.enabled : true,
-          graph: workflow.graph,
-        })
-      }
-      toast.success(`已导入 ${records.length} 个工作流`)
-      void refresh()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '导入工作流失败')
-    }
-  }, [createWorkflow, openFileDialog, readTextFile, refresh, toast])
-
-  const handleExportSelected = useCallback(async () => {
+  const handleExportSelected = useCallback(() => {
     const ids = Array.from(visibleSelectedIds)
     if (ids.length === 0) {
       toast.warning('请先选择要导出的工作流')
       return
     }
-    await exportWorkflowIds(ids)
+    exportWorkflowIds(ids)
     setSelectionMode(false)
     clearSelection()
   }, [clearSelection, exportWorkflowIds, toast, visibleSelectedIds])
@@ -990,19 +921,13 @@ function WorkflowViewInner() {
                 {selectionMode ? '退出选择' : '选择'}
               </Button>
             )}
-            <Button
-              size="middle"
-              type="text"
-              icon={<Icons.Upload size={12} />}
-              onClick={() => void handleImport()}
-            >
-              导入
-            </Button>
+            <WorkflowBundleImportButton onImported={() => void refresh()} />
+            <WorkflowBundlePanelButton />
             <Button
               size="middle"
               type="text"
               icon={<Icons.Download size={12} />}
-              onClick={() => void exportWorkflowIds([])}
+              onClick={() => exportWorkflowIds([])}
             >
               导出全部
             </Button>
@@ -1066,7 +991,7 @@ function WorkflowViewInner() {
                   selectionMode={selectionMode}
                   onToggleSelect={() => toggleSelect(workflow.id)}
                   onOpen={() => openWorkflow(workflow)}
-                  onExport={() => void exportWorkflowIds([workflow.id])}
+                  onExport={() => exportWorkflowIds([workflow.id])}
                   onDelete={() =>
                     confirmDeleteWorkflow(workflow.name, () => void performDelete(workflow.id))
                   }
@@ -1108,6 +1033,12 @@ function WorkflowViewInner() {
             setTemplatePickerOpen(false)
             void createWorkflowFromTemplate(template)
           }}
+        />
+        <WorkflowExportModal
+          open={exportModal != null}
+          workflowIds={exportModal?.ids ?? []}
+          workflows={workflows}
+          onClose={() => setExportModal(null)}
         />
       </div>
     )
@@ -1176,6 +1107,34 @@ function WorkflowViewInner() {
           >
             {orientation === 'vertical' ? '↕ 纵向' : '↔ 横向'}
           </Button>
+          {!editingLoopBody && workflows.some((item) => item.id === draft.id) && (
+            <Button
+              size="middle"
+              type="text"
+              icon={<Icons.Play size={12} />}
+              onClick={() => {
+                setRunHistoryOpen(false)
+                setTestRunOpen((open) => !open)
+              }}
+              title="在编辑器内试跑这个工作流（执行已保存版本，真实会话运行，节点级进度与失败原因）"
+            >
+              试跑
+            </Button>
+          )}
+          {!editingLoopBody && workflows.some((item) => item.id === draft.id) && (
+            <Button
+              size="middle"
+              type="text"
+              icon={<Icons.History size={12} />}
+              onClick={() => {
+                setTestRunOpen(false)
+                setRunHistoryOpen((open) => !open)
+              }}
+              title="查看这个工作流的历史运行（含节点输出、失败原因与耗时）"
+            >
+              历史
+            </Button>
+          )}
           {!editingLoopBody && (
             <Button
               size="middle"
@@ -1291,6 +1250,20 @@ function WorkflowViewInner() {
           agents={agents}
           currentWorkflowId={draft.id}
           editingLoopBody={editingLoopBody}
+          upstreamOutputKeys={Array.from(
+            new Set(
+              edges
+                .filter((edge) => edge.target === selectedNodeId)
+                .flatMap((edge) => {
+                  const upstream = nodes.find((node) => node.id === edge.source)
+                  const key =
+                    typeof upstream?.data.config.outputKey === 'string'
+                      ? upstream.data.config.outputKey.trim()
+                      : ''
+                  return key.length > 0 ? [key] : []
+                }),
+            ),
+          )}
           onOpenLoopBody={openLoopBodyEditor}
           onResetLoopBody={(loopNodeId) => void resetLoopBody(loopNodeId)}
           onDelete={() => selectedNodeId != null && removeNode(selectedNodeId)}
@@ -1303,6 +1276,26 @@ function WorkflowViewInner() {
               data: { ...node.data, config: { ...node.data.config, ...patch } },
             }))
           }
+        />
+      )}
+      {runHistoryOpen && (
+        <WorkflowRunHistory workflowId={draft.id} onClose={() => setRunHistoryOpen(false)} />
+      )}
+      {testRunOpen && (
+        <WorkflowTestRunPanel
+          workflowId={draft.id}
+          workflowDescription={draft.description ?? ''}
+          onClose={() => setTestRunOpen(false)}
+          onOpenSession={(sessionId) => {
+            void openWorkflowTestRunSession({
+              sessionId,
+              refreshSessionData,
+              showChatView: () => setTweak('view', 'chat'),
+              setActiveSession,
+            }).catch((error) => {
+              toast.error(error instanceof Error ? error.message : '试跑会话打开失败。')
+            })
+          }}
         />
       )}
     </div>
@@ -1472,6 +1465,8 @@ type InspectorProps = {
   agents: ManagedAgent[]
   currentWorkflowId: string
   editingLoopBody: boolean
+  /** 指向当前节点的活跃上游连线的 outputKey 集合：提示词与工具参数里可用 {{key}} 引用。 */
+  upstreamOutputKeys: string[]
   onOpenLoopBody: (loopNodeId: string) => void
   onResetLoopBody: (loopNodeId: string) => void
   onPatch: (patch: Partial<SparkFlowNode['data']>) => void
@@ -1490,6 +1485,7 @@ function WorkflowInspector(props: InspectorProps) {
     agents,
     currentWorkflowId,
     editingLoopBody,
+    upstreamOutputKeys,
   } = props
   const [loopBodyDraft, setLoopBodyDraft] = useState('')
   const [loopBodyError, setLoopBodyError] = useState('')
@@ -1523,6 +1519,18 @@ function WorkflowInspector(props: InspectorProps) {
   const isVerify = node.data.kind === 'verify'
   const isLoop = node.data.kind === 'loop'
   const isRoute = node.data.kind === 'route'
+  const isTool = node.data.kind === 'tool'
+  const isMcp = node.data.kind === 'mcp'
+  const isArtifact = node.data.kind === 'artifact'
+  const isInput = node.data.kind === 'input'
+  // 执行模式下拉只对 LLM 原子节点显示：tool/mcp 的调用方式面板已覆盖其执行语义，
+  // route 由「固定分支」下拉隐式管理 execution，approval/verify/agent/subagent/loop 不适用。
+  const isExecutionModeKind =
+    isInput ||
+    node.data.kind === 'plan' ||
+    node.data.kind === 'skill' ||
+    node.data.kind === 'review' ||
+    isArtifact
   const routeOptions = asRouteOptions(config.routeOptions)
   const loopBody = isLoop && isWorkflowGraph(config.body) ? config.body : defaultLoopBodyGraph()
   const loopBodySummary = summarizeLoopBodyGraph(loopBody)
@@ -1646,6 +1654,12 @@ function WorkflowInspector(props: InspectorProps) {
             value={String(config.prompt ?? '')}
             onChange={(event) => props.onPatchConfig({ prompt: event.target.value })}
           />
+          {upstreamOutputKeys.length > 0 && (
+            <div className="wf-field-help">
+              可用上游变量：{upstreamOutputKeys.join('、')}（写 {'{{键名}}'}{' '}
+              引用，运行时替换为该输出）
+            </div>
+          )}
         </InspectorField>
         <InspectorField label="输出键 outputKey">
           <LobeInput
@@ -1658,6 +1672,65 @@ function WorkflowInspector(props: InspectorProps) {
           />
           <div className="wf-field-help">下游节点的输入与连线条件都按此键读取本节点的输出。</div>
         </InspectorField>
+        {isInput && (
+          <InspectorField label="静态值 value">
+            <LobeTextArea
+              rows={3}
+              placeholder="可选：固定输入内容（JSON 或纯文本），静态回显模式下原样写入输出键"
+              value={String(config.value ?? '')}
+              onChange={(event) => props.onPatchConfig({ value: event.target.value })}
+            />
+            <div className="wf-field-help">
+              配合「执行模式=静态回显」时原样透传；真实执行模式下该值会连同提示词一起交给模型拆解。
+            </div>
+          </InspectorField>
+        )}
+        {isExecutionModeKind && (
+          <InspectorField label="执行模式">
+            <LobeSelect
+              value={String(config.execution ?? 'auto')}
+              onChange={(value) =>
+                props.onPatchConfig({ execution: String(value) === 'static' ? 'static' : 'auto' })
+              }
+              options={[
+                { label: '真实执行（派发模型/工具）', value: 'auto' },
+                { label: '静态回显（不派发，占位/省成本）', value: 'static' },
+              ]}
+            />
+            <div className="wf-field-help">
+              静态回显：跳过真实执行，把节点内容（input 的静态值，否则提示词/标题）直接写入输出键。
+            </div>
+          </InspectorField>
+        )}
+        {isTool && (
+          <WorkflowToolConfigPanel
+            config={config}
+            onPatchConfig={props.onPatchConfig}
+            mcpServers={mcpServers}
+            upstreamOutputKeys={upstreamOutputKeys}
+          />
+        )}
+        {isMcp && (
+          <WorkflowToolConfigPanel
+            config={config}
+            onPatchConfig={props.onPatchConfig}
+            mcpServers={mcpServers}
+            upstreamOutputKeys={upstreamOutputKeys}
+            variant="mcp"
+          />
+        )}
+        {isArtifact && (
+          <InspectorField label="导出路径 exportPath">
+            <LobeInput
+              placeholder="如 output/report.md（工作区相对路径）"
+              value={String(config.exportPath ?? '')}
+              onChange={(event) => props.onPatchConfig({ exportPath: event.target.value })}
+            />
+            <div className="wf-field-help">
+              配置后节点产出会写入该文件；须位于工作区内（防路径穿越），不配则只写输出键。
+            </div>
+          </InspectorField>
+        )}
         {isRoute && (
           <InspectorField label="路由分支">
             <LobeTextArea
@@ -1672,6 +1745,33 @@ function WorkflowInspector(props: InspectorProps) {
             />
             <div className="wf-field-help">
               每行一个分支：value | label | description。运行时只接受 value，并写入 outputKey。
+            </div>
+          </InspectorField>
+        )}
+        {isRoute && (
+          <InspectorField label="固定分支">
+            <LobeSelect
+              value={String(config.value ?? '')}
+              onChange={(value) => {
+                const branch = String(value ?? '')
+                // 选中分支 = 固定路由（静态回显直接写 value，不再派发模型决策）；
+                // 选回「LLM 决策」= 清除 value 并恢复真实执行。
+                props.onPatchConfig(
+                  branch.length > 0
+                    ? { value: branch, execution: 'static' }
+                    : { value: undefined, execution: 'auto' },
+                )
+              }}
+              options={[
+                { label: 'LLM 决策（按上下文选择分支）', value: '' },
+                ...routeOptions.map((option) => ({
+                  label: `固定：${option.value}${option.label ? `（${option.label}）` : ''}`,
+                  value: option.value,
+                })),
+              ]}
+            />
+            <div className="wf-field-help">
+              固定分支后运行时直接输出该值（不经模型），适用于确定性的静态路由。
             </div>
           </InspectorField>
         )}
@@ -1865,25 +1965,28 @@ function WorkflowInspector(props: InspectorProps) {
             onChange={(ruleIds) => props.onPatchConfig({ ruleIds })}
           />
         </InspectorField>
-        <InspectorField label="MCP">
-          <div className="wf-field-help">
-            所有已启用的 MCP 会自动挂载到该节点，无需逐节点绑定。
-            {mcpServers.some((server) => server.enabled)
-              ? ` 当前启用：${mcpServers
-                  .filter((server) => server.enabled)
-                  .map((server) => server.name)
-                  .join('、')}`
-              : ' 当前没有已启用的 MCP。'}
-          </div>
-        </InspectorField>
+        {!isMcp && (
+          <InspectorField label="MCP">
+            <div className="wf-field-help">
+              所有已启用的 MCP 会自动挂载到该节点，无需逐节点绑定。
+              {mcpServers.some((server) => server.enabled)
+                ? ` 当前启用：${mcpServers
+                    .filter((server) => server.enabled)
+                    .map((server) => server.name)
+                    .join('、')}`
+                : ' 当前没有已启用的 MCP。'}
+            </div>
+          </InspectorField>
+        )}
         <InspectorField label="重试次数">
           <LobeInput
             type="number"
             min={0}
-            max={10}
+            max={3}
             value={Number(config.retryCount ?? 1)}
             onChange={(event) => props.onPatchConfig({ retryCount: Number(event.target.value) })}
           />
+          <div className="wf-field-help">运行时上限 3 次（0-3），超出按 3 处理。</div>
         </InspectorField>
       </div>
     </div>
@@ -2108,52 +2211,5 @@ function WorkflowEdgeInspector({
   )
 }
 
-function InspectorField({ label, children }: { label: string; children: ReactNode }) {
-  // 不用 <label> 包 children：label 元素会拦截内部 click，
-  // 在 select / popover 等控件里会导致下拉"点不出来"。
-  // 复用 AgentsView 的 .agent-field 写法 —— lobe-ui (antd-based) 控件
-  // 自带 variant 样式，宽度由 .agent-field .ant-* 规则兜底为 100%。
-  return (
-    <div className="agent-field">
-      <span className="agent-field-label">{label}</span>
-      {children}
-    </div>
-  )
-}
-
-function TagPicker({
-  items,
-  selected,
-  onChange,
-}: {
-  items: Array<{ id: string; label: string }>
-  selected: string[]
-  onChange: (ids: string[]) => void
-}) {
-  const selectedSet = new Set(selected)
-  if (items.length === 0) return <div className="agents-empty-mini">暂无可选项</div>
-  return (
-    <div className="wf-tools-row">
-      {items.map((item) => {
-        const active = selectedSet.has(item.id)
-        return (
-          <button
-            key={item.id}
-            className={`tool-chip ${active ? 'active' : ''}`}
-            onClick={() =>
-              onChange(active ? selected.filter((id) => id !== item.id) : [...selected, item.id])
-            }
-          >
-            {active && <Icons.Check size={11} />} {item.label}
-          </button>
-        )
-      })}
-    </div>
-  )
-}
-
-function asStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string')
-    : []
-}
+// InspectorField / TagPicker / asStringArray 已拆分至 ./workflow/inspector-fields.tsx
+//（WorkflowToolConfigPanel 也要用，留在本文件会形成循环引用）。

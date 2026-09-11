@@ -3847,6 +3847,10 @@ html[data-theme='dark'] .composer-file-drop-overlay {
   color: color-mix(in srgb, var(--primary) 82%, var(--text));
 }
 
+.composer-reasoning-select.is-fast-mode:not(.is-max) .composer-select-label-ticker-item.is-current {
+  color: color-mix(in srgb, var(--primary) 82%, var(--text));
+}
+
 .composer-fast-mode-indicator {
   flex: none;
   color: color-mix(in srgb, var(--primary) 84%, var(--text));
@@ -4590,6 +4594,38 @@ html[data-theme='dark'] .composer-file-drop-overlay {
   font-weight: 600;
 }
 
+.workflow-progress-state {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--text-faint);
+  background: color-mix(in srgb, var(--text-faint) 12%, transparent);
+
+  &.working {
+    color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+  }
+
+  &.completed {
+    color: var(--c-ok, #22c55e);
+    background: color-mix(in srgb, var(--c-ok, #22c55e) 12%, transparent);
+  }
+
+  &.failed {
+    color: var(--c-err, #ef4444);
+    background: color-mix(in srgb, var(--c-err, #ef4444) 12%, transparent);
+  }
+}
+
+.workflow-progress-total {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
 .workflow-progress-count {
   margin-left: auto;
   color: var(--text-faint);
@@ -4605,15 +4641,82 @@ html[data-theme='dark'] .composer-file-drop-overlay {
   gap: 2px;
 }
 
+// 行 + 行下详情（错误/输出预览）的外层容器
+.workflow-progress-item-wrap {
+  min-width: 0;
+}
+
 .workflow-progress-item {
   display: flex;
   align-items: center;
   gap: 7px;
   min-width: 0;
-  padding: 3px 2px;
+  padding: 3px 4px;
+  margin: 0 -2px;
+  border-radius: var(--r-sm);
   font-size: var(--font-xs);
   color: var(--text-muted);
   line-height: 1.4;
+
+  &.expandable {
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+      background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+      outline: none;
+    }
+  }
+
+  .chev {
+    flex: 0 0 auto;
+    color: var(--text-faint);
+    transition: transform 0.15s ease;
+  }
+
+  .chev.chev-open {
+    transform: rotate(90deg);
+  }
+}
+
+.workflow-progress-duration {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+// 失败/重试失败的错误详情：行下直接展示，限高滚动，红色左界条区分
+.workflow-progress-error {
+  margin: 1px 0 3px 22px;
+  padding: 4px 8px;
+  max-height: 84px;
+  overflow-y: auto;
+  border-left: 2px solid color-mix(in srgb, var(--c-err, #ef4444) 55%, transparent);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: color-mix(in srgb, var(--c-err, #ef4444) 6%, transparent);
+  color: var(--c-err, #ef4444);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// 节点输出预览：等宽、沉底背景、限高滚动
+.workflow-progress-output {
+  margin: 1px 0 3px 22px;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--bg-sunken, var(--bg));
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .workflow-progress-icon {
@@ -5233,6 +5336,9 @@ body.side-chat-resizing {
 }
 .composer-queue-panel .composer-queue-text {
   display: block;
+  /* 列向 flex + flex-start 下，nowrap 文本的交叉轴宽度是 max-content，
+     必须显式封顶到容器宽度，否则省略号失效、文字会盖住右侧操作按钮组 */
+  max-width: 100%;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5264,7 +5370,8 @@ body.side-chat-resizing {
 }
 .composer-queue-panel .composer-queue-copy {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   min-width: 0;
 }
 .composer-queue-panel .composer-queue-actions {
@@ -5874,6 +5981,20 @@ body.side-chat-resizing {
 .tool-log-section-md .md-code-highlighted .shiki {
   font-size: var(--font-sm);
   color: color-mix(in srgb, var(--text-muted) 88%, var(--text) 12%);
+}
+
+/* 块级 code 兜底：思考过程 / 工具日志里的代码块，块内 <code> 只保留字号与颜色，
+   不再画行内胶囊背景（胶囊背景只属于段落里的行内 code）。
+   代码块自己的底色统一由 .md-code-block 提供；暗色下 --code-bg 与模块底色并不同色，
+   若保留 inner code 背景就会在模块内出现一条条与模块底色不一致的行背景。
+   选择器比 views.css 的 `.thinking-content.md-surface code` 更具体，不依赖引入顺序。 */
+.thinking-content.md-surface .md-code-block code,
+.thinking-content.md-surface pre code,
+.tool-log-section-md.md-surface .md-code-block code,
+.tool-log-section-md.md-surface pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
 }
 
 /* 代码还原点入口按钮：开启态用 accent 着色 + 右上角小圆点，未开启保持默认灰。 */

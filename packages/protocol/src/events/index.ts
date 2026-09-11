@@ -407,15 +407,29 @@ export interface WorkflowProgressNode {
   agentId?: string
   agentName?: string
   modelId?: string
+  /** 失败/取消原因：节点命中 failedNode 或其最后一条执行记录携带 error 时填充。 */
+  error?: { code?: string; message: string }
+  /** 节点输出预览（截断文本）。仅在终态快照（runStatus !== 'working'）时填充，控制事件体积。 */
+  outputPreview?: string
+  /** 节点首条执行记录的开始时间（ISO 8601）；未开始执行的节点缺省。 */
+  startedAt?: string
+  /** 节点末条执行记录的结束时间（ISO 8601）；仍在执行的节点缺省。 */
+  endedAt?: string
 }
 
 /**
- * workflow_run 单次调用期间的实时节点进度快照——每个节点开始/完成/失败时都会重新
- * 发一份完整列表（不是增量），UI 据此渲染类似任务面板的实时清单。
+ * workflow_run 单次调用期间的实时节点进度快照——节点状态发生变化（开始执行、单个节点
+ * 完成/失败/跳过、运行终态）时重新发一份完整列表（不是增量），UI 据此渲染实时清单。
+ * 终态快照额外携带每个节点的 outputPreview 与 error 供展开查看。
  */
 export interface WorkflowProgressEvent extends BaseEvent {
   type: 'workflow_progress'
   workflowId: string
+  /**
+   * 稳定运行标识。同一 workflow run 可能在失败或中断后跨 turn 续跑，renderer 必须用
+   * runId 归并实时快照，不能只依赖 turnId。可选是为了兼容升级前已持久化的历史事件。
+   */
+  runId?: string
   runStatus: 'working' | 'completed' | 'failed' | 'canceled'
   nodes: WorkflowProgressNode[]
 }
@@ -838,8 +852,8 @@ export interface ContextSummarizedEvent extends BaseEvent {
 /** Emitted only when a provider/CLI reports a real context compaction event. */
 export interface ContextCompactionEvent extends BaseEvent {
   type: 'context_compaction'
-  provider: 'claude' | 'codex'
-  source: 'claude_code' | 'codex_cli' | 'codex_sdk'
+  provider: 'claude' | 'codex' | 'spark'
+  source: 'claude_code' | 'codex_cli' | 'codex_sdk' | 'spark_engine'
   phase: 'started' | 'completed' | 'failed' | 'boundary'
   /** Provider-reported trigger, when present. */
   trigger?: 'manual' | 'auto' | string
@@ -995,7 +1009,7 @@ export interface RuntimeSignalEvent extends BaseEvent {
 export interface TranscriptRetractionEvent extends BaseEvent {
   type: 'transcript_retraction'
   eventIds: string[]
-  reason: 'model_refusal_fallback'
+  reason: 'model_refusal_fallback' | 'user_edit'
 }
 
 // ─── 白盒调试类事件 ───────────────────────────────────────────────────────────
@@ -1027,8 +1041,8 @@ export interface TurnPromptSnapshotEvent extends BaseEvent, UserMessagePresentat
   model: string
   /** Provider 配置 Profile ID */
   providerProfileId?: string
-  /** 执行适配器类型 */
-  adapterKind: 'claude-sdk' | 'codex'
+  /** 执行适配器类型（'spark' 为自研引擎渠道开关启用后的持久化值） */
+  adapterKind: 'claude-sdk' | 'codex' | 'spark'
   /** 权限模式 */
   permissionMode: string
   /** 可用工具数量 */

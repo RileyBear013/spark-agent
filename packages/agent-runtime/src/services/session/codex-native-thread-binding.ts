@@ -1,3 +1,4 @@
+import type { EngineKind } from '../../sdk/engine-executor.js'
 import type { CodexNativeThreadBinding, SDKExecutorConfig } from '../../sdk/types.js'
 
 const CODEX_APP_SERVER_METADATA_KEY = 'codexAppServer'
@@ -10,7 +11,8 @@ type StoredCodexNativeThreadBinding = CodexNativeThreadBinding & {
 
 export interface PersistentCodexAppServerEligibility {
   enabled: boolean
-  adapterKind: 'claude-sdk' | 'codex'
+  /** 引擎口径；非 codex 引擎（claude-sdk / spark）天然不满足持久 App Server 条件。 */
+  adapterKind: EngineKind
   useLocalConfig: boolean
   codexApiKind?: 'chat' | 'responses' | 'embedding' | undefined
   hasImageAttachments: boolean
@@ -117,6 +119,20 @@ export function readCodexNativeThreadBindings(
 /** `/clear` 后轮换 binding scope；0 保持历史 key，避免升级后无故断开已有 thread。 */
 export function scopeCodexNativeThreadBindingKey(bindingKey: string, generation: number): string {
   return generation > 0 ? `${bindingKey}:generation:${generation}` : bindingKey
+}
+
+/**
+ * 把会话历史修订代数纳入 SDK 原生 session id 的哈希 scope，同时保持 UUID 输出形状。
+ * generation=0 时完全沿用旧 identity，避免普通会话升级后无故断开连续性。
+ */
+export function scopeRuntimeSessionIdentity(
+  identity: string | undefined,
+  generation: number,
+): string | undefined {
+  if (generation <= 0) return identity
+  return identity == null
+    ? `conversation-generation:${generation}`
+    : `${identity}:conversation-generation:${generation}`
 }
 
 export function readCodexNativeThreadGeneration(metadataJson: string | null | undefined): number {

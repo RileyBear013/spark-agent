@@ -45,10 +45,12 @@ import { CrossSessionCollaborationIpcSchemaRegistry } from '../cross-session-col
 import { EvidenceCostIpcSchemaRegistry } from '../evidence-cost.js'
 import { ReplayIpcSchemaRegistry } from '../replay-playbook.js'
 import { SubAppIpcSchemaRegistry } from '../sub-app.js'
+import { SubAppV2IpcSchemaRegistry } from '../sub-app-v2.js'
 import { CustomToolsIpcSchemaRegistry } from '../custom-tools.js'
 import { ToolPackagesIpcSchemaRegistry } from '../tool-package.js'
 import { NotificationsIpcSchemaRegistry } from '../notifications.js'
 import { AccountSyncIpcSchemaRegistry } from '../account-sync.js'
+import { WorkflowBundleIpcSchemaRegistry } from '../workflow-bundle-ipc.js'
 
 const PLATFORM_NEWAPI_PROVIDER_ID = 'spark-platform-newapi'
 
@@ -85,7 +87,7 @@ export const SessionReasoningEffortSchema = z.enum([
   'xhigh',
   'max',
 ])
-export const SessionAgentAdapterSchema = z.enum(['claude', 'claude-sdk', 'codex'])
+export const SessionAgentAdapterSchema = z.enum(['claude', 'claude-sdk', 'codex', 'spark'])
 export const SessionPermissionModeSchema = z.enum([
   'claude-ask',
   'claude-auto-edits',
@@ -95,6 +97,13 @@ export const SessionPermissionModeSchema = z.enum([
   'codex-default',
   'codex-auto-review',
   'codex-full-access',
+  'spark-default',
+  'spark-accept-edits',
+  'spark-plan',
+  'spark-bypass',
+  // 三档收敛后新增：spark-default=手动审批、spark-auto=自动审批、
+  // spark-bypass=完全访问；旧两值仅为已存储会话保留，UI 不再提供。
+  'spark-auto',
 ])
 export const RemoteChannelTypeSchema = z.enum(['telegram', 'feishu', 'qq', 'wechat-claw'])
 export const RemotePairingModeSchema = z.enum(['code', 'qr'])
@@ -314,6 +323,7 @@ export const SessionSendTurnRequestSchema = z.object({
     .optional(),
   teamConfig: TeamModeConfigSchema.optional(),
   mentionAgentId: z.string().min(1).max(160).optional(),
+  resumePausedQueue: z.boolean().optional(),
 })
 
 export const DialogOpenDirectoryRequestSchema = z.object({
@@ -379,22 +389,26 @@ const explorerPathSchema = z.string().min(1).max(2000)
 
 export const FileTrashRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   path: explorerPathSchema,
 })
 
 export const FileCreateFileRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   path: explorerPathSchema,
   content: z.string().max(10_000_000).optional(),
 })
 
 export const FileCreateDirectoryRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   path: explorerPathSchema,
 })
 
 export const FileMoveRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   fromPath: explorerPathSchema,
   toPath: explorerPathSchema,
   ifExists: FileConflictPolicySchema.optional(),
@@ -402,6 +416,7 @@ export const FileMoveRequestSchema = z.object({
 
 export const FileCopyRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   fromPath: explorerPathSchema,
   toPath: explorerPathSchema,
   ifExists: FileConflictPolicySchema.optional(),
@@ -448,6 +463,25 @@ export const SessionReorderQueuedTurnsRequestSchema = z.object({
   turnIds: z.array(z.string().uuid()).min(1).max(1000),
 })
 
+const SessionQueueRuntimeSelectionSchema = z
+  .object({
+    providerProfileId: ProfileIdSchema.optional(),
+    modelId: z.string().min(1).max(200).nullable().optional(),
+    cliSparkOverride: CliSparkOverrideSchema.nullable().optional(),
+  })
+  .strict()
+
+export const SessionSendQueuedTurnNowRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+  turnId: TurnIdSchema,
+  runtimePatch: SessionQueueRuntimeSelectionSchema.optional(),
+})
+
+export const SessionResumeQueueRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+  runtimePatch: SessionQueueRuntimeSelectionSchema.optional(),
+})
+
 export const SessionGetHistoryRequestSchema = z.object({
   sessionId: SessionIdSchema,
   full: z.boolean().optional().default(false),
@@ -492,6 +526,10 @@ export const SessionUpdateRequestSchema = z.object({
 })
 
 export const SessionDeleteRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+})
+
+export const SessionExtractTitleRequestSchema = z.object({
   sessionId: SessionIdSchema,
 })
 
@@ -567,6 +605,7 @@ export const ProviderCreateRequestSchema = z
     model: z.string().min(1).max(200).optional(),
     apiEndpoint: z.string().min(1).max(500).optional(),
     codexApiKind: z.enum(['chat', 'responses', 'embedding']).optional(),
+    useSparkExecutor: z.boolean().optional(),
     apiKey: z.string().min(1).max(500),
     isDefault: z.boolean().optional().default(false),
     supportsMillionContext: z.boolean().optional().default(false),
@@ -621,6 +660,7 @@ export const ProviderUpdateRequestSchema = z.object({
   model: z.string().min(1).max(200).optional(),
   apiEndpoint: z.string().min(1).max(500).nullable().optional(),
   codexApiKind: z.enum(['chat', 'responses', 'embedding']).optional(),
+  useSparkExecutor: z.boolean().optional(),
   apiKey: z.string().min(1).max(500).optional(),
   isDefault: z.boolean().optional(),
   supportsMillionContext: z.boolean().optional(),
@@ -666,6 +706,7 @@ export const ProviderConnectionTestRequestSchema = z.object({
   apiEndpoint: z.string().min(1).max(500).nullable().optional(),
   defaultModel: z.string().min(1).max(200),
   codexApiKind: z.enum(['chat', 'responses', 'embedding']).optional(),
+  useSparkExecutor: z.boolean().optional(),
   apiKey: z.string().max(500).optional(),
 })
 
@@ -721,6 +762,7 @@ export const WorkspaceOpenRequestSchema = z.object({
 
 export const WorkspaceListDirectoryRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
   path: z.string().max(500).optional().default(''),
   maxDepth: z.number().int().min(0).max(5).optional().default(3),
   includeIgnoredDirectories: z.boolean().optional().default(false),
@@ -798,6 +840,7 @@ export const WorkspaceDeleteRequestSchema = z.object({
 
 export const WorkspaceOpenFolderRequestSchema = z.object({
   workspaceId: z.string().uuid(),
+  sessionId: SessionIdSchema.optional(),
 })
 
 // ─── Rules Schema ────────────────────────────────────────────────────────────
@@ -986,13 +1029,20 @@ export const IpcSchemaRegistry = {
   'session:cancel-queued-turn': SessionCancelQueuedTurnRequestSchema,
   'session:clear-queued-turns': SessionClearQueuedTurnsRequestSchema,
   'session:reorder-queued-turns': SessionReorderQueuedTurnsRequestSchema,
+  'session:send-queued-turn-now': SessionSendQueuedTurnNowRequestSchema,
+  'session:resume-queue': SessionResumeQueueRequestSchema,
   'session:cancel': SessionCancelRequestSchema,
   'session:reject-plan': SessionRejectPlanRequestSchema,
   'session:get-history': SessionGetHistoryRequestSchema,
   'session:list-checkpoints': SessionListCheckpointsRequestSchema,
+  'session:rewind-last-turn': z.object({
+    sessionId: SessionIdSchema,
+    turnId: TurnIdSchema,
+  }),
   'session:list': SessionListRequestSchema,
   'session:search': SessionSearchRequestSchema,
   'session:update': SessionUpdateRequestSchema,
+  'session:extract-title': SessionExtractTitleRequestSchema,
   'session:delete': SessionDeleteRequestSchema,
   'session:set-max-iterations': SessionSetMaxIterationsRequestSchema,
   'session:set-goal': SessionSetGoalRequestSchema,
@@ -1023,10 +1073,12 @@ export const IpcSchemaRegistry = {
   ...EvidenceCostIpcSchemaRegistry,
   ...ReplayIpcSchemaRegistry,
   ...SubAppIpcSchemaRegistry,
+  ...SubAppV2IpcSchemaRegistry,
   ...CustomToolsIpcSchemaRegistry,
   ...ToolPackagesIpcSchemaRegistry,
   ...NotificationsIpcSchemaRegistry,
   ...AccountSyncIpcSchemaRegistry,
+  ...WorkflowBundleIpcSchemaRegistry,
   'provider:update': ProviderUpdateRequestSchema,
   'provider:delete': ProviderDeleteRequestSchema,
   'provider:test-connection': ProviderConnectionTestRequestSchema,
@@ -1081,10 +1133,12 @@ export const IpcSchemaRegistry = {
   'workspace:create-branch': WorkspaceCreateBranchRequestSchema,
   'workspace:watch-start': z.object({
     workspaceId: z.string().min(1),
+    sessionId: SessionIdSchema.optional(),
     ignorePatterns: z.array(z.string()).optional(),
   }),
   'workspace:watch-stop': z.object({
     workspaceId: z.string().min(1),
+    sessionId: SessionIdSchema.optional(),
   }),
   'dialog:open-directory': DialogOpenDirectoryRequestSchema,
   'dialog:open-file': DialogOpenFileRequestSchema,
@@ -1314,7 +1368,9 @@ export const IpcSchemaRegistry = {
   'log:read': z.object({
     maxLines: z.number().int().min(1).max(5000).optional(),
     levels: z.array(z.enum(['debug', 'info', 'warn', 'error'])).optional(),
-    scope: z.enum(['all', 'canvas']).optional(),
+    scope: z.enum(['all', 'canvas', 'tools']).optional(),
+    namespace: z.string().min(1).max(200).optional(),
+    keyword: z.string().min(1).max(500).optional(),
   }),
   'log:clear': z.object({}),
   'log:reveal': z.object({}),
@@ -1434,6 +1490,14 @@ export const IpcSchemaRegistry = {
     clientTaskId: z.string().min(1).max(200),
     inputPath: z.string().min(1).max(4096),
     preserveAudio: z.boolean().optional(),
+    renderOptions: z
+      .object({
+        invert: z.boolean().optional(),
+        colormap: z.enum(['none', 'turbo', 'viridis']).optional(),
+        smoothStrength: z.number().min(0).max(1).optional(),
+        contrast: z.number().min(0).max(10).optional(),
+      })
+      .optional(),
   }),
   'canvas:task:cancel-depth-video': z.object({
     runtimeTaskId: z.string().min(1).max(200),
@@ -1622,6 +1686,9 @@ export const IpcSchemaRegistry = {
     title: z.string().min(1).max(80),
   }),
   'terminal:get-buffer': z.object({
+    terminalId: z.string().min(1).max(200),
+  }),
+  'terminal:clear': z.object({
     terminalId: z.string().min(1).max(200),
   }),
 

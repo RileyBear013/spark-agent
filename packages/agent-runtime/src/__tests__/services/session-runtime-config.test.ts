@@ -6,7 +6,10 @@ import path from 'node:path'
 import type { AgentEvent } from '@spark/protocol'
 import * as keystore from '@spark/shared/keystore'
 import {
+  SessionRuntimeConfigCustomToolRepositoryStub,
+  SessionRuntimeConfigSessionHistoryRepositoryStub,
   SessionRuntimeConfigSubAppRepositoryStub,
+  SessionRuntimeConfigToolInvocationRepositoryStub,
   SessionRuntimeConfigTurnPerfRepositoryStub,
 } from './session-runtime-config-storage-stubs.js'
 import {
@@ -143,6 +146,17 @@ const mockState = vi.hoisted(() => ({
     defaults_json: string
   }>,
   events: [] as EventRow[],
+  rules: [] as Array<{
+    id: string
+    scope: string
+    scope_ref: string | null
+    name: string
+    content: string
+    priority: number
+    enabled: number
+    created_at: string
+    updated_at: string
+  }>,
   mcpServers: [] as Array<{
     id: string
     scope: string
@@ -1025,8 +1039,8 @@ vi.mock('@spark/storage', () => {
   }
 
   class RulesRepository {
-    list(): unknown[] {
-      return []
+    list(): (typeof mockState.rules)[number][] {
+      return mockState.rules
     }
   }
   class WorkspaceRepository {
@@ -1354,6 +1368,9 @@ vi.mock('@spark/storage', () => {
   }
 
   return {
+    CustomToolRepository: SessionRuntimeConfigCustomToolRepositoryStub,
+    SessionHistoryRepository: SessionRuntimeConfigSessionHistoryRepositoryStub,
+    ToolInvocationRepository: SessionRuntimeConfigToolInvocationRepositoryStub,
     SubAppRepository: SessionRuntimeConfigSubAppRepositoryStub,
     TurnPerfRepository: SessionRuntimeConfigTurnPerfRepositoryStub,
     SessionRepository,
@@ -1539,6 +1556,14 @@ describe('buildMediaGenerationSystemPrompt', () => {
     expect(prompt).toContain('ask which inputs to keep')
     expect(prompt).toContain('mcp__spark_files__present_files')
     expect(prompt).toContain('not complete')
+    expect(prompt).toContain('model, SDK, CLI, or executor')
+    expect(prompt).toContain('routing guidelines rather than hard restrictions')
+    expect(prompt).toContain('ask the user only when the choice materially affects')
+    expect(prompt).toContain('without blocking the task')
+    expect(prompt).toContain(
+      "consider the active model or executor's native image capability first",
+    )
+    expect(prompt).not.toContain('ask the user which route to use before generating')
   })
 })
 
@@ -1551,6 +1576,7 @@ describe('SessionService runtime provider/model resolution', () => {
     mockState.mediaManifests.clear()
     mockState.providerMediaModels.length = 0
     mockState.events.length = 0
+    mockState.rules.length = 0
     mockState.mcpServers.length = 0
     mockState.sdkConfigs.length = 0
     mockState.sdkTurns.length = 0
@@ -3309,6 +3335,54 @@ describe('SessionService runtime provider/model resolution', () => {
     )
   })
 
+  it('passes image attachments through unchanged when provider modelType is text', async () => {
+    const attachmentPath = fileURLToPath(new URL('../../../package.json', import.meta.url))
+    seedProvider({
+      id: 'legacy-text-provider',
+      provider_type: 'anthropic',
+      name: 'Legacy text provider',
+      config_json: JSON.stringify({
+        defaultModel: 'vision-capable-model',
+        modelIds: ['vision-capable-model'],
+        apiEndpoint: 'https://api.example.test/anthropic',
+        modelType: 'text',
+      }),
+      keystore_ref: 'key-legacy-text',
+      is_default: 0,
+    })
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'legacy-text-provider',
+      agentAdapter: 'claude-sdk',
+      permissionMode: 'claude-plan',
+      title: 'Native image input session',
+    })
+
+    await service.sendTurn({
+      sessionId,
+      message: 'describe the selected image',
+      attachments: [{ type: 'image', path: attachmentPath }],
+    })
+
+    await vi.waitFor(() => {
+      expect(mockState.sdkConfigs).toHaveLength(1)
+    })
+    expect(mockState.sdkConfigs[0]).toMatchObject({
+      attachments: [
+        expect.objectContaining({
+          type: 'image',
+          path: attachmentPath,
+        }),
+      ],
+    })
+    expect(mockState.sdkTurns[0]?.message).toBe('describe the selected image')
+    expect(
+      events.some(
+        (event) => event.type === 'tool_call' && event.toolName === 'spark_host_provider_vision',
+      ),
+    ).toBe(false)
+  })
+
   it('marks scheduled automation turns as unattended in the SDK config', async () => {
     const service = new SessionService({} as never, (event) => events.push(event))
     const { sessionId } = await service.createSession({
@@ -4258,7 +4332,7 @@ describe('SessionService runtime provider/model resolution', () => {
     )
   })
 
-  it('uses the host agent for unbound or unavailable workflow agent nodes', async () => {
+  it('fails explicitly instead of falling back to the host for an unbound workflow agent node', async () => {
     mockState.agents.set(
       'workflow-host',
       makeAgent({
@@ -4323,22 +4397,62 @@ describe('SessionService runtime provider/model resolution', () => {
     const response = await tool.handler({ objective: 'exercise host fallback' })
 
     expect(response.structuredContent).toMatchObject({
-      status: 'completed',
+      status: 'failed',
       executions: [
-        { nodeId: 'plan', agentId: 'workflow-host', state: 'completed' },
-        { nodeId: 'implement', agentId: 'workflow-host', state: 'completed' },
+        {
+          nodeId: 'plan',
+          agentId: '',
+          state: 'failed',
+          error: { code: 'missing_agent_id' },
+        },
       ],
     })
-    expect(mockState.sdkConfigs).toHaveLength(3)
-    expect(String(mockState.sdkConfigs[1]?.systemPrompt ?? '')).toContain(
-      'Agent: Workflow Host (workflow-host)',
-    )
-    expect(String(mockState.sdkConfigs[2]?.systemPrompt ?? '')).toContain(
-      'Agent: Workflow Host (workflow-host)',
-    )
+    expect(mockState.sdkConfigs).toHaveLength(1)
   })
 
-  it('exposes workflow_run for a managed host with a temporary subagent workflow worker', async () => {
+  it('runs a bound subagent with its Agent rules and scoped MCP selection', async () => {
+    mockState.agents.set(
+      'bound-specialist',
+      makeAgent({
+        id: 'bound-specialist',
+        name: 'Bound Specialist',
+        providerProfileId: 'tencent-provider',
+        prompt: 'BOUND_SPECIALIST_PROMPT',
+        ruleIds: ['specialist-rule'],
+        mcpServerIds: ['mcp-selected'],
+      }),
+    )
+    mockState.rules.push({
+      id: 'specialist-rule',
+      scope: 'user',
+      scope_ref: null,
+      name: 'Specialist rule',
+      content: 'SPECIALIST_RULE_SENTINEL',
+      priority: 10,
+      enabled: 1,
+      created_at: '2026-05-28T00:00:00.000Z',
+      updated_at: '2026-05-28T00:00:00.000Z',
+    })
+    mockState.mcpServers.push(
+      {
+        id: 'mcp-selected',
+        scope: 'user',
+        name: 'selected_mcp',
+        config_json: JSON.stringify({ command: 'node', args: ['selected.mjs'] }),
+        enabled: 1,
+        created_at: '2026-05-28T00:00:00.000Z',
+        updated_at: '2026-05-28T00:00:00.000Z',
+      },
+      {
+        id: 'mcp-unselected',
+        scope: 'user',
+        name: 'unselected_mcp',
+        config_json: JSON.stringify({ command: 'node', args: ['unselected.mjs'] }),
+        enabled: 1,
+        created_at: '2026-05-28T00:00:00.000Z',
+        updated_at: '2026-05-28T00:00:00.000Z',
+      },
+    )
     mockState.agents.set(
       'workflow-host',
       makeAgent({
@@ -4359,10 +4473,8 @@ describe('SessionService runtime provider/model resolution', () => {
             kind: 'subagent',
             title: 'Draft Temp',
             config: {
-              prompt: 'Draft the section',
+              agentId: 'bound-specialist',
               outputKey: 'section',
-              modelId: 'glm-5',
-              providerProfileId: 'tencent-provider',
             },
           },
         ],
@@ -4391,6 +4503,97 @@ describe('SessionService runtime provider/model resolution', () => {
     ).spark_team
     expect(teamServer.instance.tools.map((tool) => tool.name)).toEqual(['workflow_run'])
     expect(config?.allowedTools).toEqual(expect.arrayContaining(['mcp__spark_team__workflow_run']))
+    const workflowRun = (
+      config?.mcpServers as {
+        spark_team: {
+          instance: {
+            tools: Array<{
+              name: string
+              handler: (args: Record<string, unknown>) => Promise<unknown>
+            }>
+          }
+        }
+      }
+    ).spark_team.instance.tools.find((tool) => tool.name === 'workflow_run')
+    if (workflowRun == null) throw new Error('expected workflow_run tool')
+    await workflowRun.handler({ objective: 'run the bound subagent' })
+
+    const memberConfig = mockState.sdkConfigs[1]
+    expect(String(memberConfig?.systemPrompt ?? '')).toContain('BOUND_SPECIALIST_PROMPT')
+    expect(String(memberConfig?.systemPrompt ?? '')).toContain('SPECIALIST_RULE_SENTINEL')
+    expect(memberConfig?.mcpServers).toHaveProperty('selected_mcp')
+    expect(memberConfig?.mcpServers).not.toHaveProperty('unselected_mcp')
+  })
+
+  it('returns missing_agent_id before dispatch when a subagent binds a disabled Agent', async () => {
+    mockState.agents.set(
+      'workflow-host',
+      makeAgent({
+        id: 'workflow-host',
+        name: 'Workflow Host',
+        providerProfileId: 'tencent-provider',
+        workflowId: 'workflow-disabled-subagent',
+      }),
+    )
+    mockState.agents.set(
+      'disabled-specialist',
+      makeAgent({
+        id: 'disabled-specialist',
+        name: 'Disabled Specialist',
+        enabled: false,
+        providerProfileId: 'tencent-provider',
+      }),
+    )
+    mockState.workflows.set('workflow-disabled-subagent', {
+      id: 'workflow-disabled-subagent',
+      name: 'Disabled subagent workflow',
+      description: 'Reject an unavailable binding.',
+      graph: {
+        nodes: [
+          {
+            id: 'review',
+            kind: 'subagent',
+            title: 'Review',
+            config: { agentId: 'disabled-specialist', outputKey: 'review' },
+          },
+        ],
+        edges: [],
+      },
+    })
+    const service = new SessionService({} as never, (event) => events.push(event))
+    const { sessionId } = await service.createSession({
+      providerProfileId: 'tencent-provider',
+      agentId: 'workflow-host',
+      agentAdapter: 'claude-sdk',
+      permissionMode: 'claude-plan',
+      title: 'Disabled subagent workflow',
+    })
+
+    await service.sendTurn({ sessionId, message: 'run the workflow' })
+    await vi.waitFor(() => expect(mockState.sdkConfigs).toHaveLength(1))
+    const workflowRun = (
+      mockState.sdkConfigs[0]?.mcpServers as {
+        spark_team: {
+          instance: {
+            tools: Array<{
+              name: string
+              handler: (args: Record<string, unknown>) => Promise<{
+                structuredContent: Record<string, unknown>
+              }>
+            }>
+          }
+        }
+      }
+    ).spark_team.instance.tools.find((tool) => tool.name === 'workflow_run')
+    if (workflowRun == null) throw new Error('expected workflow_run tool')
+
+    const response = await workflowRun.handler({ objective: 'reject disabled binding' })
+
+    expect(response.structuredContent).toMatchObject({
+      status: 'failed',
+      failedNode: { error: { code: 'missing_agent_id' } },
+    })
+    expect(mockState.sdkConfigs).toHaveLength(1)
   })
 
   it('exposes workflow_run for an atomic-only workflow so the host can execute it reliably', async () => {
@@ -4871,7 +5074,7 @@ describe('SessionService runtime provider/model resolution', () => {
     )
   })
 
-  it('exposes workflow_run and falls back to host when explicit workers are blank, disabled, or missing', async () => {
+  it('exposes workflow_run so invalid Agent bindings can return an explicit runtime error', async () => {
     mockState.agents.set(
       'workflow-host',
       makeAgent({

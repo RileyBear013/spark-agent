@@ -75,6 +75,7 @@ import { CustomCommandsSection } from './custom-commands/CustomCommandsSection'
 import { CODEX_PERMISSION_MODE_OPTIONS as SHARED_CODEX_PERMISSION_MODE_OPTIONS } from '../utils/permission-options'
 import { ComputerUseSettingsSection } from '../computer-use/ComputerUseSettingsSection'
 import { AccountSyncSettingsSection } from './account-sync/AccountSyncSettingsSection'
+import { UpdateReleaseNotesCard } from './UpdateReleaseNotesCard'
 import './SettingsView.less'
 import type {
   SessionAgentAdapter,
@@ -2527,6 +2528,8 @@ function RuleEditPanel({
               onChange={(e) => setContent(e.target.value)}
               placeholder="输入要注入到 Agent prompt 的规则内容"
               className="rule-textarea"
+              rows={8}
+              resize
             />
           </div>
         </div>
@@ -3557,6 +3560,7 @@ export function PermissionsSection() {
                 options={[
                   { label: 'Claude SDK', value: 'claude-sdk' },
                   { label: 'Codex', value: 'codex' },
+                  { label: 'Spark', value: 'spark' },
                 ]}
               />
             </div>
@@ -5323,12 +5327,12 @@ function IntegritySection() {
       {/* ── FFmpeg (视频处理工作台依赖) ── */}
       <FfmpegStatusCard />
 
-      <OptionalCapabilitiesSettingsCard />
-
       <CodexRuntimeDiagnosticsCard />
 
       {/* ── 语音输入 (ASR) 语音包完整性 ── */}
       <VoiceIntegritySettingsItem />
+
+      <OptionalCapabilitiesSettingsCard />
     </div>
   )
 }
@@ -5510,6 +5514,14 @@ function UpdatesSection() {
         </div>
       </div>
 
+      {hasUpdate && status?.updateInfo != null && (
+        <UpdateReleaseNotesCard
+          version={status.updateInfo.version}
+          releaseDate={status.updateInfo.releaseDate}
+          releaseNotes={status.updateInfo.releaseNotes ?? null}
+        />
+      )}
+
       <div className="card">
         <SettingsRow
           title="Release 下载"
@@ -5566,21 +5578,6 @@ function UpdatesSection() {
             />
           }
         />
-        {/* <SettingsRow
-          title="更新通道"
-          right={
-            <div className="select-sm">
-              <Select
-                value={s.channel}
-                onChange={(v) => handleSettingsChange('channel', v)}
-                options={[
-                  { label: 'stable', value: 'stable' },
-                  { label: 'beta', value: 'beta' },
-                ]}
-              />
-            </div>
-          }
-        /> */}
         <SettingsRow
           title="更新来源"
           desc={`检查顺序：官网版本中心 → GitHub Releases；当前检查来源：${updateSourceLabel}`}

@@ -15,6 +15,7 @@ function makeWorkflow(): WorkflowItem {
     status: 'active',
     tags: [],
     enabled: true,
+    bundleId: null,
     graph: {
       nodes: [
         {
@@ -37,6 +38,8 @@ describe('buildWorkflowSystemPrompt', () => {
 
     expect(prompt).toContain('Workflow: New approval workflow (workflow-new)')
     expect(prompt).toContain('1. New plan step [kind=plan]')
+    expect(prompt).toContain('ready agent nodes in parallel waves')
+    expect(prompt).toContain('atomic nodes serially')
   })
 
   it('renders workflow edges and conditions for guided runtimes', () => {

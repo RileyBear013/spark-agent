@@ -69,7 +69,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker,
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => 'action-1',
       now: () => Date.parse(SESSION.createdAt),
@@ -85,7 +92,8 @@ describe('ComputerTaskOperator', () => {
         observedFrameId: 'frame-1',
         observedTreeVersion: 'tree-1',
         actuatorLeaseId: SESSION.id,
-        executionLane: 'background_semantic',
+        // Production no longer sends executionLane — each native host infers
+        // its own channel per platform (macOS postToPid / Windows PostMessage).
         policyContext: expect.objectContaining({ target: { kind: 'element', id: 'save-button' } }),
       }),
     )
@@ -114,7 +122,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker,
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => `action-${(sequence += 1)}`,
       now: () => Date.parse(SESSION.createdAt),
@@ -163,7 +178,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker,
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => `action-${(sequence += 1)}`,
       now: () => Date.parse(SESSION.createdAt),
@@ -206,7 +228,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker,
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => 'action-1',
       now: () => Date.parse(SESSION.createdAt),
@@ -253,7 +282,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
       approvals: { takeApprovedTicket },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => 'action-1',
       wait: vi.fn(async () => undefined),
@@ -281,7 +317,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       timeline,
       createId: () => 'action-1',
@@ -318,7 +361,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch: vi.fn() },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       wait: vi.fn(async () => undefined),
       now: () => Date.parse(SESSION.createdAt),
@@ -344,7 +394,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch: vi.fn() },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       wait: vi.fn(async () => undefined),
       now: () => Date.parse(SESSION.createdAt),
@@ -388,7 +445,14 @@ describe('ComputerTaskOperator', () => {
         dispatch: vi.fn(async () => ({ observation: AFTER, noop: false })),
       },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -436,7 +500,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe, dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       createId: () => `action-${++actionIndex}`,
       now: () => Date.parse(SESSION.createdAt),
@@ -544,7 +615,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe, dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       wait: vi.fn(async () => undefined),
       now: () => Date.parse(SESSION.createdAt),
@@ -603,7 +681,14 @@ describe('ComputerTaskOperator', () => {
       sessions,
       broker: { observe, dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -642,7 +727,14 @@ describe('ComputerTaskOperator', () => {
     const operator = new ComputerTaskOperator({
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -673,7 +765,14 @@ describe('ComputerTaskOperator', () => {
     const operator = new ComputerTaskOperator({
       sessions,
       broker: { observe: vi.fn(async () => BEFORE), dispatch: vi.fn() },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now,
     })
@@ -706,7 +805,14 @@ describe('ComputerTaskOperator', () => {
         observe: vi.fn().mockResolvedValueOnce(BEFORE).mockResolvedValue(AFTER),
         dispatch: vi.fn(async () => ({ observation: AFTER, noop: false })),
       },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -735,7 +841,14 @@ describe('ComputerTaskOperator', () => {
         dispatch: vi.fn(async () => ({ observation: AFTER, noop: false })),
       },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications,
       createId: () => 'action-1',
       now: () => Date.parse(SESSION.createdAt),
@@ -780,7 +893,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -819,7 +939,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })
@@ -858,7 +985,14 @@ describe('ComputerTaskOperator', () => {
       sessions: sessionController(),
       broker: { observe: vi.fn(async () => BEFORE), dispatch },
       approvals: { takeApprovedTicket: vi.fn(() => null) },
-      evidence: { readLatestImage: vi.fn(async () => Buffer.from('png')) },
+      evidence: {
+        readLatestImage: vi.fn(async () => ({
+          bytes: Buffer.from('png'),
+          width: 2000,
+          height: 1200,
+          mimeType: 'image/png' as const,
+        })),
+      },
       verifications: verificationStore(),
       now: () => Date.parse(SESSION.createdAt),
     })

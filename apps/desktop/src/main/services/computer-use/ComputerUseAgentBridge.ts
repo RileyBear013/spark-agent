@@ -4,7 +4,10 @@ import { createLogger } from '@spark/shared'
 
 const log = createLogger('computer-use-agent-bridge')
 const DEFAULT_MAX_BODY_BYTES = 256 * 1024
-const SESSION_TOKEN_TTL_MS = 15 * 60 * 1_000
+// Absolute ceiling well above the operator's 20-minute task runtime budget; the
+// authorize() path renews the window on every authenticated call, so a token
+// only expires after 30 minutes of complete silence (an abandoned turn).
+const SESSION_TOKEN_TTL_MS = 30 * 60 * 1_000
 
 const ALLOWED_TOOLS = new Set([
   'get_capabilities',
@@ -23,7 +26,46 @@ const ALLOWED_TOOLS = new Set([
   'stop',
   'takeover',
   'bind_target',
+  // Atomic agent-directed control (one governed action per call).
+  'click',
+  'type_text',
+  'paste',
+  'set_value',
+  'invoke_element',
+  'press_key',
+  'scroll',
+  'drag',
+  'select_text',
+  'perform_secondary_action',
+  'screenshot',
 ])
+
+const AT_TARGET_SCHEMA = {
+  oneOf: [
+    {
+      type: 'object',
+      properties: { elementId: { type: 'string', minLength: 1, maxLength: 200 } },
+      required: ['elementId'],
+      additionalProperties: false,
+      description:
+        'Element id from the latest tree, e.g. "42". Preferred — semantic and background-safe.',
+    },
+    {
+      type: 'object',
+      properties: {
+        coordinate: {
+          type: 'array',
+          items: { type: 'number', minimum: 0 },
+          minItems: 2,
+          maxItems: 2,
+          description: '[x, y] pixel position in the latest screenshot (top-left origin).',
+        },
+      },
+      required: ['coordinate'],
+      additionalProperties: false,
+    },
+  ],
+} as const
 
 const VERIFICATION_SPEC_INPUT_SCHEMA = {
   oneOf: [
@@ -168,7 +210,7 @@ const MCP_TOOLS = [
   {
     name: 'get_app_state',
     description:
-      'Get one application state directly by exact display name, bundle id, stable app id, or window id. App selectors launch or raise the app by default. Returns native window metadata plus an accessibility/visual observation when available. A chat snapshot is optional and its failure does not discard state.',
+      "Get one application state directly by exact display name, bundle id, stable app id, or window id. App selectors launch or raise the app by default. Returns native window metadata plus an accessibility/visual observation when available. With includeSnapshot the screenshot follows the REQUESTED app, not the user's focus — background apps are captured without stealing focus. A chat snapshot is optional and its failure does not discard state.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -196,14 +238,201 @@ const MCP_TOOLS = [
   },
   {
     name: 'capture_app_snapshot',
-    description: 'Capture the focused application through the governed snapshot service.',
+    description:
+      'Capture an application screenshot through the governed snapshot service. Without `app` it captures the focused application; with `app` (exact display name, bundle id, or stable app id) it captures THAT application, including when it is in the background — no focus steal.',
     inputSchema: {
       type: 'object',
       properties: {
         accessibleTextMode: { type: 'string', enum: ['visible_only', 'app_exposed'] },
+        app: {
+          type: 'string',
+          description: 'Application display name, bundle id, or stable app id',
+        },
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: 'click',
+    description:
+      'Click a UI element. Prefer elementId from the latest tree (semantic, background-safe, survives window moves); use screenshot pixel coordinates only for custom-drawn or tree-less UI. Every action tool returns the fresh Markdown tree and a new screenshot — use the [n] element ids from THAT response for the next action. If a click does not change the screen, pick a different element, try coordinates, or use keyboard navigation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        at: {
+          ...AT_TARGET_SCHEMA,
+          description: 'What to click: {elementId} or {coordinate:[x,y]}.',
+        },
+        clickCount: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 3,
+          description: '1 = click, 2 = double-click.',
+        },
+        button: { type: 'string', enum: ['left', 'right', 'middle'] },
+        modifiers: {
+          type: 'array',
+          items: { type: 'string', enum: ['Meta', 'Control', 'Alt', 'Shift'] },
+          maxItems: 3,
+          description:
+            'Modifier chord held during the click: Meta=cmd (open link in new tab), Control=ctrl (context menu), Alt=option, Shift.',
+        },
+      },
+      required: ['at'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'type_text',
+    description:
+      'Type text into the focused field (or the field given via `into`, which is focused first). Pass submit:true to press Enter afterwards. Text lands exactly as given — the IME is bypassed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', minLength: 1, maxLength: 20_000 },
+        into: {
+          type: 'object',
+          properties: { elementId: { type: 'string', minLength: 1, maxLength: 200 } },
+          required: ['elementId'],
+          additionalProperties: false,
+        },
+        submit: { type: 'boolean' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'paste',
+    description:
+      'Deliver text via the clipboard with a cmd+V (or the field given via `into`, which is focused first). Preferred for LONG text (paragraphs, code blocks) — one chord instead of per-chunk keystrokes — and for custom-drawn editors that ignore typed input. Replaces the system clipboard contents. Pass submit:true to press Enter afterwards.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', minLength: 1, maxLength: 100_000 },
+        into: {
+          type: 'object',
+          properties: { elementId: { type: 'string', minLength: 1, maxLength: 200 } },
+          required: ['elementId'],
+          additionalProperties: false,
+        },
+        submit: { type: 'boolean' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'set_value',
+    description:
+      'Set the value of a text-like element directly (AX set-value, no keystrokes, works in the background). Replaces the entire content of the field.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        elementId: { type: 'string', minLength: 1, maxLength: 200 },
+        value: { type: 'string', maxLength: 20_000 },
+      },
+      required: ['elementId', 'value'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'invoke_element',
+    description:
+      'Perform a semantic action on an accessibility element: invoke (press/activate), select (pick), focus, expand, collapse. Runs in the background without stealing focus — the most reliable way to activate standard controls.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        elementId: { type: 'string', minLength: 1, maxLength: 200 },
+        action: { type: 'string', enum: ['invoke', 'select', 'focus', 'expand', 'collapse'] },
+      },
+      required: ['elementId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'press_key',
+    description:
+      'Press a key or chord. Accepts a chord string like "cmd+shift+t" or an array like ["Meta","t"]. Modifiers: cmd/command/meta→Meta, ctrl→Control, alt/option→Alt, shift→Shift; named keys Enter, Escape, Tab, Space, Backspace, Delete, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right (aliases left/right/up/down and arrow glyphs also accepted), F1-F24; single letters/digits as-is.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        keys: {
+          oneOf: [
+            { type: 'string', minLength: 1, maxLength: 200 },
+            {
+              type: 'array',
+              items: { type: 'string', minLength: 1, maxLength: 30 },
+              minItems: 1,
+              maxItems: 8,
+            },
+          ],
+        },
+      },
+      required: ['keys'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'scroll',
+    description:
+      'Scroll at a position (element center or screenshot pixel coordinate; window center when omitted). Positive deltaY scrolls down; deltas are pixels.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deltaY: { type: 'number', minimum: -100_000, maximum: 100_000 },
+        deltaX: { type: 'number', minimum: -100_000, maximum: 100_000 },
+        at: AT_TARGET_SCHEMA,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'drag',
+    description:
+      'Drag from one position to another (element or screenshot pixel coordinate on both ends).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: AT_TARGET_SCHEMA,
+        to: AT_TARGET_SCHEMA,
+        durationMs: { type: 'integer', minimum: 50, maximum: 250 },
+      },
+      required: ['from', 'to'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'select_text',
+    description:
+      'Select a text range inside a text element by content: the first occurrence of `text` (optionally disambiguated with prefix/suffix context) becomes the selection. Use this for copy/cut ranges instead of coordinates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        elementId: { type: 'string', minLength: 1, maxLength: 200 },
+        text: { type: 'string', minLength: 1, maxLength: 20_000 },
+        prefix: { type: 'string', maxLength: 2_000 },
+        suffix: { type: 'string', maxLength: 2_000 },
+      },
+      required: ['elementId', 'text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'perform_secondary_action',
+    description: 'Right-click (context menu) at an element or screenshot pixel coordinate.',
+    inputSchema: {
+      type: 'object',
+      properties: { at: AT_TARGET_SCHEMA },
+      required: ['at'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'screenshot',
+    description:
+      'Re-observe the current target window: full-resolution screenshot + the complete Markdown element tree with [n] ids. Use after the UI changed for reasons outside your actions, or when element ids went stale.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'start_task',
@@ -456,7 +685,10 @@ export class ComputerUseAgentBridge {
         jsonrpc: '2.0',
         id: request.id,
         result: {
-          content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+          // Atomic action tools carry the post-action screenshot as a real
+          // image content block so vision models SEE the fresh frame instead
+          // of a base64 dump in text.
+          content: buildToolResultContent(data),
           structuredContent: data,
         },
       })
@@ -483,6 +715,9 @@ export class ComputerUseAgentBridge {
       this.grants.delete(token)
       return null
     }
+    // Sliding window: an active turn (operator loop polling tools for up to 20
+    // minutes) must never 401 mid-flight; silence is what expires a grant.
+    grant.expiresAt = Date.now() + SESSION_TOKEN_TTL_MS
     return grant
   }
 
@@ -523,6 +758,37 @@ export class ComputerUseAgentBridge {
       if (grant.expiresAt <= now) this.grants.delete(token)
     }
   }
+}
+
+/**
+ * Splits an atomic-tool payload into text + image content blocks. The base64
+ * screenshot field is stripped from the text rendering (it would dwarf the
+ * JSON) and returned as a native image block for vision models.
+ */
+function buildToolResultContent(data: unknown): Array<Record<string, unknown>> {
+  if (data == null || typeof data !== 'object' || Array.isArray(data)) {
+    return [{ type: 'text', text: JSON.stringify(data, null, 2) }]
+  }
+  const record = { ...(data as Record<string, unknown>) }
+  const screenshot = record.screenshot
+  let image: { mimeType: string; data: string } | null = null
+  if (
+    screenshot != null &&
+    typeof screenshot === 'object' &&
+    typeof (screenshot as Record<string, unknown>).data === 'string' &&
+    typeof (screenshot as Record<string, unknown>).mimeType === 'string'
+  ) {
+    const shot = screenshot as { mimeType: string; data: string }
+    image = { mimeType: shot.mimeType, data: shot.data }
+    delete record.screenshot
+  }
+  const content: Array<Record<string, unknown>> = [
+    { type: 'text', text: JSON.stringify(record, null, 2) },
+  ]
+  if (image != null) {
+    content.push({ type: 'image', mimeType: image.mimeType, data: image.data })
+  }
+  return content
 }
 
 function parseInvocation(text: string): { toolName: string; args: unknown } {

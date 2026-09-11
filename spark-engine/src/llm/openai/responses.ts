@@ -1,5 +1,6 @@
 import { KernelError } from '../../kernel/errors.js'
 import type { LlmCallContext, LlmService } from '../../seams.js'
+import { safeDiagnosticText, safeProviderError } from '../error-detail.js'
 import { asRecord, numberValue, openSse, stringValue, type FetchLike } from '../http/client.js'
 import type { IrMessage, LlmDelta, LlmRequest, ProviderContinuation } from '../types.js'
 
@@ -20,6 +21,7 @@ export class OpenAiResponsesService implements LlmService {
   }
 
   async *stream(request: LlmRequest, context: LlmCallContext): AsyncIterable<LlmDelta> {
+    const startedAt = Date.now()
     const opened = await openSse({
       provider: 'openai',
       url: `${normalizeBaseUrl(this.#options.baseUrl ?? 'https://api.openai.com/v1')}/responses`,
@@ -28,7 +30,7 @@ export class OpenAiResponsesService implements LlmService {
       signal: context.signal,
       ...(this.#options.fetch ? { fetch: this.#options.fetch } : {}),
     })
-    yield* decodeOpenAiEvents(opened.events, opened.requestId)
+    yield* decodeOpenAiEvents(opened.events, opened.requestId, startedAt)
   }
 }
 
@@ -73,7 +75,11 @@ function toOpenAiInput(messages: readonly IrMessage[]): unknown[] {
     if (message.role === 'user') {
       input.push({ role: 'user', content: [{ type: 'input_text', text: message.content }] })
     } else if (message.role === 'tool_result') {
-      input.push({ type: 'function_call_output', call_id: message.callId, output: message.content })
+      input.push({
+        type: 'function_call_output',
+        call_id: message.callId,
+        output: message.content,
+      })
     } else {
       const continuation = continuationItems(message.continuation)
       if (continuation) {
@@ -109,9 +115,12 @@ function continuationItems(continuation: ProviderContinuation | undefined): unkn
 
 async function* decodeOpenAiEvents(
   events: AsyncIterable<{ readonly data: string }>,
-  requestId?: string,
+  requestId: string | undefined,
+  startedAt: number,
 ): AsyncIterable<LlmDelta> {
   const emittedCalls = new Set<string>()
+  let streamedText = ''
+  let firstContentAt: number | undefined
   let completed = false
 
   for await (const event of events) {
@@ -119,11 +128,15 @@ async function* decodeOpenAiEvents(
     const value = parseEvent(event.data, requestId)
     const type = stringValue(value.type)
     if (type === 'response.output_text.delta' || type === 'response.refusal.delta') {
-      yield { type: 'text', text: requiredString(value.delta, type, requestId) }
+      firstContentAt ??= Date.now()
+      const text = requiredString(value.delta, type, requestId)
+      streamedText += text
+      yield { type: 'text', text }
     } else if (
       type === 'response.reasoning_summary_text.delta' ||
       type === 'response.reasoning_text.delta'
     ) {
+      firstContentAt ??= Date.now()
       yield { type: 'thinking', text: requiredString(value.delta, type, requestId) }
     } else if (type === 'response.output_item.done') {
       const item = asRecord(value.item)
@@ -131,23 +144,38 @@ async function* decodeOpenAiEvents(
       const call = parseFunctionCall(item, requestId)
       if (call && !emittedCalls.has(call.callId)) {
         emittedCalls.add(call.callId)
+        firstContentAt ??= Date.now()
         yield call
       }
     } else if (type === 'response.completed') {
       const response = asRecord(value.response)
       if (!response) malformed(type, requestId)
       const output = Array.isArray(response.output) ? response.output : []
+      const completedText =
+        stringValue(response.output_text) ??
+        output
+          .map((rawItem) => extractOutputText(asRecord(rawItem)))
+          .filter((text): text is string => text !== undefined)
+          .join('')
+      const missingText = missingSuffix(completedText, streamedText)
+      if (missingText !== '') {
+        firstContentAt ??= Date.now()
+        streamedText += missingText
+        yield { type: 'text', text: missingText }
+      }
       for (const rawItem of output) {
         const item = asRecord(rawItem)
         if (!item) malformed(type, requestId)
         const call = parseFunctionCall(item, requestId)
         if (call && !emittedCalls.has(call.callId)) {
           emittedCalls.add(call.callId)
+          firstContentAt ??= Date.now()
           yield call
         }
       }
       const usage = asRecord(response.usage)
       const inputDetails = asRecord(usage?.input_tokens_details)
+      const outputDetails = asRecord(usage?.output_tokens_details)
       yield {
         type: 'continuation',
         continuation: { protocol: 'openai-responses', data: structuredClone(output) },
@@ -158,6 +186,13 @@ async function* decodeOpenAiEvents(
         outputTokens: token(usage?.output_tokens),
         cacheReadTokens: token(inputDetails?.cached_tokens),
         cacheWriteTokens: 0,
+        ...(outputDetails === undefined
+          ? {}
+          : { reasoningTokens: token(outputDetails.reasoning_tokens) }),
+        callDurationMs: Math.max(0, Date.now() - startedAt),
+        ...(firstContentAt === undefined
+          ? {}
+          : { ttftMs: Math.max(0, firstContentAt - startedAt) }),
       }
       yield { type: 'done' }
       completed = true
@@ -169,9 +204,13 @@ async function* decodeOpenAiEvents(
         type === 'response.failed'
           ? 'llm.openai.response_failed'
           : 'llm.openai.response_incomplete',
-        stringValue(error?.message) ?? stringValue(incomplete?.reason) ?? `OpenAI emitted ${type}`,
+        safeDiagnosticText(
+          stringValue(error?.message) ??
+            stringValue(incomplete?.reason) ??
+            `OpenAI emitted ${type}`,
+        ),
         {
-          retryable: type === 'response.failed',
+          retryable: type === 'response.failed' && isRetryableOpenAiStreamError(error),
           detail: { ...(requestId ? { requestId } : {}) },
         },
       )
@@ -179,8 +218,14 @@ async function* decodeOpenAiEvents(
       const error = asRecord(value.error) ?? value
       throw new KernelError(
         `llm.openai.${stringValue(error.code) ?? 'stream_error'}`,
-        stringValue(error.message) ?? 'OpenAI stream failed',
-        { retryable: true, detail: { ...(requestId ? { requestId } : {}) } },
+        safeDiagnosticText(stringValue(error.message) ?? 'OpenAI stream failed'),
+        {
+          retryable: isRetryableOpenAiStreamError(error),
+          detail: {
+            ...(requestId ? { requestId } : {}),
+            providerError: safeProviderError(error),
+          },
+        },
       )
     } else if (type === 'response.in_progress' || type === 'response.created') {
       yield { type: 'heartbeat' }
@@ -196,6 +241,54 @@ async function* decodeOpenAiEvents(
       },
     )
   }
+}
+
+function isRetryableOpenAiStreamError(error: Record<string, unknown> | undefined): boolean {
+  const classification = (stringValue(error?.code) ?? stringValue(error?.type))?.toLowerCase()
+  if (classification === undefined) return true
+  return ![
+    'account_deactivated',
+    'authentication_error',
+    'billing_error',
+    'billing_hard_limit_reached',
+    'content_filter',
+    'context_length_exceeded',
+    'insufficient_quota',
+    'invalid_api_key',
+    'invalid_request_error',
+    'model_not_found',
+    'not_found_error',
+    'permission_error',
+    'unsupported_value',
+  ].includes(classification)
+}
+
+function extractOutputText(item: Record<string, unknown> | undefined): string | undefined {
+  if (!item) return undefined
+  if (item.type === 'output_text' || item.type === 'refusal') {
+    return stringValue(item.text) ?? stringValue(item.refusal)
+  }
+  if (item.type !== 'message' || !Array.isArray(item.content)) return undefined
+  return (
+    item.content
+      .map((rawContent) => {
+        const content = asRecord(rawContent)
+        if (!content) return undefined
+        if (content.type === 'output_text') return stringValue(content.text)
+        if (content.type === 'refusal') return stringValue(content.refusal)
+        return undefined
+      })
+      .filter((text): text is string => text !== undefined)
+      .join('') || undefined
+  )
+}
+
+function missingSuffix(completeText: string | undefined, emittedText: string): string {
+  if (completeText === undefined || completeText === emittedText) return ''
+  if (completeText.startsWith(emittedText)) return completeText.slice(emittedText.length)
+  // A gateway may omit or reorder deltas. Prefer one complete answer over a
+  // silent answer, while avoiding duplication when the normal prefix exists.
+  return completeText
 }
 
 function parseFunctionCall(

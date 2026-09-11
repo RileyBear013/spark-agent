@@ -137,6 +137,11 @@ pub enum ComputerAction {
         text: String,
         sensitive: Option<bool>,
     },
+    #[serde(rename = "paste_text")]
+    PasteText {
+        text: String,
+        sensitive: Option<bool>,
+    },
     #[serde(rename = "wait_for")]
     WaitFor {
         condition: WaitCondition,
@@ -171,6 +176,10 @@ pub struct PolicyContext {
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionLane {
     BackgroundSemantic,
+    /// Message-level background delivery (PostMessageW): mouse/keyboard reach
+    /// the target window without touching the foreground. The Windows
+    /// counterpart of the macOS `background_pid` lane.
+    BackgroundPost,
     ForegroundInput,
     Passive,
 }
@@ -207,6 +216,11 @@ pub struct ComputerActionEnvelope {
     pub action: ComputerAction,
     #[serde(rename = "executionLane", default)]
     pub execution_lane: Option<ExecutionLane>,
+    /// Protocol v2: attach the settled post-action observation (fresh tree +
+    /// screenshot) to the action response, collapsing the execute→observe
+    /// feedback loop into one round trip. Absent on v1 envelopes.
+    #[serde(rename = "includeSkyshot", default)]
+    pub include_skyshot: Option<bool>,
     #[serde(rename = "policyContext")]
     pub policy_context: PolicyContext,
     pub intent: String,
@@ -449,7 +463,11 @@ impl ComputerAction {
                 ExecutionLane::BackgroundSemantic
             }
             Self::Observe { .. } | Self::WaitFor { .. } => ExecutionLane::Passive,
-            _ => ExecutionLane::ForegroundInput,
+            // Drag needs real mouse capture (SetCapture/hit-testing state) and
+            // FocusWindow is an explicit foreground request — both stay on the
+            // legacy SendInput lane. Everything else posts background.
+            Self::Drag { .. } | Self::FocusWindow { .. } => ExecutionLane::ForegroundInput,
+            _ => ExecutionLane::BackgroundPost,
         }
     }
 
@@ -460,7 +478,7 @@ impl ComputerAction {
                     return Err(ProtocolError::Invalid("text length"));
                 }
             }
-            Self::TypeText { text, .. } => {
+            Self::TypeText { text, .. } | Self::PasteText { text, .. } => {
                 if text.is_empty() || text.encode_utf16().count() > MAX_TEXT_UTF16_UNITS {
                     return Err(ProtocolError::Invalid("text length"));
                 }

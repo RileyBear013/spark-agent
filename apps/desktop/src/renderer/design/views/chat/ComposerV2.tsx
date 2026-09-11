@@ -75,6 +75,7 @@ import {
   type SessionId,
   type SessionReasoningEffort,
   type SessionGetQueueResponse,
+  type SessionQueuePauseState,
   type SessionQueuedTurn,
   type SessionAttachment,
   type SessionReferenceCandidate,
@@ -121,6 +122,7 @@ import type {
   ComposerMenuOption,
   ComposerOptionTone,
   ComposerPrefillPayload,
+  ComposerRevisionPayload,
   ComposerPrefs,
   ComposerDraftSnapshot,
   ComposerSessionReference,
@@ -133,6 +135,7 @@ import type {
   TextEditMenuState,
 } from './ChatComposerTypes'
 import { COMPOSER_ATTACHMENT_LIMIT } from './ChatComposerTypes'
+import { useLastUserMessageRevision } from './useLastUserMessageRevision'
 import { useComposerCodeReferences } from './composer-code-references'
 import { useComposerBrowserReferences } from './composer-browser-references'
 import type { BrowserElementReference } from '../../components/browser/elementPickerScript'
@@ -169,6 +172,7 @@ import {
 } from '../../components/code-viewer/composerInsert'
 import { QuickReplySuggestions } from './QuickReplySuggestions'
 import { CODEX_PERMISSION_MODE_OPTIONS as SHARED_CODEX_PERMISSION_MODE_OPTIONS } from '../../utils/permission-options'
+import { SPARK_PERMISSION_MODE_OPTIONS as SHARED_SPARK_PERMISSION_MODE_OPTIONS } from '../../utils/permission-options'
 import { isCanvasWorkspace, listSelectableWorkspaces } from '../../workspace-visibility'
 import { sortByManualOrderWithinPinnedSections } from '../../sidebar-manual-order'
 import {
@@ -189,6 +193,7 @@ import {
 } from '../../utils/cli-spark-override-cache'
 import { SessionReferencePicker } from './SessionReferencePicker'
 import { QueuedTaskList } from './QueuedTaskList'
+import { useQueueErrorRecovery } from './useQueueErrorRecovery'
 import { ComposerLexicalInput, type ComposerLexicalInputHandle } from './ComposerLexicalInput'
 import { useComposerInputAutoSize } from './useComposerInputAutoSize'
 import { useComposerDispatchState } from './useComposerDispatchState'
@@ -741,6 +746,9 @@ export function ComposerV2({
   focusTrigger = 0,
   resendRequest = null,
   onResendConsumed,
+  revisionRequest = null,
+  onRevisionConsumed,
+  onRevisionApplied,
   dispatching,
   onDispatchStateChange,
   optimisticUserSendCallbacks,
@@ -841,6 +849,14 @@ export function ComposerV2({
   // 应用到切进来的会话草稿（文本+图片），表现为"重发内容像狗皮膏药跨会话残留"。
   // 父组件在此回调里 setResendRequest(null) 即可彻底切断残留链。
   onResendConsumed?: () => void
+  /** 行内编辑提交：先撤回旧轮，再经正常发送管线提交替代轮。 */
+  revisionRequest?: { requestId: number; payload: ComposerRevisionPayload } | null
+  onRevisionConsumed?: () => void
+  onRevisionApplied?: (result: {
+    sessionId: string
+    turnCount: number
+    logicalMessageCount: number
+  }) => void
   // 主会话由 ChatView 持有该状态，确保 hero/会话布局切换导致 Composer 重挂载时
   // 发送按钮仍保持 loading；侧边会话不传时继续使用 Composer 本地状态。
   dispatching?: boolean
@@ -865,6 +881,7 @@ export function ComposerV2({
   const { sessions } = useSessionSidebar()
   const [sending, setSending] = useComposerDispatchState(dispatching, onDispatchStateChange)
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
+  const [queuePause, setQueuePause] = useState<SessionQueuePauseState | null>(null)
   const [queueVisible, setQueueVisible] = useState(true)
   const [clearingQueue, setClearingQueue] = useState(false)
   const [reorderingQueue, setReorderingQueue] = useState(false)
@@ -1649,6 +1666,7 @@ export function ComposerV2({
           ...(reference.snapshotSeq !== undefined ? { snapshotSeq: reference.snapshotSeq } : {}),
         })),
         editable: turn.userMessageVisibility !== 'hidden',
+        ...(turn.runtime != null ? { runtime: turn.runtime } : {}),
       })),
     [sessions],
   )
@@ -1657,6 +1675,10 @@ export function ComposerV2({
     (snapshot: SessionGetQueueResponse | null | undefined) => {
       if (snapshot == null || snapshot.sessionId !== session?.id) return
       setQueuedMessages(mapQueuedTurns(snapshot.queuedTurns))
+      if (Object.prototype.hasOwnProperty.call(snapshot, 'paused')) {
+        setQueuePause(snapshot.paused ?? null)
+        if (snapshot.paused != null) setQueueVisible(true)
+      }
       onOptimisticQueueStateChange?.(
         snapshot.sessionId,
         snapshot.queuedTurns.map((turn) => turn.turnId),
@@ -1669,6 +1691,7 @@ export function ComposerV2({
     async (sessionId: SessionId | null | undefined) => {
       if (sessionId == null) {
         setQueuedMessages([])
+        setQueuePause(null)
         return
       }
       try {
@@ -1755,6 +1778,7 @@ export function ComposerV2({
   ])
 
   useEffect(() => {
+    setQueuePause(null)
     void refreshQueueState(session?.id)
   }, [refreshQueueState, session?.id])
 
@@ -1874,7 +1898,30 @@ export function ComposerV2({
         sessionReferences,
         manualExpanded,
       },
+      options: {
+        sessionReferences?: ComposerSessionReference[]
+        preserveDraft?: boolean
+        resumePausedQueue?: boolean
+        mentionAgentId?: string
+        skipCommandHandling?: boolean
+      } = {},
     ) => {
+      const turnSessionReferences = options.sessionReferences ?? sessionReferences
+      const turnMentionAgentId =
+        options.mentionAgentId ??
+        replySnapshot?.agentId ??
+        (teamConfig.enabled &&
+        pendingMention != null &&
+        text.includes(`@${pendingMention.name}`) &&
+        pendingMention.agentId !== effectiveHostAgentId
+          ? pendingMention.agentId
+          : undefined)
+      const clearSentDraft = (buckets: Array<string | null | undefined>): void => {
+        if (!options.preserveDraft) clearDraftBuckets(buckets)
+      }
+      const restoreSentDraft = (bucket: string): void => {
+        if (!options.preserveDraft) restoreComposerDraftBucket(bucket, sentDraft)
+      }
       // 用户选择快捷回复或自行发送后立即隐藏建议，不等待事件流回写 user_message。
       if (activeQuickReplies != null) setDismissedQuickReplyKey(activeQuickReplies.key)
       const runtimePatchSnapshot = getCurrentRuntimePatch()
@@ -1886,23 +1933,23 @@ export function ComposerV2({
         return toSessionAttachments(prepared.attachments)
       }
       // 斜杠命令拦截：以 / 开头的消息走 command:execute
-      if (text.startsWith('/')) {
+      if (text.startsWith('/') && options.skipCommandHandling !== true) {
         if (isLocalCopySlashCommand(text)) {
           const markdown = getLastAssistantMessageMarkdown(messages)
           if (markdown == null) {
             toast.error('没有可复制的上一条 Assistant 消息。')
-            restoreComposerDraftBucket(draftBucketKey, sentDraft)
+            restoreSentDraft(draftBucketKey)
             return
           }
           setSending(true)
           try {
             await writeClipboardText({ text: markdown })
             toast.success('已复制上一条 Assistant 消息。')
-            clearDraftBuckets([draftBucketKey, session?.id, NEW_SESSION_DRAFT_BUCKET])
+            clearSentDraft([draftBucketKey, session?.id, NEW_SESSION_DRAFT_BUCKET])
           } catch (err) {
             console.error('复制上一条 Assistant 消息失败', err)
             toast.error(err instanceof Error ? err.message : '复制失败')
-            restoreComposerDraftBucket(draftBucketKey, sentDraft)
+            restoreSentDraft(draftBucketKey)
           } finally {
             setSending(false)
           }
@@ -1919,7 +1966,7 @@ export function ComposerV2({
           if (commandSessionId == null) {
             if (selectedProvider == null) {
               toast.warning('请先选择 Provider 再执行命令。')
-              restoreComposerDraftBucket(draftBucketKey, sentDraft)
+              restoreSentDraft(draftBucketKey)
               return
             }
             commandSessionId = await onCreateSession({
@@ -1943,7 +1990,7 @@ export function ComposerV2({
             })
             if (commandSessionId == null) {
               toast.error('创建会话失败，无法执行命令。')
-              restoreComposerDraftBucket(draftBucketKey, sentDraft)
+              restoreSentDraft(draftBucketKey)
               return
             }
           }
@@ -1952,9 +1999,9 @@ export function ComposerV2({
             message: text,
             ...runtimePatchSnapshot,
             ...(requestAttachments.length > 0 ? { attachments: requestAttachments } : {}),
-            ...(sessionReferences.length > 0
+            ...(turnSessionReferences.length > 0
               ? {
-                  sessionReferences: sessionReferences.map((reference) => ({
+                  sessionReferences: turnSessionReferences.map((reference) => ({
                     sourceSessionId: reference.sourceSessionId as SessionId,
                     ...(reference.snapshotSeq !== undefined
                       ? { snapshotSeq: reference.snapshotSeq }
@@ -1970,15 +2017,8 @@ export function ComposerV2({
                 sessionId: commandSessionId,
                 content: text,
                 attachments: turnAttachments,
-                sessionReferences,
-                ...(replySnapshot?.agentId != null
-                  ? { mentionAgentId: replySnapshot.agentId }
-                  : teamConfig.enabled &&
-                      pendingMention != null &&
-                      text.includes(`@${pendingMention.name}`) &&
-                      pendingMention.agentId !== effectiveHostAgentId
-                    ? { mentionAgentId: pendingMention.agentId }
-                    : {}),
+                sessionReferences: turnSessionReferences,
+                ...(turnMentionAgentId != null ? { mentionAgentId: turnMentionAgentId } : {}),
               },
               optimisticUserSendCallbacks,
             )
@@ -1990,9 +2030,9 @@ export function ComposerV2({
               message: text,
               ...(optimisticSend != null ? { clientMessageId: optimisticSend.clientId } : {}),
               ...(requestAttachments.length > 0 ? { attachments: requestAttachments } : {}),
-              ...(sessionReferences.length > 0
+              ...(turnSessionReferences.length > 0
                 ? {
-                    sessionReferences: sessionReferences.map((reference) => ({
+                    sessionReferences: turnSessionReferences.map((reference) => ({
                       sourceSessionId: reference.sourceSessionId as SessionId,
                       ...(reference.snapshotSeq !== undefined
                         ? { snapshotSeq: reference.snapshotSeq }
@@ -2004,13 +2044,8 @@ export function ComposerV2({
               ...(teamConfig.enabled && effectiveHostAgentId != null
                 ? { teamConfig, agentId: effectiveHostAgentId }
                 : {}),
-              ...(teamConfig.enabled &&
-              pendingMention != null &&
-              text.includes(`@${pendingMention.name}`) &&
-              pendingMention.agentId !== effectiveHostAgentId
-                ? { mentionAgentId: pendingMention.agentId }
-                : {}),
-              ...(replySnapshot?.agentId != null ? { mentionAgentId: replySnapshot.agentId } : {}),
+              ...(turnMentionAgentId != null ? { mentionAgentId: turnMentionAgentId } : {}),
+              ...(options.resumePausedQueue === true ? { resumePausedQueue: true } : {}),
             })
             settleOptimisticUserSend(optimisticSend, sendRes)
             if (!sendRes.started) {
@@ -2021,7 +2056,7 @@ export function ComposerV2({
             onSent(commandSessionId, sendRes.started)
             await refreshQueueState(commandSessionId)
             await refreshAttachedReferences()
-            clearDraftBuckets([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
+            clearSentDraft([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
             return
           }
           // 命令结果已通过事件流注入到聊天中，无需 Toast
@@ -2031,17 +2066,17 @@ export function ComposerV2({
             // 队列面板立即给出可见反馈，草稿也在此刻清掉（消息已被接受）。
             setQueueVisible(true)
             onSent(commandSessionId, false)
-            clearDraftBuckets([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
+            clearSentDraft([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
           } else if (res.started === true) {
             onSent(commandSessionId, true)
-            clearDraftBuckets([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
+            clearSentDraft([draftBucketKey, commandSessionId, NEW_SESSION_DRAFT_BUCKET])
           }
           await refreshQueueState(commandSessionId)
         } catch (err) {
           optimisticSend?.fail(err instanceof Error ? err.message : String(err))
           console.error('命令执行失败', err)
           toast.error(err instanceof Error ? err.message : '命令执行失败')
-          restoreComposerDraftBucket(commandSessionId ?? draftBucketKey, sentDraft)
+          restoreSentDraft(commandSessionId ?? draftBucketKey)
         } finally {
           setSending(false)
         }
@@ -2084,15 +2119,8 @@ export function ComposerV2({
             sessionId: targetSessionId,
             content: text,
             attachments: turnAttachments,
-            sessionReferences,
-            ...(replySnapshot?.agentId != null
-              ? { mentionAgentId: replySnapshot.agentId }
-              : teamConfig.enabled &&
-                  pendingMention != null &&
-                  text.includes(`@${pendingMention.name}`) &&
-                  pendingMention.agentId !== effectiveHostAgentId
-                ? { mentionAgentId: pendingMention.agentId }
-                : {}),
+            sessionReferences: turnSessionReferences,
+            ...(turnMentionAgentId != null ? { mentionAgentId: turnMentionAgentId } : {}),
           },
           optimisticUserSendCallbacks,
         )
@@ -2104,9 +2132,9 @@ export function ComposerV2({
           message: text,
           ...(optimisticSend != null ? { clientMessageId: optimisticSend.clientId } : {}),
           ...(requestAttachments.length > 0 ? { attachments: requestAttachments } : {}),
-          ...(sessionReferences.length > 0
+          ...(turnSessionReferences.length > 0
             ? {
-                sessionReferences: sessionReferences.map((reference) => ({
+                sessionReferences: turnSessionReferences.map((reference) => ({
                   sourceSessionId: reference.sourceSessionId as SessionId,
                   ...(reference.snapshotSeq !== undefined
                     ? { snapshotSeq: reference.snapshotSeq }
@@ -2118,13 +2146,8 @@ export function ComposerV2({
           ...(teamConfig.enabled && effectiveHostAgentId != null
             ? { teamConfig, agentId: effectiveHostAgentId }
             : {}),
-          ...(teamConfig.enabled &&
-          pendingMention != null &&
-          text.includes(`@${pendingMention.name}`) &&
-          pendingMention.agentId !== effectiveHostAgentId
-            ? { mentionAgentId: pendingMention.agentId }
-            : {}),
-          ...(replySnapshot?.agentId != null ? { mentionAgentId: replySnapshot.agentId } : {}),
+          ...(turnMentionAgentId != null ? { mentionAgentId: turnMentionAgentId } : {}),
+          ...(options.resumePausedQueue === true ? { resumePausedQueue: true } : {}),
         })
         settleOptimisticUserSend(optimisticSend, res)
         if (!res.started) {
@@ -2135,12 +2158,12 @@ export function ComposerV2({
         onSent(targetSessionId, res.started)
         await refreshQueueState(targetSessionId)
         await refreshAttachedReferences()
-        clearDraftBuckets([draftBucketKey, targetSessionId, NEW_SESSION_DRAFT_BUCKET])
+        clearSentDraft([draftBucketKey, targetSessionId, NEW_SESSION_DRAFT_BUCKET])
       } catch (err) {
         optimisticSend?.fail(err instanceof Error ? err.message : String(err))
         console.error('发送失败', err)
         toast.error(err instanceof Error ? err.message : '发送消息失败')
-        restoreComposerDraftBucket(targetSessionId ?? draftBucketKey, sentDraft)
+        restoreSentDraft(targetSessionId ?? draftBucketKey)
       } finally {
         setSending(false)
       }
@@ -2649,6 +2672,7 @@ export function ComposerV2({
     if (session?.id == null) return
     const res = await cancelQueuedTurn({ sessionId: session.id, turnId: message.turnId })
     setQueuedMessages(mapQueuedTurns(res.queuedTurns))
+    if (res.queuedTurns.length === 0) setQueuePause(null)
     if (res.cancelled) onOptimisticQueueTurnCancelled?.(session.id, message.turnId)
     onOptimisticQueueStateChange?.(
       session.id,
@@ -2663,6 +2687,7 @@ export function ComposerV2({
       const queuedTurnIds = queuedMessages.map((message) => message.turnId)
       const res = await clearQueuedTurns({ sessionId: session.id })
       setQueuedMessages(mapQueuedTurns(res.queuedTurns))
+      setQueuePause(null)
       for (const turnId of queuedTurnIds) {
         onOptimisticQueueTurnCancelled?.(session.id, turnId)
       }
@@ -2713,6 +2738,7 @@ export function ComposerV2({
     setCodeReferences([])
     const res = await cancelQueuedTurn({ sessionId: session.id, turnId: message.turnId })
     setQueuedMessages(mapQueuedTurns(res.queuedTurns))
+    if (res.queuedTurns.length === 0) setQueuePause(null)
     if (res.cancelled) onOptimisticQueueTurnCancelled?.(session.id, message.turnId)
     onOptimisticQueueStateChange?.(
       session.id,
@@ -2729,16 +2755,55 @@ export function ComposerV2({
 
   const handleSendQueuedNow = async (message: QueuedMessage) => {
     if (session?.id == null) return
-    const res = await sendQueuedTurnNow({ sessionId: session.id, turnId: message.turnId })
+    const runtime = getCurrentRuntimePatch()
+    const res = await sendQueuedTurnNow({
+      sessionId: session.id,
+      turnId: message.turnId,
+      runtimePatch: {
+        ...(runtime.providerProfileId !== undefined
+          ? { providerProfileId: runtime.providerProfileId }
+          : {}),
+        ...(runtime.modelId !== undefined ? { modelId: runtime.modelId } : {}),
+        ...(runtime.cliSparkOverride !== undefined
+          ? { cliSparkOverride: runtime.cliSparkOverride }
+          : {}),
+      },
+    })
     setQueuedMessages(mapQueuedTurns(res.queuedTurns))
     onOptimisticQueueStateChange?.(
       session.id,
       res.queuedTurns.map((turn) => turn.turnId),
     )
     if (res.started) {
+      setQueuePause(null)
       onSent(session.id, true)
     }
   }
+
+  const queueErrorRecovery = useQueueErrorRecovery({
+    sessionId: session?.id,
+    pause: queuePause,
+    messages,
+    getCurrentRuntimePatch,
+    dispatchRetry: async ({ text, attachments: retryAttachments, sessionReferences }) => {
+      await dispatchMessage(
+        text,
+        retryAttachments,
+        null,
+        {
+          value: text,
+          attachments: retryAttachments,
+          sessionReferences,
+          manualExpanded: false,
+        },
+        { sessionReferences, preserveDraft: true, resumePausedQueue: true },
+      )
+    },
+    refreshQueueState,
+    onPauseCleared: () => setQueuePause(null),
+    showWarning: (message) => toast.warning(message),
+    showError: (message) => toast.error(message),
+  })
 
   const handleCancelActiveSession = async () => {
     if (session?.id == null) return
@@ -3079,17 +3144,12 @@ export function ComposerV2({
       setValue(next)
       // Reset history browsing when user types manually
       historyIndexRef.current = -1
-      // 团队模式：`@` 留给 Agent mention；斜杠命令则按光标前最近的片段触发。
+      // 命令弹窗仅由斜杠触发；团队模式下的 `@` 由下方 Agent mention 独立处理。
       const caret = textareaRef.current?.getSelection().start ?? next.length
       const slashContext = getSlashCommandContext(next, caret)
-      const hasAtLead = next.startsWith('@')
       if (slashContext != null) {
         slashContextRef.current = slashContext
         setSlashFilter(slashContext.query)
-        void openSlashPopup()
-      } else if (hasAtLead && !teamConfig.enabled) {
-        slashContextRef.current = null
-        setSlashFilter(next.slice(1))
         void openSlashPopup()
       } else {
         slashContextRef.current = null
@@ -3142,7 +3202,7 @@ export function ComposerV2({
     ],
   )
 
-  // ── 语音输入（离线 ASR：sherpa-onnx + Paraformer 流式）──
+  // ── 语音输入（混合 ASR：流式实时预览 + 停止后离线整段精修替换）──
   const voiceIntegrity = useVoiceIntegrity()
   const requestVoicePackInstall = useVoiceDownloadConfirmation(voiceIntegrity.install)
   const voice = useVoiceInput({
@@ -3153,6 +3213,22 @@ export function ComposerV2({
         return prev + (needSpace ? ' ' : '') + text
       })
     },
+    onRefined: ({ previous, text }) => {
+      setValue((prev) => {
+        if (previous && prev.endsWith(previous)) {
+          // 流式文本仍是草稿后缀：安全地整体替换为精修结果（拼接空格保留在 head 末尾）
+          return prev.slice(0, prev.length - previous.length) + text
+        }
+        if (!previous) {
+          // 流式全程无产出但精修有结果：按追加规则写入
+          if (!text) return prev
+          const needSpace = prev.length > 0 && !/\s$/.test(prev)
+          return prev + (needSpace ? ' ' : '') + text
+        }
+        // 后缀已被用户编辑过：保守保留现状，不用精修文本覆盖用户输入
+        return prev
+      })
+    },
     onError: (message) => toast.error(message),
   })
   const handleVoiceToggle = useCallback(async () => {
@@ -3160,7 +3236,7 @@ export function ComposerV2({
       await voice.stop()
       return
     }
-    if (voice.status === 'stopping') return
+    if (voice.status === 'stopping' || voice.status === 'refining') return
     const st = voiceIntegrity.status
     if (!st.supported) {
       toast.warning(st.unsupportedReason ?? '当前平台不支持语音输入')
@@ -3182,6 +3258,7 @@ export function ComposerV2({
     disabled:
       sending ||
       voice.status === 'stopping' ||
+      voice.status === 'refining' ||
       voiceIntegrity.checking ||
       voiceIntegrity.status.downloading ||
       !voiceIntegrity.status.supported,
@@ -3791,6 +3868,25 @@ export function ComposerV2({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isNewSessionComposer, teamConfig.enabled, teamConfig.hostAgentId, teamConfig.teamId])
 
+  useLastUserMessageRevision({
+    request: revisionRequest,
+    sessionId: session?.id ?? null,
+    providerAvailable: selectedProvider != null,
+    submitGate: submitGateRef.current,
+    setSending,
+    dispatchMessage,
+    ...(onRevisionConsumed != null ? { onConsumed: onRevisionConsumed } : {}),
+    ...(onRevisionApplied != null ? { onApplied: onRevisionApplied } : {}),
+    restoreDraft: (draft) => {
+      setValue(draft.value)
+      setAttachments(draft.attachments)
+      setSessionReferences(draft.sessionReferences)
+      setCodeReferences([])
+      textareaRef.current?.focus()
+    },
+    toast,
+  })
+
   /**
    * React to external composer prefill requests:
    * - historical "resend" writes text, attachments, and session references back into the draft;
@@ -3954,7 +4050,12 @@ export function ComposerV2({
             messages={queuedMessages}
             clearing={clearingQueue}
             reordering={reorderingQueue}
+            paused={queuePause}
+            recovering={queueErrorRecovery.recovering}
+            canRetry={queueErrorRecovery.canRetry}
             onClear={() => void handleClearQueuedMessages()}
+            onRetry={() => void queueErrorRecovery.retry()}
+            onResume={() => void queueErrorRecovery.resume()}
             onEdit={(message) => void handleEditQueuedMessage(message)}
             onSendNow={(message) => void handleSendQueuedNow(message)}
             onRemove={(message) => void handleRemoveQueuedMessage(message)}
@@ -5944,6 +6045,7 @@ function ModelIcon() {
 const ADAPTER_OPTIONS: Array<{ value: AgentAdapter; label: string }> = [
   { value: 'claude-sdk', label: 'Claude SDK' },
   { value: 'codex', label: 'Codex' },
+  { value: 'spark', label: 'Spark' },
 ]
 
 const DEFAULT_AGENT_ADAPTER: AgentAdapter = 'claude-sdk'
@@ -5952,6 +6054,7 @@ const ADAPTER_LABELS: Record<AgentAdapter, string> = {
   'claude-sdk': 'Claude SDK',
   claude: 'Claude API',
   codex: 'Codex',
+  spark: 'Spark',
 }
 
 const CLAUDE_PERMISSION_MODE_OPTIONS: Array<ComposerMenuOption & { value: PermissionModeChoice }> =
@@ -5998,6 +6101,19 @@ const CODEX_PERMISSION_MODE_OPTIONS: Array<ComposerMenuOption & { value: Permiss
         <Icons.Hand size={18} />
       ) : option.value === 'codex-auto-review' ? (
         <Icons.Shield size={18} />
+      ) : (
+        <Icons.AlertTriangle size={18} />
+      ),
+  }))
+
+const SPARK_PERMISSION_MODE_OPTIONS: Array<ComposerMenuOption & { value: PermissionModeChoice }> =
+  SHARED_SPARK_PERMISSION_MODE_OPTIONS.map((option) => ({
+    ...option,
+    icon:
+      option.value === 'spark-default' ? (
+        <Icons.Hand size={18} />
+      ) : option.value === 'spark-auto' ? (
+        <Icons.Wand size={18} />
       ) : (
         <Icons.AlertTriangle size={18} />
       ),
@@ -6182,7 +6298,9 @@ function codeRefKey(ref: CodeReference): string {
 function getPermissionModeOptions(
   adapter: AgentAdapter,
 ): Array<ComposerMenuOption & { value: PermissionModeChoice }> {
-  return adapter === 'codex' ? CODEX_PERMISSION_MODE_OPTIONS : CLAUDE_PERMISSION_MODE_OPTIONS
+  if (adapter === 'codex') return CODEX_PERMISSION_MODE_OPTIONS
+  if (adapter === 'spark') return SPARK_PERMISSION_MODE_OPTIONS
+  return CLAUDE_PERMISSION_MODE_OPTIONS
 }
 
 function getValidPermissionMode(

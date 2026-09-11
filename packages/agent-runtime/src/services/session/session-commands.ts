@@ -44,8 +44,8 @@ import {
   checkCommandAvailable,
   checkOpenAISdkAvailable,
   checkWorkspaceShellAvailable,
-  deriveSubAppCreateSessionTitle,
   getProviderModelIds,
+  getProviderUseSparkExecutor,
   listSessionCheckpointsFromEvents,
   listSkillSummaries,
   normalizeCustomCommandConfig,
@@ -53,8 +53,14 @@ import {
   shouldDeriveSessionTitle,
   type SessionRuntimePatch,
 } from './session-pure-utils.js'
+import {
+  initializeCommandSessionTitle,
+  resolveCommandTitleSource,
+} from './session-command-title-refinement.js'
 import { getAgentAdapterFromSession, getPermissionModeFromSession } from './engine-kinds.js'
 import { createCodexNativeThreadClearPatch } from './codex-native-thread-binding.js'
+import { createSparkLedgerClearPatch } from './spark-ledger-binding.js'
+import { ensureSessionWorkspaceRootPathSync } from '../session-workspace-root.js'
 
 const log = createLogger('session.commands')
 
@@ -203,7 +209,7 @@ export class SessionCommandController {
       if (workspaceId) {
         const wsRepo = new WorkspaceRepository(this.db)
         const ws = wsRepo.get(workspaceId)
-        workspacePath = ws?.root_path ?? null
+        workspacePath = ws == null ? null : ensureSessionWorkspaceRootPathSync(ws, params.sessionId)
       }
     } catch {
       // ignore parse errors
@@ -255,7 +261,7 @@ export class SessionCommandController {
       if (workspaceId) {
         const wsRepo = new WorkspaceRepository(this.db)
         const ws = wsRepo.get(workspaceId)
-        workspacePath = ws?.root_path ?? null
+        workspacePath = ws == null ? null : ensureSessionWorkspaceRootPathSync(ws, params.sessionId)
       }
     } catch {
       /* ignore */
@@ -275,25 +281,34 @@ export class SessionCommandController {
     // Preserve slash-prefixed routes/paths as ordinary user input when they do
     // not match a registered command. The renderer will forward the original
     // message unchanged, so the Agent can decide what the text represents.
-    if (this.registry.get(parsed.name) == null) {
+    const commandDefinition = this.registry.get(parsed.name)
+    if (commandDefinition == null) {
       return { isCommand: true, forwardToAgent: true }
     }
     const result = await this.registry.execute(parsed, ctx, deps)
 
     if (result.forwardToAgent) return { isCommand: true, forwardToAgent: true }
-    // 创建命令会先写入“命令结果”事件，再启动 follow-up Agent turn；
-    // 因此后续 turn 已不再满足 existingEventCount === 0，常规首轮标题派生会被跳过。
-    // 直接使用用户在命令中提供的应用需求命名，避免新会话永久停留在“新会话”。
+    const followUpPrompt = result.followUpPrompt?.trim()
+    const hasFollowUpPrompt = followUpPrompt != null && followUpPrompt.length > 0
+    // 命令结果事件会先于隐藏 follow-up Agent turn 落库，常规首轮标题逻辑看不到
+    // “事件数为 0 的可见首轮”。在命令边界补齐即时派生 + LLM 异步精炼。
     if (
-      parsed.name === 'spark-app-create' &&
       result.success &&
+      hasFollowUpPrompt &&
       hadNoEventsBeforeCommand &&
       session != null &&
       shouldDeriveSessionTitle(session.title)
     ) {
-      const title = deriveSubAppCreateSessionTitle(parsed.args.join(' '))
-      sessionRepo.updateTitle(params.sessionId, title)
-      this.host.notifySessionRenamed(params.sessionId, title)
+      initializeCommandSessionTitle({
+        db: this.db,
+        sessionId: params.sessionId,
+        userMessage: resolveCommandTitleSource({
+          commandName: parsed.name,
+          args: parsed.args,
+          description: commandDefinition.description,
+        }),
+        onSessionRenamed: (sessionId, title) => this.host.notifySessionRenamed(sessionId, title),
+      })
     }
     const sessionReferences = params.sessionReferences?.slice(0, 10) ?? []
     if (sessionReferences.length > 0) {
@@ -310,8 +325,6 @@ export class SessionCommandController {
     // Inject result as events into the chat stream. Internal commands that end here
     // emit a terminal agent_status so the UI can clear loading, but commands that
     // enqueue a follow-up Agent turn must not mark the overall user request complete.
-    const followUpPrompt = result.followUpPrompt?.trim()
-    const hasFollowUpPrompt = followUpPrompt != null && followUpPrompt.length > 0
     // 若命令 handler 已自行启动了一个 agent loop（典型：/goal 触发 goal iteration），
     // 这里就不能再注入 'completed' 终态——那会让 UI 把命令结果 bubble 标完，但 loop
     // 仍在跑，渲染器随之渲出一个空的「执行任务中」占位气泡（双气泡 bug）。
@@ -455,7 +468,7 @@ export class SessionCommandController {
       const workspaceId = workspaceIds[0]
       if (workspaceId) {
         const ws = new WorkspaceRepository(this.db).get(workspaceId)
-        return ws?.root_path ?? null
+        return ws == null ? null : ensureSessionWorkspaceRootPathSync(ws, sessionId)
       }
     } catch {
       // ignore parse errors
@@ -488,6 +501,7 @@ export class SessionCommandController {
       getSession: (id) => {
         const s = sessionRepo.get(id)
         if (s == null) return null
+        const providerRow = providerRepo.get(s.provider_profile_id ?? '')
         return {
           title: s.title,
           status: s.status,
@@ -496,14 +510,16 @@ export class SessionCommandController {
           agentAdapter: getAgentAdapterFromSession(
             s.agent_adapter,
             s.chat_mode,
-            providerRepo.get(s.provider_profile_id ?? '')?.provider_type ?? null,
+            providerRow?.provider_type ?? null,
+            getProviderUseSparkExecutor(providerRow?.config_json),
           ),
           permissionMode: getPermissionModeFromSession(
             s.permission_mode,
             getAgentAdapterFromSession(
               s.agent_adapter,
               s.chat_mode,
-              providerRepo.get(s.provider_profile_id ?? '')?.provider_type ?? null,
+              providerRow?.provider_type ?? null,
+              getProviderUseSparkExecutor(providerRow?.config_json),
             ),
           ),
           agentId: s.agent_id ?? null,
@@ -518,6 +534,8 @@ export class SessionCommandController {
           id,
           createCodexNativeThreadClearPatch(sessionRepo.getMetadata(id)),
         )
+        // spark ledger 绑定同源清理：下一轮 spark turn 创建全新引擎会话。
+        sessionRepo.patchMetadata(id, createSparkLedgerClearPatch(sessionRepo.getMetadata(id)))
         eventRepo.deleteBySession(id)
         this.host.clearSessionEventSequencer(id)
         this.host.clearUsageLedgerTurnState(id)
@@ -572,6 +590,7 @@ export class SessionCommandController {
           s.agent_adapter,
           s.chat_mode,
           provider?.provider_type ?? null,
+          getProviderUseSparkExecutor(provider?.config_json),
         )
         return {
           providerProfileId: s.provider_profile_id ?? null,

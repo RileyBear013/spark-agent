@@ -8,6 +8,8 @@ import { z } from 'zod'
 import type { LlmService } from '../seams.js'
 import type { FetchLike } from '../llm/http/client.js'
 import { ModelRegistry, type ModelProtocol } from '../llm/registry.js'
+import type { ReasoningEffort } from '../llm/types.js'
+import type { PermissionMode } from '../permission/types.js'
 import {
   discoverSparkWorkHost,
   resolveSparkWorkRoute,
@@ -17,6 +19,8 @@ import {
 } from './sparkwork-host.js'
 
 const ProtocolSchema = z.enum(['anthropic-messages', 'openai-responses'])
+const PermissionModeSchema = z.enum(['manual', 'auto', 'bypass'])
+const ReasoningEffortSchema = z.enum(['off', 'low', 'medium', 'high', 'max'])
 const CapabilitiesSchema = z
   .object({
     tools: z.boolean().optional(),
@@ -41,17 +45,31 @@ const ModelSchema = z
   .object({
     provider: z.string().min(1),
     model: z.string().min(1),
+    /** Model-level limits for standalone CLI configurations. */
+    context_window: z.number().int().positive().optional(),
+    max_tokens: z.number().int().positive().optional(),
     capabilities: CapabilitiesSchema.optional(),
   })
   .strict()
 const AgentSchema = z
   .object({
     model: z.string().min(1).optional(),
+    permission_mode: PermissionModeSchema.optional(),
+    reasoning_effort: ReasoningEffortSchema.optional(),
     failover: z.array(z.string().min(1)).default([]),
     max_retries: z.number().int().min(0).max(10).default(2),
+    retry_initial_delay_ms: z.number().int().min(0).max(60_000).default(500),
+    retry_max_delay_ms: z.number().int().min(0).max(300_000).default(60_000),
+    retry_jitter_ratio: z.number().min(0).max(1).default(0.2),
   })
   .strict()
-  .default({ failover: [], max_retries: 2 })
+  .default({
+    failover: [],
+    max_retries: 2,
+    retry_initial_delay_ms: 500,
+    retry_max_delay_ms: 60_000,
+    retry_jitter_ratio: 0.2,
+  })
 const ModelConfigSchema = z
   .object({
     agent: AgentSchema,
@@ -77,6 +95,15 @@ export interface ConfiguredModelRuntime {
   readonly modelId: string
   readonly route: readonly string[]
   readonly configSnapshot: Readonly<Record<string, unknown>>
+}
+
+export interface CliPreferences {
+  readonly permissionMode: PermissionMode
+  readonly reasoningEffort: ReasoningEffort
+}
+
+export interface PersistCliPreferencesInput extends CliPreferences {
+  readonly sparkHome: string
 }
 
 export interface ConfiguredModelCatalogEntry {
@@ -118,7 +145,10 @@ export async function loadConfiguredModel(
     projectExists,
   } = await loadModelContext(options)
   const localSelected = options.model ?? environment.SPARK_MODEL ?? selectedModel(projectLayer)
-  const modelId = localSelected ?? host.catalog?.defaultRoute ?? config.agent.model
+  // A persisted CLI selection ([agent].model, written by the TUI picker) is an
+  // explicit choice and stays sticky above the SparkWork default route; the
+  // host default only applies while the CLI has picked nothing itself.
+  const modelId = localSelected ?? config.agent.model ?? host.catalog?.defaultRoute
   if (!modelId) {
     throw noModelSelectedError({ host, globalPath, projectPath, globalExists, projectExists })
   }
@@ -138,6 +168,15 @@ export async function loadConfiguredModel(
     failover,
     options.fetch,
   )
+}
+
+/** Loads durable CLI defaults without requiring a model to be configured. */
+export async function loadCliPreferences(options: LoadModelConfigOptions): Promise<CliPreferences> {
+  const { config } = await loadModelContext(options)
+  return {
+    permissionMode: config.agent.permission_mode ?? 'manual',
+    reasoningEffort: config.agent.reasoning_effort ?? 'high',
+  }
 }
 
 /**
@@ -171,7 +210,14 @@ function buildConfiguredRuntime(
     registerModelRoute(registry, id, config, environment, host.catalog, fetcher)
   }
   return {
-    service: registry.createRoute(route, { retry: { maxRetries: config.agent.max_retries } }),
+    service: registry.createRoute(route, {
+      retry: {
+        maxRetries: config.agent.max_retries,
+        initialDelayMs: config.agent.retry_initial_delay_ms,
+        maxDelayMs: config.agent.retry_max_delay_ms,
+        jitterRatio: config.agent.retry_jitter_ratio,
+      },
+    }),
     modelId,
     route,
     configSnapshot: {
@@ -196,8 +242,8 @@ export async function inspectConfiguredModels(
     options.model ??
     environment.SPARK_MODEL ??
     selectedModel(projectLayer) ??
-    host.catalog?.defaultRoute ??
-    config.agent.model
+    config.agent.model ??
+    host.catalog?.defaultRoute
   const selectedHostRoute =
     selected && host.catalog && !config.models[selected]
       ? resolveSparkWorkRoute(host.catalog, selected)
@@ -299,37 +345,89 @@ export async function configureLocalProvider(
     }
   }
 
-  const configPath = resolve(input.sparkHome, 'config.toml')
+  const configPath = await writeGlobalConfig(input.sparkHome, (layer) => {
+    const providers = asRecord(layer.providers) ?? {}
+    const models = asRecord(layer.models) ?? {}
+    layer.providers = {
+      ...providers,
+      [alias]: {
+        protocol: input.protocol,
+        ...(baseUrl === '' ? {} : { base_url: baseUrl }),
+        api_key_env: apiKeyEnv,
+      },
+    }
+    layer.models = {
+      ...models,
+      [alias]: { provider: alias, model: modelId },
+    }
+  })
+  return { configPath, modelEntryId: alias }
+}
+
+export interface PersistSelectedModelInput {
+  readonly sparkHome: string
+  readonly model: string
+}
+
+/**
+ * Remembers the interactive model selection as [agent].model in the global
+ * layer (~/.spark/config.toml) so the next launch reuses it instead of
+ * reopening the picker (docs 016 §4). Only the model id is persisted —
+ * credentials stay in environment variables — and the merge is validated
+ * against the config schema before an atomic rename, so a hand-edited config
+ * is never silently corrupted.
+ */
+export async function persistSelectedModel(input: PersistSelectedModelInput): Promise<string> {
+  const model = input.model.trim()
+  if (!model || model.length > 2_000) {
+    throw new ModelConfigError('A non-empty model id (at most 2000 chars) is required')
+  }
+  return writeGlobalConfig(input.sparkHome, (layer) => {
+    const agent = asRecord(layer.agent) ?? {}
+    layer.agent = { ...agent, model }
+  })
+}
+
+/** Persists the user's TUI choices as global CLI defaults. */
+export async function persistCliPreferences(input: PersistCliPreferencesInput): Promise<string> {
+  return writeGlobalConfig(input.sparkHome, (layer) => {
+    const agent = asRecord(layer.agent) ?? {}
+    layer.agent = {
+      ...agent,
+      permission_mode: input.permissionMode,
+      reasoning_effort: input.reasoningEffort,
+    }
+  })
+}
+
+/**
+ * Read-merge-validate-atomically-write helper shared by every global config
+ * mutation: the temp file lives in the same directory as the target so the
+ * rename never crosses filesystems, and the merged result must still satisfy
+ * the config schema or nothing is written.
+ */
+async function writeGlobalConfig(
+  sparkHome: string,
+  mutate: (layer: Record<string, unknown>) => void,
+): Promise<string> {
+  const configPath = resolve(sparkHome, 'config.toml')
   const existing = await readLayer(configPath)
-  const providers = asRecord(existing.layer.providers) ?? {}
-  const models = asRecord(existing.layer.models) ?? {}
   const mutated: Record<string, unknown> = structuredClone(existing.layer)
-  mutated.providers = {
-    ...providers,
-    [alias]: {
-      protocol: input.protocol,
-      ...(baseUrl === '' ? {} : { base_url: baseUrl }),
-      api_key_env: apiKeyEnv,
-    },
-  }
-  mutated.models = {
-    ...models,
-    [alias]: { provider: alias, model: modelId },
-  }
+  mutate(mutated)
   try {
     ModelConfigSchema.parse(mutated)
   } catch (error) {
     throw new ModelConfigError(
-      `Merging provider "${alias}" would produce an invalid config: ${formatZodError(error)}`,
+      `Updating ${configPath} would produce an invalid config: ${formatZodError(error)}`,
       { cause: error },
     )
   }
 
-  await mkdir(input.sparkHome, { recursive: true, mode: 0o700 })
-  const temporary = resolve(input.sparkHome, `.config.toml.${process.pid}.tmp`)
+  await mkdir(sparkHome, { recursive: true, mode: 0o700 })
+  const temporary = resolve(sparkHome, `.config.toml.${process.pid}.tmp`)
   await writeFile(temporary, `${stringify(mutated)}\n`, { encoding: 'utf8', mode: 0o600 })
   await rename(temporary, configPath)
-  return { configPath, modelEntryId: alias }
+  return configPath
 }
 
 interface LoadedModelContext {
@@ -516,6 +614,8 @@ function registerConfiguredModel(
           },
         }
       : {}),
+    ...(model.context_window === undefined ? {} : { contextWindowTokens: model.context_window }),
+    ...(model.max_tokens === undefined ? {} : { maxOutputTokens: model.max_tokens }),
   })
 }
 
@@ -552,6 +652,8 @@ function registerSparkWorkModel(
     model: route.model,
     baseUrl: sparkWorkProxyBaseUrl(host, route),
     apiKey: host.token,
+    ...(route.contextWindow === undefined ? {} : { contextWindowTokens: route.contextWindow }),
+    ...(route.maxOutputTokens === undefined ? {} : { maxOutputTokens: route.maxOutputTokens }),
     ...(fetcher ? { fetch: fetcher } : {}),
   })
 }

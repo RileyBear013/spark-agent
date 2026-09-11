@@ -2,24 +2,42 @@ import type { AgentEvent } from '../events/schema.js'
 import { stableStringify } from '../kernel/stable-json.js'
 import type { TerminalCapabilities } from './theme.js'
 import { glyphs } from './theme.js'
+import { presentTool, presentToolResult, singleLine } from './tool-presentation.js'
 
 export type RowTone = 'normal' | 'dim' | 'accent' | 'ok' | 'warn' | 'error'
 
 /** Visual block kind; the renderer applies per-kind chrome (background, gaps). */
-export type RowKind = 'user' | 'thinking' | 'plain'
+export type RowKind = 'user' | 'thinking' | 'plain' | 'assistant'
+
+/** Structured view of a settled tool line, colored per-part by the renderer. */
+export interface ToolLineParts {
+  readonly processStatus?: string
+  readonly processId?: string
+  readonly tool: string
+  readonly title: string
+  readonly detail?: string
+  readonly ok: boolean
+  readonly durationMs: string
+  readonly resultLines: readonly string[]
+  readonly sessionId?: string
+  readonly isTask: boolean
+}
 
 export interface TranscriptRow {
   readonly key: string
   readonly text: string
   readonly tone: RowTone
   readonly kind?: RowKind
+  readonly toolLine?: ToolLineParts
 }
 
 export interface ActiveToolProjection {
   readonly callId: string
   readonly tool: string
-  readonly args: unknown
-  readonly status: 'pending' | 'running'
+  readonly title: string
+  readonly detail?: string
+  readonly isTask: boolean
+  readonly status: 'pending' | 'approval' | 'running'
 }
 
 export interface TranscriptProjection {
@@ -40,6 +58,11 @@ export function projectTranscript(
   const settled: TranscriptRow[] = []
   const calls = new Map<string, Extract<AgentEvent, { type: 'tool.call' }>>()
   const intents = new Set<string>()
+  const waitingApproval = new Set<string>()
+  const stepTurns = new Map<string, string>()
+  const callTurns = new Map<string, string>()
+  const terminalTurns = new Set<string>()
+  let currentTurn: string | undefined
   const results = new Set<string>()
   const permissions = new Map<string, Extract<AgentEvent, { type: 'permission.requested' }>>()
   const symbols = glyphs(capabilities)
@@ -56,6 +79,7 @@ export function projectTranscript(
     const event = candidate
     switch (event.type) {
       case 'turn.started':
+        currentTurn = event.turnId
         settled.push({
           key: `event-${event.seq}`,
           text: `${symbols.bullet} ${event.input.text}`,
@@ -67,17 +91,30 @@ export function projectTranscript(
         if (event.message.thinking) {
           settled.push({
             key: `thinking-${event.seq}`,
-            text: wrapThinking(event.message.thinking, Math.max(20, capabilities.width - 4), symbols.bar),
+            text: wrapThinking(
+              event.message.thinking,
+              Math.max(20, capabilities.width - 4),
+              symbols.bar,
+            ),
             tone: 'dim',
             kind: 'thinking',
           })
         }
         if (event.message.text) {
-          settled.push({ key: `event-${event.seq}`, text: event.message.text, tone: 'normal' })
+          settled.push({
+            key: `event-${event.seq}`,
+            text: event.message.text,
+            tone: 'normal',
+            kind: 'assistant',
+          })
         }
         break
       case 'tool.call':
         calls.set(event.callId, event)
+        {
+          const turn = stepTurns.get(event.stepId) ?? currentTurn
+          if (turn !== undefined) callTurns.set(event.callId, turn)
+        }
         break
       case 'tool.intent':
         intents.add(event.callId)
@@ -86,18 +123,40 @@ export function projectTranscript(
         results.add(event.callId)
         const call = calls.get(event.callId)
         const mark = event.ok ? symbols.success : symbols.failure
+        const presentation = presentTool(call?.tool ?? 'unknown', call?.args)
+        const result = presentToolResult(
+          call?.tool ?? 'unknown',
+          event.content,
+          event.durationMs,
+          capabilities.width,
+          event.childSessionId,
+        )
         settled.push({
           key: `tool-${event.callId}`,
-          text: `${symbols.tool} ${call?.tool ?? 'unknown'}${call ? `(${preview(call.args)})` : ''} ${mark} ${event.durationMs}ms`,
+          text: `${symbols.tool} ${presentation.title} ${mark} ${event.durationMs}ms`,
           tone: event.ok ? 'dim' : 'error',
+          toolLine: {
+            tool: call?.tool ?? 'unknown',
+            title: presentation.title,
+            ...(presentation.detail === undefined ? {} : { detail: presentation.detail }),
+            ok: event.ok,
+            durationMs: result.duration,
+            resultLines: result.lines,
+            ...(result.processStatus === undefined ? {} : { processStatus: result.processStatus }),
+            ...(result.processId === undefined ? {} : { processId: result.processId }),
+            ...(result.sessionId === undefined ? {} : { sessionId: result.sessionId }),
+            isTask: call?.tool === 'task',
+          },
         })
         break
       }
       case 'permission.requested':
         permissions.set(event.requestId, event)
+        waitingApproval.add(event.callId)
         break
       case 'permission.decided': {
         const request = permissions.get(event.requestId)
+        if (request) waitingApproval.delete(request.callId)
         settled.push({
           key: `permission-${event.requestId}`,
           text: `● ${event.decision === 'allow' ? 'allowed' : 'denied'} ${request?.risk.tool ?? 'tool'}${event.grantScope ? ` scope=${event.grantScope}` : ''}`,
@@ -108,23 +167,30 @@ export function projectTranscript(
       case 'permission.evaluated':
         break
       case 'turn.completed':
-        settled.push({
-          key: `event-${event.seq}`,
-          text: `· 完成 · ${event.stats.steps} steps · ${event.stats.usage.inputTokens + event.stats.usage.outputTokens} tok`,
-          tone: 'dim',
-        })
+        terminalTurns.add(event.turnId)
+        if (event.reason === 'budget') {
+          settled.push({
+            key: `event-${event.seq}`,
+            text: `${symbols.failure} 执行因预算限制结束 · ${event.stats.steps} steps · ${event.stats.toolCalls} tool calls`,
+            tone: 'warn',
+          })
+        }
+        // A normal final turn settles silently: the transcript already shows
+        // the answer and tool results; a trailing stats line is noise.
         break
       case 'turn.cancelled':
+        terminalTurns.add(event.turnId)
         settled.push({
           key: `event-${event.seq}`,
-          text: `${symbols.failure} 已中断 · 已完成 ${event.partial.length} step · 已产出内容保留`,
+          text: `${symbols.failure} 已中断 · 已产出内容保留`,
           tone: 'warn',
         })
         break
       case 'turn.failed':
+        terminalTurns.add(event.turnId)
         settled.push({
           key: `event-${event.seq}`,
-          text: `${symbols.failure} ${event.error.code}: ${event.error.message}${event.recoveryHint ? ` · ${event.recoveryHint}` : ''}`,
+          text: presentTurnFailure(symbols.failure, event.error, event.recoveryHint),
           tone: 'error',
         })
         break
@@ -150,28 +216,36 @@ export function projectTranscript(
           tone: 'dim',
         })
         break
+      case 'step.started':
+        stepTurns.set(event.stepId, event.turnId)
+        break
       case 'session.started':
       case 'turn.queued':
-      case 'step.started':
       case 'log.rewind':
         break
     }
   }
 
   const activeTools = [...calls.values()]
-    .filter((call) => !results.has(call.callId))
-    .map((call) => ({
-      callId: call.callId,
-      tool: call.tool,
-      args: call.args,
-      status: intents.has(call.callId) ? ('running' as const) : ('pending' as const),
-    }))
+    .filter(
+      (call) => !results.has(call.callId) && !terminalTurns.has(callTurns.get(call.callId) ?? ''),
+    )
+    .map((call) => {
+      const presentation = presentTool(call.tool, call.args)
+      return {
+        callId: call.callId,
+        tool: call.tool,
+        title: presentation.title,
+        ...(presentation.detail === undefined ? {} : { detail: presentation.detail }),
+        isTask: call.tool === 'task',
+        status: waitingApproval.has(call.callId)
+          ? ('approval' as const)
+          : intents.has(call.callId)
+            ? ('running' as const)
+            : ('pending' as const),
+      }
+    })
   return { settled, activeTools }
-}
-
-export function singleLine(value: string, maximum: number): string {
-  const line = value.replaceAll(/\s+/g, ' ').trim()
-  return line.length <= maximum ? line : `${line.slice(0, Math.max(0, maximum - 1))}…`
 }
 
 /** Longest thinking transcript we are willing to settle into the log. */
@@ -207,6 +281,45 @@ function wrapSegment(text: string, width: number): string[] {
     pieces.push(characters.slice(offset, offset + columns).join(''))
   }
   return pieces
+}
+
+function presentTurnFailure(
+  failureSymbol: string,
+  error: { readonly code: string; readonly message: string; readonly detail?: unknown },
+  recoveryHint: string | undefined,
+): string {
+  const summary = `${failureSymbol} ${singleLine(error.code, 96)}: ${singleLine(error.message, 320)}`
+  const detail = asRecord(error.detail)
+  const cause = asRecord(detail?.cause)
+  const causeCode = stringField(cause?.code)
+  const causeMessage = stringField(cause?.message)
+  const causeDetail = asRecord(cause?.detail)
+  const requestId = stringField(causeDetail?.requestId)
+  const responseModel = stringField(causeDetail?.responseModel)
+  const rootCause =
+    causeCode || causeMessage
+      ? ` · 根因 ${singleLine(causeCode ?? 'stream_error', 96)}: ${singleLine(causeMessage ?? 'unknown error', 240)}`
+      : ''
+  const request = requestId ? ` · request-id ${singleLine(requestId, 128)}` : ''
+  const model = responseModel ? ` · 实际模型 ${singleLine(responseModel, 128)}` : ''
+  const hint = causeCode?.endsWith('.invalid_tool_json')
+    ? ' · 工具参数生成连续失败；可降低推理强度或换用工具调用更稳定的模型'
+    : error.code === 'llm.partial_stream_failed'
+      ? ' · 可直接重试；若重复出现，请检查模型网关与网络'
+      : recoveryHint
+        ? ` · ${singleLine(recoveryHint, 240)}`
+        : ''
+  return `${summary}${rootCause}${model}${request}${hint}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
 }
 
 function preview(value: unknown): string {

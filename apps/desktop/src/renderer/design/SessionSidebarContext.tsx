@@ -22,6 +22,7 @@ import type {
   ManagedAgent,
   SessionAgentAdapter,
   SessionChatMode,
+  SessionExtractTitleFailureCode,
   SessionPermissionMode,
   SessionReasoningEffort,
   TurnId,
@@ -50,6 +51,7 @@ import {
   type SessionScheduleSummaries,
 } from './session-schedule-summary'
 import { readAgentRuntimePrefs } from './views/chat/composerAgentRuntimePrefs'
+import { NO_PROJECT_WORKSPACE_NAME } from './session-workspace-root'
 
 // 供 SidebarSessionList 等消费方在本地排序时复用（与后端 listSessions 排序对齐）。
 export { sortSessionsByPinned }
@@ -78,7 +80,7 @@ export type SessionGroupActionCopy = {
 // 会让 buildProjectGroups 过滤失败 → noProject workspace 没被剔除 → sidebar 直接用
 // workspace.name 显示成 '不使用项目'，让 i18n 中的 'sidebar.noProjectChats' = '临时会话'
 // 完全失效。
-export const NO_PROJECT_WORKSPACE_NAME = '不使用项目'
+export { NO_PROJECT_WORKSPACE_NAME } from './session-workspace-root'
 const LAST_SESSION_KEY = 'spark-agent:last-active-session'
 
 function getNoProjectRootPath(tempDir: string): string {
@@ -87,6 +89,16 @@ function getNoProjectRootPath(tempDir: string): string {
 }
 
 const DEFAULT_AGENT_ADAPTER: SessionAgentAdapter = 'claude-sdk'
+
+/** 「提取标题」失败码 → i18n key 映射（码由主进程 session:extract-title 返回）。 */
+const EXTRACT_TITLE_FAILURE_MESSAGE: Record<SessionExtractTitleFailureCode, string> = {
+  session_not_found: 'session.extractTitleFailed.sessionNotFound',
+  provider_missing: 'session.extractTitleFailed.providerMissing',
+  provider_no_api_key: 'session.extractTitleFailed.providerNoApiKey',
+  model_missing: 'session.extractTitleFailed.modelMissing',
+  dialogue_empty: 'session.extractTitleFailed.dialogueEmpty',
+  title_empty: 'session.extractTitleFailed.titleEmpty',
+}
 
 function getValidPermissionMode(
   mode: SessionPermissionMode | undefined,
@@ -553,6 +565,7 @@ export function SessionSidebarProvider({
   const { invoke: listActiveTerminals } = useIpcInvoke('terminal:list-active')
   const { invoke: searchSessionsRpc } = useIpcInvoke('session:search')
   const { invoke: updateSession } = useIpcInvoke('session:update')
+  const { invoke: extractSessionTitle } = useIpcInvoke('session:extract-title')
   const { invoke: forkSession } = useIpcInvoke('session:fork')
   const { invoke: deleteSession } = useIpcInvoke('session:delete')
   const { invoke: persistTeamConfig } = useIpcInvoke('team:update')
@@ -806,7 +819,19 @@ export function SessionSidebarProvider({
             if (item.id !== sessionId) return item
             if (terminal) {
               if (queueRunningRef.current[sessionId] === true) return item
-              return item.status === 'running' ? { ...item, status: 'idle' } : item
+              const next: SessionSummary = {
+                ...item,
+                ...(item.status === 'running' ? { status: 'idle' } : {}),
+              }
+              // 终态（completed/cancelled/error）实时落定运行结果，与持久化 outcome 保持一致，
+              // 让「已完成/中止」状态筛选无需等待刷新立即生效。
+              if (status === 'completed' || status === 'cancelled' || status === 'error') {
+                next.lastRunOutcome = status
+              }
+              // 无实质变化则复用原引用，避免无谓重渲染。
+              return next.status === item.status && next.lastRunOutcome === item.lastRunOutcome
+                ? item
+                : next
             }
             return item.status === 'running'
               ? item
@@ -1699,12 +1724,30 @@ export function SessionSidebarProvider({
           value: session.title ?? '',
           placeholder: t('session.titlePlaceholder'),
           confirmText: t('common.rename'),
+          // 「提取标题」：调会话模型（缺省回退 Provider 默认模型）从会话内容提取，
+          // 结果只回填输入框，由用户确认「重命名」后才落库。
+          extraAction: {
+            label: t('session.extractTitle'),
+            run: async () => {
+              try {
+                const result = await extractSessionTitle({ sessionId: session.id })
+                if (result.ok) return result.title
+                toast.error(t(EXTRACT_TITLE_FAILURE_MESSAGE[result.code]))
+                return null
+              } catch (err) {
+                toast.error(
+                  err instanceof Error ? err.message : t('session.extractTitleFailed.titleEmpty'),
+                )
+                return null
+              }
+            },
+          },
         })
       )?.trim()
       if (!title) return
       await commitSessionTitle(session, title)
     },
-    [commitSessionTitle, requestPrompt, t],
+    [commitSessionTitle, extractSessionTitle, requestPrompt, t, toast],
   )
 
   const handleDeleteSession = useCallback(
@@ -1883,7 +1926,7 @@ export function SessionSidebarProvider({
         return // no workspace associated
       }
       try {
-        await openWorkspaceFolder({ workspaceId })
+        await openWorkspaceFolder({ workspaceId, sessionId: session.id })
       } catch (err) {
         toast.error(err instanceof Error ? err.message : t('project.openFolderFailed'))
       }

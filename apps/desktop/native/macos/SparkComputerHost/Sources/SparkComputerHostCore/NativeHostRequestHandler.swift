@@ -28,6 +28,7 @@ public enum NativeHostPlatformError: Error, Equatable, Sendable {
   case actionNoop
   case sessionCanceled
   case userTakeover
+  case screenLocked
 }
 
 public enum NativeActionStatus: String, Equatable, Sendable {
@@ -36,20 +37,32 @@ public enum NativeActionStatus: String, Equatable, Sendable {
 }
 
 /// The concrete transport an executed action used. `background_ax` means the action ran
-/// as an AX semantic operation on the cached tree (no focus steal); `foreground_cg` means
-/// it degraded to (or was always) the global HID injection path.
+/// as an AX semantic operation on the cached tree (no focus steal); `background_pid` means
+/// synthesized CGEvents were posted directly to the target process (CGEventPostToPid —
+/// background control including occluded windows and custom-drawn UI); `foreground_cg`
+/// means it degraded to (or was always) the global HID injection path.
 public enum NativeExecutionChannel: String, Equatable, Sendable {
   case backgroundAX = "background_ax"
+  case backgroundPID = "background_pid"
   case foregroundCG = "foreground_cg"
 }
 
 public struct NativeActionExecution: Equatable, Sendable {
   public let status: NativeActionStatus
   public let executionChannel: NativeExecutionChannel?
+  /// Settled post-action observation (fresh tree + screenshot) attached in the
+  /// same round trip when the envelope requested `includeSkyshot`. The action
+  /// performed real work (non-nil channel); passive lanes never carry one.
+  public let skyshot: NativeObservedWindow?
 
-  public init(status: NativeActionStatus, executionChannel: NativeExecutionChannel?) {
+  public init(
+    status: NativeActionStatus,
+    executionChannel: NativeExecutionChannel?,
+    skyshot: NativeObservedWindow? = nil
+  ) {
     self.status = status
     self.executionChannel = executionChannel
+    self.skyshot = skyshot
   }
 }
 
@@ -202,8 +215,13 @@ public actor NativeHostRequestHandler {
           previousTreeVersion: previousTreeVersion, fullTree: fullTree,
           persistentCapture: persistentCapture
         )
-        guard observed.snapshotID == snapshotID, observed.app.id == appID,
-          observed.window.id == windowID
+        // App-level contract: the provider self-heals onto the app's live
+        // window when the requested one died (Electron window churn), and the
+        // observation reports the window it actually captured — requiring the
+        // dead window's id back would turn every window change into a
+        // focus_mismatch death loop. A snapshotID or app mismatch is still
+        // a hard protocol violation.
+        guard observed.snapshotID == snapshotID, observed.app.id == appID
         else { throw NativeHostPlatformError.focusMismatch }
         try validateObservation(observed)
         return NativeHostReply(
@@ -219,11 +237,13 @@ public actor NativeHostRequestHandler {
             )
           )
         }
+        let execution = try await provider.executeAction(envelope)
         return NativeHostReply(
           json: try NativeHostResponseEncoder.actionResult(
             requestID: requestID, actionID: envelope.actionID,
-            execution: try await provider.executeAction(envelope)
-          )
+            execution: execution
+          ),
+          binary: execution.skyshot.map { $0.capture.bytes }
         )
       }
     } catch let error as NativeHostPlatformError {
@@ -300,6 +320,12 @@ public actor NativeHostRequestHandler {
       return try NativeHostResponseEncoder.error(
         requestID: requestID, code: "handoff_required",
         message: "The user took control of the target window", retryable: false)
+    case .screenLocked:
+      return try NativeHostResponseEncoder.error(
+        requestID: requestID, code: "screen_locked",
+        message:
+          "The display is locked. Actions and observations are impossible until the user unlocks the screen; report this and wait instead of retrying.",
+        retryable: true)
     }
   }
 

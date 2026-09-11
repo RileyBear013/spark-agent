@@ -1,0 +1,240 @@
+// Shared visual language, scoped to the conversation configuration and inspector.
+.session-panel {
+  container-type: inline-size;
+
+  > .inspector {
+    padding: var(--pad-md);
+    gap: var(--pad-md);
+    border-left: 0;
+    background: var(--bg-soft);
+  }
+
+  .session-panel-heading {
+    display: grid;
+    gap: calc(var(--pad-sm) / 2);
+    padding: calc(var(--pad-sm) / 2) calc(var(--pad-sm) / 2) 0;
+
+    strong {
+      color: var(--text);
+      font-size: var(--font-lg);
+      font-weight: 650;
+    }
+    span {
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+  }
+
+  .inspector-section {
+    flex-shrink: 0;
+    min-width: 0;
+    padding: var(--pad-md);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+
+    h4 {
+      height: auto;
+      min-height: 28px;
+      gap: var(--pad-sm);
+      margin: 0 0 var(--pad-md);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+  }
+
+  .session-panel-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--pad-sm);
+    width: 100%;
+    min-height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    .spacer {
+      flex: 1;
+    }
+  }
+
+  :is(button, input, textarea):focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  .runtime-prompt-block {
+    gap: var(--pad-sm);
+    padding: var(--pad-md) 0 0;
+    + .runtime-prompt-block {
+      margin-top: var(--pad-md);
+      border-top: 1px solid var(--divider);
+    }
+  }
+  .runtime-prompt-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--pad-sm);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .session-panel-count {
+    padding: 0;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .session-panel-caption {
+    margin-top: calc(var(--pad-sm) / -2);
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .runtime-env-hint {
+    padding: 0;
+    margin-bottom: 0;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.7;
+  }
+  .runtime-env-empty {
+    padding: calc(var(--pad-sm) / 2) 0;
+    border: 0;
+    line-height: 1.7;
+  }
+  .runtime-env-row {
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) 28px;
+    gap: var(--pad-sm);
+    padding: var(--pad-md);
+    border: 0;
+    border-radius: var(--r-sm);
+    background: var(--bg-soft);
+    transition: background-color 0.15s ease;
+
+    &:focus-within {
+      background: var(--bg-hover);
+    }
+  }
+  .session-env-field {
+    display: grid;
+    grid-column: 1 / -1;
+    gap: calc(var(--pad-sm) / 2);
+    min-width: 0;
+    > span {
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+    &--key {
+      grid-column: 1;
+    }
+    .form-input {
+      box-sizing: border-box;
+      width: 100%;
+      min-width: 0;
+      height: var(--row-h);
+      padding: calc(var(--pad-sm) / 2) var(--pad-sm);
+      border: 1px solid var(--border);
+      border-radius: var(--r-sm);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 12px;
+    }
+  }
+  .runtime-env-key,
+  .runtime-env-value {
+    font-family: var(--font-mono, monospace);
+  }
+  .runtime-env-remove {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    width: 28px;
+    height: var(--row-h);
+    padding: 0;
+  }
+  .runtime-env-actions {
+    gap: var(--pad-md);
+    padding-top: 0;
+  }
+  .runtime-env-transfer-actions {
+    flex: 0 1 auto;
+    gap: calc(var(--pad-sm) / 2);
+  }
+  .runtime-env-actions :is(.btn, .icon-btn) {
+    min-height: var(--row-h);
+    border-radius: var(--r-sm);
+  }
+  .inspector-textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 88px;
+    max-height: 360px;
+    padding: var(--pad-sm);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    background: var(--bg);
+    font-size: 12px;
+    line-height: 1.7;
+    resize: vertical;
+  }
+  .kv-row {
+    gap: var(--pad-md);
+    padding-block: calc(var(--pad-sm) / 2);
+  }
+  .kv-row .v {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .token-usage-stats {
+    gap: var(--pad-md);
+  }
+  .inspector-section .token-stat,
+  .inspector-section .perf-tile,
+  .inspector-section .prompt-runtime-metrics {
+    min-width: 0;
+    padding: calc(var(--pad-sm) / 2) 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .perf-tiles,
+  .chat-inspector-perf {
+    gap: var(--pad-md);
+  }
+  .inspector-section .token-stat + .token-stat,
+  .inspector-section .perf-tile + .perf-tile {
+    border-left: 1px solid var(--divider);
+    padding-left: var(--pad-md);
+  }
+  .token-stat-value {
+    font-variant-numeric: tabular-nums;
+  }
+  .inspector-muted {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+}
+
+@container (min-width: 400px) {
+  .session-panel .runtime-env-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 28px;
+  }
+  .session-panel .session-env-field--value {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .session-panel .runtime-env-remove {
+    grid-column: 3;
+  }
+}

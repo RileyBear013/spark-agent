@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildWorkflowNodeInputs,
+  detectWorkflowConditionReferenceErrors,
+  detectWorkflowGraphCycles,
+  formatWorkflowConditionReferenceError,
   executeWorkflowAgentPlan,
   getWorkflowAgentWorkerIds,
+  interpolateWorkflowNodeConfig,
+  interpolateWorkflowTemplate,
   normalizeWorkflowGraph,
   orderWorkflowNodes,
 } from './workflow-executor.js'
@@ -34,8 +39,18 @@ describe('workflow-executor graph helpers', () => {
         { id: 'b', kind: 'agent', title: 'B', config: { agentId: 'b' } },
       ],
       edges: [
-        { id: 'valid', from: 'a', to: 'b', condition: { op: 'equals', key: 'route', value: 'yes' } },
-        { id: 'invalid', from: 'a', to: 'b', condition: { op: 'runCode', expression: 'process.exit()' } },
+        {
+          id: 'valid',
+          from: 'a',
+          to: 'b',
+          condition: { op: 'equals', key: 'route', value: 'yes' },
+        },
+        {
+          id: 'invalid',
+          from: 'a',
+          to: 'b',
+          condition: { op: 'runCode', expression: 'process.exit()' },
+        },
       ],
     })
 
@@ -86,7 +101,12 @@ describe('workflow-executor graph helpers', () => {
           config: {
             body: {
               nodes: [
-                { id: 'loop-agent', kind: 'agent', title: 'Loop Agent', config: { agentId: 'loop-worker' } },
+                {
+                  id: 'loop-agent',
+                  kind: 'agent',
+                  title: 'Loop Agent',
+                  config: { agentId: 'loop-worker' },
+                },
                 { id: 'loop-subagent', kind: 'subagent', title: 'Loop Subagent', config: {} },
               ],
               edges: [],
@@ -97,19 +117,26 @@ describe('workflow-executor graph helpers', () => {
       edges: [],
     })
 
-    expect(getWorkflowAgentWorkerIds(graph.nodes)).toEqual(new Set([
-      'agent-1',
-      'temp-agent',
-      'workflow-subagent:generated',
-      'loop-worker',
-      'workflow-subagent:loop-subagent',
-    ]))
+    expect(getWorkflowAgentWorkerIds(graph.nodes)).toEqual(
+      new Set([
+        'agent-1',
+        'workflow-subagent:s',
+        'workflow-subagent:generated',
+        'loop-worker',
+        'workflow-subagent:loop-subagent',
+      ]),
+    )
   })
 
   it('builds node inputs from upstream output keys only', () => {
     const graph = normalizeWorkflowGraph({
       nodes: [
-        { id: 'research', kind: 'agent', title: 'Research', config: { outputKey: 'researchNotes' } },
+        {
+          id: 'research',
+          kind: 'agent',
+          title: 'Research',
+          config: { outputKey: 'researchNotes' },
+        },
         { id: 'write', kind: 'agent', title: 'Write', config: { outputKey: 'draft' } },
         { id: 'review', kind: 'review', title: 'Review', config: {} },
       ],
@@ -172,7 +199,10 @@ describe('executeWorkflowAgentPlan', () => {
       objective: 'Prepare a launch brief',
       initialState,
       dispatch: async (request) => ({
-        content: request.nodeId === 'research' ? 'verified facts' : `draft from ${String(request.inputs.notes)}`,
+        content:
+          request.nodeId === 'research'
+            ? 'verified facts'
+            : `draft from ${String(request.inputs.notes)}`,
       }),
     })
 
@@ -185,6 +215,8 @@ describe('executeWorkflowAgentPlan', () => {
         attempt: 1,
         state: 'completed',
         content: 'verified facts',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
       {
         nodeId: 'write',
@@ -194,10 +226,16 @@ describe('executeWorkflowAgentPlan', () => {
         attempt: 1,
         state: 'completed',
         content: 'draft from verified facts',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
     ])
     expect(result.status).toBe('completed')
-    expect(result.state).toEqual({ seed: 'keep me', notes: 'verified facts', draft: 'draft from verified facts' })
+    expect(result.state).toEqual({
+      seed: 'keep me',
+      notes: 'verified facts',
+      draft: 'draft from verified facts',
+    })
     expect(initialState).toEqual({ seed: 'keep me' })
   })
 
@@ -208,7 +246,12 @@ describe('executeWorkflowAgentPlan', () => {
     const graph = normalizeWorkflowGraph({
       nodes: [
         { id: 'input', kind: 'input', title: 'Input', config: { value: 'parsed brief' } },
-        { id: 'run', kind: 'agent', title: 'Fallback instruction', config: { agentId: 'worker', prompt: '  ' } },
+        {
+          id: 'run',
+          kind: 'agent',
+          title: 'Fallback instruction',
+          config: { agentId: 'worker', prompt: '  ' },
+        },
       ],
       edges: [{ id: 'input-run', from: 'input', to: 'run' }],
     })
@@ -228,6 +271,8 @@ describe('executeWorkflowAgentPlan', () => {
         attempt: 1,
         state: 'completed',
         content: 'unpersisted reply',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
     ])
     expect(result.status).toBe('completed')
@@ -236,12 +281,14 @@ describe('executeWorkflowAgentPlan', () => {
 
   it('retries a failed agent node up to retryCount and records attempts', async () => {
     const graph = normalizeWorkflowGraph({
-      nodes: [{
-        id: 'research',
-        kind: 'agent',
-        title: 'Research',
-        config: { agentId: 'researcher', retryCount: 2, outputKey: 'notes' },
-      }],
+      nodes: [
+        {
+          id: 'research',
+          kind: 'agent',
+          title: 'Research',
+          config: { agentId: 'researcher', retryCount: 2, outputKey: 'notes' },
+        },
+      ],
       edges: [],
     })
     let attempts = 0
@@ -331,7 +378,12 @@ describe('executeWorkflowAgentPlan', () => {
         },
       ],
       edges: [
-        { id: 'route-review', from: 'route', to: 'review', condition: { op: 'equals', key: 'route', value: 'review' } },
+        {
+          id: 'route-review',
+          from: 'route',
+          to: 'review',
+          condition: { op: 'equals', key: 'route', value: 'review' },
+        },
         { id: 'review-publish', from: 'review', to: 'publish' },
       ],
     })
@@ -371,7 +423,12 @@ describe('executeWorkflowAgentPlan', () => {
         },
       ],
       edges: [
-        { id: 'route-review', from: 'route', to: 'review', condition: { op: 'equals', key: 'route', value: 'review' } },
+        {
+          id: 'route-review',
+          from: 'route',
+          to: 'review',
+          condition: { op: 'equals', key: 'route', value: 'review' },
+        },
       ],
     })
 
@@ -388,9 +445,9 @@ describe('executeWorkflowAgentPlan', () => {
 
     expect(result.status).toBe('completed')
     expect(result.atomicExecutions.map((item) => item.nodeId)).toEqual(['route'])
-    expect(result.executions.map((item) => ({ nodeId: item.nodeId, inputs: item.inputs }))).toEqual([
-      { nodeId: 'review', inputs: { route: 'review' } },
-    ])
+    expect(result.executions.map((item) => ({ nodeId: item.nodeId, inputs: item.inputs }))).toEqual(
+      [{ nodeId: 'review', inputs: { route: 'review' } }],
+    )
     expect(result.state).toEqual({ route: 'review', reviewNotes: 'notes for review' })
     expect(result.skippedNodeIds).toEqual([])
   })
@@ -424,8 +481,18 @@ describe('executeWorkflowAgentPlan', () => {
         },
       ],
       edges: [
-        { id: 'route-deep', from: 'route', to: 'deep', condition: { op: 'equals', key: 'route', value: 'deep' } },
-        { id: 'route-quick', from: 'route', to: 'quick', condition: { op: 'equals', key: 'route', value: 'quick' } },
+        {
+          id: 'route-deep',
+          from: 'route',
+          to: 'deep',
+          condition: { op: 'equals', key: 'route', value: 'deep' },
+        },
+        {
+          id: 'route-quick',
+          from: 'route',
+          to: 'quick',
+          condition: { op: 'equals', key: 'route', value: 'quick' },
+        },
         { id: 'deep-merge', from: 'deep', to: 'merge' },
         { id: 'quick-merge', from: 'quick', to: 'merge' },
       ],
@@ -454,6 +521,75 @@ describe('executeWorkflowAgentPlan', () => {
       deliverable: 'merged deepResult',
     })
     expect(result.skippedNodeIds).toEqual(['quick'])
+  })
+
+  it('emits a node-level snapshot as soon as one wave node finishes while slower ones still run', async () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        {
+          id: 'research',
+          kind: 'agent',
+          title: 'Research',
+          config: { agentId: 'researcher', outputKey: 'facts' },
+        },
+        {
+          id: 'outline',
+          kind: 'agent',
+          title: 'Outline',
+          config: { agentId: 'outliner', outputKey: 'outline' },
+        },
+        {
+          id: 'write',
+          kind: 'agent',
+          title: 'Write',
+          config: { agentId: 'writer', outputKey: 'draft' },
+        },
+      ],
+      edges: [
+        { id: 'research-write', from: 'research', to: 'write' },
+        { id: 'outline-write', from: 'outline', to: 'write' },
+      ],
+    })
+    const snapshots: Array<{ completed: string[]; running: string[] }> = []
+    let releaseResearch: (() => void) | undefined
+    const resultPromise = executeWorkflowAgentPlan({
+      graph,
+      objective: 'Prepare a brief',
+      dispatch: async (request) => {
+        if (request.nodeId === 'research') {
+          await new Promise<void>((resolve) => {
+            releaseResearch = resolve
+          })
+          return { content: 'verified facts' }
+        }
+        if (request.nodeId === 'outline') return { content: 'tight outline' }
+        return { content: 'merged' }
+      },
+      onSnapshot: (snap) => {
+        snapshots.push({ completed: [...snap.completedNodeIds], running: [...snap.runningNodeIds] })
+      },
+    })
+
+    // 同波快慢节点并存：快节点（outline）完成后、慢节点（research）仍在跑时，
+    // 就必须已经出现过 outline=completed 且 research=running 的节点级快照——
+    // 这是进度实时上报的核心契约（此前实现要等整波结束才发，快节点状态被扣住）。
+    let sawNodeLevelSnapshot = false
+    for (let hop = 0; hop < 200 && !sawNodeLevelSnapshot; hop += 1) {
+      await Promise.resolve()
+      sawNodeLevelSnapshot = snapshots.some(
+        (snap) => snap.completed.includes('outline') && snap.running.includes('research'),
+      )
+    }
+    expect(sawNodeLevelSnapshot).toBe(true)
+
+    releaseResearch?.()
+    const result = await resultPromise
+    expect(result.status).toBe('completed')
+    expect(result.state).toEqual({
+      facts: 'verified facts',
+      outline: 'tight outline',
+      draft: 'merged',
+    })
   })
 
   it('dispatches independent ready agent nodes in the same wave before joining downstream', async () => {
@@ -500,10 +636,12 @@ describe('executeWorkflowAgentPlan', () => {
       },
     })
 
-    // Two ticks: the wave now emits a "running" snapshot (one microtask hop through
-    // input.onSnapshot?.()) before Promise.all actually invokes dispatch for each node.
-    await Promise.resolve()
-    await Promise.resolve()
+    // Drain microtasks until both wave dispatches have actually started. The exact
+    // number of hops depends on internal snapshot plumbing (the emit chain adds hops),
+    // so poll instead of counting ticks to keep this robust to refactors.
+    for (let hop = 0; hop < 50 && started.length < 2; hop += 1) {
+      await Promise.resolve()
+    }
     expect(started).toEqual(['research', 'outline'])
 
     releases.get('research')?.('verified facts')
@@ -542,18 +680,21 @@ describe('executeWorkflowAgentPlan', () => {
       graph,
       objective: 'Prepare docs',
       dispatch: async (request) => ({
-        content: request.nodeId === 'draft-temp'
-          ? `drafted by ${request.agentId}`
-          : `reviewed ${String(request.inputs.section)}`,
+        content:
+          request.nodeId === 'draft-temp'
+            ? `drafted by ${request.agentId}`
+            : `reviewed ${String(request.inputs.section)}`,
       }),
     })
 
     expect(result.status).toBe('completed')
-    expect(result.executions.map((item) => ({
-      nodeId: item.nodeId,
-      agentId: item.agentId,
-      inputs: item.inputs,
-    }))).toEqual([
+    expect(
+      result.executions.map((item) => ({
+        nodeId: item.nodeId,
+        agentId: item.agentId,
+        inputs: item.inputs,
+      })),
+    ).toEqual([
       { nodeId: 'draft-temp', agentId: 'workflow-subagent:draft-temp', inputs: {} },
       {
         nodeId: 'review',
@@ -600,6 +741,8 @@ describe('executeWorkflowAgentPlan', () => {
         state: 'completed',
         outputKey: 'brief',
         content: 'Parsed brief',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
     ])
     expect(result.executions[0]?.inputs).toEqual({ brief: 'Parsed brief' })
@@ -645,6 +788,8 @@ describe('executeWorkflowAgentPlan', () => {
         outputKey: 'verification',
         content: 'tests failed',
         error: { code: 'verify_failed', message: 'pnpm test failed' },
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
     ])
     expect(result.failedNode).toEqual({
@@ -791,13 +936,18 @@ describe('executeWorkflowAgentPlan', () => {
       ],
       edges: [{ id: 'research-write', from: 'research', to: 'write' }],
     })
-    const snapshots: Array<{ status: string; completedNodeIds: string[]; runningNodeIds: string[] }> = []
+    const snapshots: Array<{
+      status: string
+      completedNodeIds: string[]
+      runningNodeIds: string[]
+    }> = []
 
     const result = await executeWorkflowAgentPlan({
       graph,
       objective: 'Track progress',
       dispatch: async (request) => ({
-        content: request.nodeId === 'research' ? 'facts' : `draft from ${String(request.inputs.notes)}`,
+        content:
+          request.nodeId === 'research' ? 'facts' : `draft from ${String(request.inputs.notes)}`,
       }),
       onSnapshot: (snapshot) => {
         snapshots.push({
@@ -909,10 +1059,16 @@ describe('executeWorkflowAgentPlan', () => {
 
     expect(dispatchCount).toBe(3)
     expect(result.status).toBe('completed')
-    expect(result.state.draft).toBe('--- branch 1 ---\noption 1\n\n--- branch 2 ---\noption 2\n\n--- branch 3 ---\noption 3')
+    expect(result.state.draft).toBe(
+      '--- branch 1 ---\noption 1\n\n--- branch 2 ---\noption 2\n\n--- branch 3 ---\noption 3',
+    )
     expect(result.executions).toHaveLength(3)
     expect(result.executions.map((item) => item.attempt)).toEqual([1, 1, 1])
-    expect(result.executions.map((item) => item.state)).toEqual(['completed', 'completed', 'completed'])
+    expect(result.executions.map((item) => item.state)).toEqual([
+      'completed',
+      'completed',
+      'completed',
+    ])
   })
 
   it('fails the node when one fan-out branch fails, recording all branches', async () => {
@@ -1020,6 +1176,39 @@ describe('executeWorkflowAgentPlan', () => {
     expect(result.state).toEqual({})
   })
 
+  it('fails a subagent with missing_agent_id when its explicit Agent binding is unavailable', async () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        {
+          id: 'review',
+          kind: 'subagent',
+          title: 'Review',
+          config: { agentId: 'deleted-reviewer', outputKey: 'review' },
+        },
+      ],
+      edges: [],
+    })
+    let dispatchCount = 0
+
+    const result = await executeWorkflowAgentPlan({
+      graph,
+      objective: 'Fail before dispatch',
+      availableWorkerIds: new Set(),
+      dispatch: async () => {
+        dispatchCount += 1
+        return { content: 'unexpected' }
+      },
+    })
+
+    expect(dispatchCount).toBe(0)
+    expect(result.status).toBe('failed')
+    expect(result.failedNode?.error).toEqual({
+      code: 'missing_agent_id',
+      message:
+        'subagent 节点「Review」绑定的 Agent「deleted-reviewer」不存在、已禁用或未加入本次运行花名册，无法派发。',
+    })
+  })
+
   it('falls back to the host agent when an agent node is unbound or points at an unavailable worker', async () => {
     const graph = normalizeWorkflowGraph({
       nodes: [
@@ -1048,11 +1237,13 @@ describe('executeWorkflowAgentPlan', () => {
     })
 
     expect(result.status).toBe('completed')
-    expect(result.executions.map((item) => ({
-      nodeId: item.nodeId,
-      agentId: item.agentId,
-      inputs: item.inputs,
-    }))).toEqual([
+    expect(
+      result.executions.map((item) => ({
+        nodeId: item.nodeId,
+        agentId: item.agentId,
+        inputs: item.inputs,
+      })),
+    ).toEqual([
       { nodeId: 'unbound', agentId: 'host-agent', inputs: {} },
       { nodeId: 'stale', agentId: 'host-agent', inputs: { a: 'host-agent:unbound' } },
     ])
@@ -1152,6 +1343,8 @@ describe('executeWorkflowAgentPlan', () => {
         state: 'completed',
         outputKey: 'finalDraft',
         content: 'draft 3',
+        startedAt: expect.any(String),
+        endedAt: expect.any(String),
       },
     ])
     expect(result.state).toEqual({ finalDraft: 'draft 3' })
@@ -1238,8 +1431,265 @@ describe('executeWorkflowAgentPlan', () => {
       attempt: 1,
       error: {
         code: 'workflow_loop_nested',
-        message: 'Loop node outer-loop contains nested loop node inner-loop, which is not supported in v1.',
+        message:
+          'Loop node outer-loop contains nested loop node inner-loop, which is not supported in v1.',
       },
     })
+  })
+})
+
+// ─── {{key}} 模板插值 ───────────────────────────────────────────────────────
+
+describe('detectWorkflowGraphCycles', () => {
+  it('returns empty for a DAG', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        { id: 'a', kind: 'input', title: 'A', config: {} },
+        { id: 'b', kind: 'agent', title: 'B', config: {} },
+        { id: 'c', kind: 'agent', title: 'C', config: {} },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'a', to: 'c' },
+        { from: 'b', to: 'c' },
+      ],
+    })
+    expect(detectWorkflowGraphCycles(graph)).toEqual([])
+  })
+
+  it('reports cycle nodes with titles on the main graph', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        { id: 'a', kind: 'agent', title: '起点', config: {} },
+        { id: 'b', kind: 'agent', title: '环一', config: {} },
+        { id: 'c', kind: 'agent', title: '环二', config: {} },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'c' },
+        { from: 'c', to: 'b' },
+      ],
+    })
+    const reports = detectWorkflowGraphCycles(graph)
+    expect(reports).toHaveLength(1)
+    const report = reports[0]
+    expect(report?.scope).toBe('主图')
+    const ids = (report?.cycleNodes ?? []).map((node) => node.id).sort()
+    expect(ids).toEqual(['b', 'c'])
+    const titles = (report?.cycleNodes ?? []).map((node) => node.title).sort()
+    expect(titles).toEqual(['环一', '环二'])
+  })
+
+  it('detects cycles inside a loop body subgraph with scoped label', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        {
+          id: 'loop',
+          kind: 'loop',
+          title: '迭代',
+          config: {
+            body: {
+              nodes: [
+                { id: 'x', kind: 'agent', title: '体内X', config: {} },
+                { id: 'y', kind: 'agent', title: '体内Y', config: {} },
+              ],
+              edges: [
+                { from: 'x', to: 'y' },
+                { from: 'y', to: 'x' },
+              ],
+            },
+          },
+        },
+      ],
+      edges: [],
+    })
+    const reports = detectWorkflowGraphCycles(graph)
+    expect(reports).toHaveLength(1)
+    const report = reports[0]
+    expect(report?.scope).toBe('主图 › 迭代 循环体')
+    expect((report?.cycleNodes ?? []).map((node) => node.id).sort()).toEqual(['x', 'y'])
+  })
+
+  it('ignores edges pointing at removed nodes', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [{ id: 'a', kind: 'agent', title: 'A', config: {} }],
+      edges: [{ from: 'a', to: 'ghost' }],
+    })
+    expect(detectWorkflowGraphCycles(graph)).toEqual([])
+  })
+})
+
+describe('detectWorkflowConditionReferenceErrors', () => {
+  it('reports an edge condition whose key is not declared by any node', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        { id: 'route', kind: 'route', title: 'Route', config: { outputKey: 'route_mode' } },
+        { id: 'done', kind: 'artifact', title: 'Done', config: {} },
+      ],
+      edges: [
+        {
+          id: 'route-done',
+          from: 'route',
+          to: 'done',
+          condition: { op: 'equals', key: 'audit_mode', value: 'full' },
+        },
+      ],
+    })
+
+    const reports = detectWorkflowConditionReferenceErrors(graph)
+    expect(reports).toEqual([{ scope: '主图', owner: '连线 route-done', key: 'audit_mode' }])
+    expect(formatWorkflowConditionReferenceError(reports)).toContain('audit_mode')
+    expect(formatWorkflowConditionReferenceError(reports)).toContain('outputKey')
+  })
+
+  it('accepts declared keys across the main graph and loop body', () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        { id: 'route', kind: 'route', title: 'Route', config: { outputKey: 'route_mode' } },
+        {
+          id: 'loop',
+          kind: 'loop',
+          title: 'Refine',
+          config: {
+            outputKey: 'final',
+            loopVar: 'iteration',
+            breakCondition: { op: 'equals', key: 'verdict', value: 'pass' },
+            body: {
+              nodes: [
+                { id: 'judge', kind: 'review', title: 'Judge', config: { outputKey: 'verdict' } },
+              ],
+              edges: [],
+            },
+          },
+        },
+      ],
+      edges: [
+        {
+          id: 'route-loop',
+          from: 'route',
+          to: 'loop',
+          condition: { op: 'equals', key: 'route_mode', value: 'full' },
+        },
+      ],
+    })
+
+    expect(detectWorkflowConditionReferenceErrors(graph)).toEqual([])
+  })
+})
+
+describe('interpolateWorkflowTemplate', () => {
+  const context = { brief: '上线说明', count: 3, ok: true, list: [1, 2] }
+
+  it('替换命中键：字符串原样、非字符串 JSON 序列化', () => {
+    expect(interpolateWorkflowTemplate('阅读 {{brief}}', context)).toBe('阅读 上线说明')
+    expect(interpolateWorkflowTemplate('共 {{ count }} 项', context)).toBe('共 3 项')
+    expect(interpolateWorkflowTemplate('{{ok}} / {{list}}', context)).toBe('true / [1,2]')
+  })
+
+  it('未命中的占位符保持字面量（不静默清空）', () => {
+    expect(interpolateWorkflowTemplate('引用 {{missing}} 原样', context)).toBe(
+      '引用 {{missing}} 原样',
+    )
+  })
+
+  it('没有占位符时返回原字符串', () => {
+    expect(interpolateWorkflowTemplate('plain text', context)).toBe('plain text')
+  })
+})
+
+describe('interpolateWorkflowNodeConfig', () => {
+  const context = { draft: '草稿内容' }
+
+  it('只插值 prompt 与 toolArgs 字符串叶子，其余字段原样保留', () => {
+    const config = {
+      prompt: '改写 {{draft}}',
+      toolArgs: { query: '{{draft}}', nested: { path: 'x-{{draft}}', n: 1 }, list: ['{{draft}}'] },
+      exportPath: 'out/{{draft}}.md',
+      routeOptions: [{ value: '{{draft}}' }],
+      execution: 'auto',
+    }
+    const interpolated = interpolateWorkflowNodeConfig(config, context)
+    expect(interpolated.prompt).toBe('改写 草稿内容')
+    expect(interpolated.toolArgs).toEqual({
+      query: '草稿内容',
+      nested: { path: 'x-草稿内容', n: 1 },
+      list: ['草稿内容'],
+    })
+    // exportPath / routeOptions 不受上游数据污染
+    expect(interpolated.exportPath).toBe('out/{{draft}}.md')
+    expect(interpolated.routeOptions).toEqual([{ value: '{{draft}}' }])
+    expect(interpolated.execution).toBe('auto')
+  })
+
+  it('无任何占位符时返回同一引用（避免多余拷贝）', () => {
+    const config = { prompt: 'plain', toolArgs: { a: 'b' } }
+    expect(interpolateWorkflowNodeConfig(config, context)).toBe(config)
+  })
+})
+
+describe('executeWorkflowAgentPlan 模板插值（端到端）', () => {
+  it('agent 节点 prompt 的 {{key}} 按上游输出替换', async () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        {
+          id: 'research',
+          kind: 'agent',
+          title: 'Research',
+          config: { agentId: 'r', prompt: 'find facts', outputKey: 'notes' },
+        },
+        {
+          id: 'write',
+          kind: 'agent',
+          title: 'Write',
+          config: { agentId: 'w', prompt: '基于 {{notes}} 写结论', outputKey: 'draft' },
+        },
+      ],
+      edges: [{ id: 'e1', from: 'research', to: 'write' }],
+    })
+    const result = await executeWorkflowAgentPlan({
+      graph,
+      objective: 'goal',
+      dispatch: async (request) => ({ content: request.nodeId === 'research' ? '事实A' : 'done' }),
+    })
+    expect(result.executions[1]?.instruction).toContain('基于 事实A 写结论')
+  })
+
+  it('原子节点的 config.prompt 与 toolArgs 在执行请求里完成插值', async () => {
+    const graph = normalizeWorkflowGraph({
+      nodes: [
+        {
+          id: 'input',
+          kind: 'input',
+          title: 'Input',
+          config: { value: '种子', outputKey: 'seed' },
+        },
+        {
+          id: 'tool',
+          kind: 'tool',
+          title: 'Tool',
+          config: {
+            prompt: '执行 {{seed}}',
+            toolSource: 'builtin',
+            toolName: 'Bash',
+            toolArgs: { command: 'echo {{seed}}' },
+          },
+        },
+      ],
+      edges: [{ id: 'e1', from: 'input', to: 'tool' }],
+    })
+    const requests: Array<{ nodeId: string; config: Record<string, unknown> }> = []
+    await executeWorkflowAgentPlan({
+      graph,
+      objective: 'goal',
+      dispatch: async () => ({ content: 'unused' }),
+      executeAtomicNode: async (request) => {
+        requests.push({ nodeId: request.nodeId, config: request.config })
+        // input 节点回传种子内容写入 state.seed，供 tool 节点的 {{seed}} 插值消费。
+        return { content: request.nodeId === 'input' ? '种子' : 'ok' }
+      },
+    })
+    const toolConfig = requests.find((request) => request.nodeId === 'tool')?.config
+    expect(toolConfig?.prompt).toBe('执行 种子')
+    expect(toolConfig?.toolArgs).toEqual({ command: 'echo 种子' })
   })
 })

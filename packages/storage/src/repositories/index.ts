@@ -8,6 +8,18 @@
 
 export { BaseRepository } from './base.repository.js'
 export { ToolPackageRepository } from './tool-package.repository.js'
+export { ToolInvocationRepository } from './tool-invocation.repository.js'
+export { ToolPackageStorageRepository } from './tool-package-storage.repository.js'
+export type { ToolPackageStorageEntry } from './tool-package-storage.repository.js'
+export type {
+  FinishToolInvocationParams,
+  ListToolInvocationsParams,
+  StartToolInvocationParams,
+  ToolInvocationRow,
+  ToolInvocationSource,
+  ToolInvocationSourceKind,
+  ToolInvocationStatus,
+} from './tool-invocation.repository.js'
 export type {
   ToolPackageState,
   ToolPackageVersionStatus,
@@ -60,6 +72,7 @@ export type {
 } from './application-snapshot.repository.js'
 export { SessionRepository } from './session.repository.js'
 export { SessionCollaborationRepository } from './session-collaboration.repository.js'
+export { SessionHistoryRepository, HISTORY_EVENT_TYPES } from './session-history.repository.js'
 export type {
   SessionReferenceStatus,
   SessionReferenceAuditAction,
@@ -181,8 +194,16 @@ export {
   SubAppReleaseNotFoundError,
   SubAppStateError,
 } from './sub-app.repository.js'
+export { SubAppPlatformRepository } from './sub-app-platform.repository.js'
+export type {
+  PublishSubAppPackageInput,
+  PublishedSubAppPackage,
+} from './sub-app-platform.repository.js'
 export type {
   CreateSubAppParams,
+  ImportSubAppDataInput,
+  ImportSubAppParams,
+  ImportSubAppReleaseInput,
   SubAppDataRow,
   SubAppListPage,
   SubAppReleaseRow,
@@ -230,10 +251,18 @@ export type {
   WorkflowStatus,
 } from './workflow.repository.js'
 export { WorkflowRunRepository } from './workflow-run.repository.js'
+export { WorkflowBundleRepository } from './workflow-bundle.repository.js'
+export type {
+  CreateWorkflowBundleParams,
+  UpdateWorkflowBundleParams,
+  WorkflowBundleRow,
+  WorkflowBundleVerificationStatus,
+} from './workflow-bundle.repository.js'
 export type {
   CreateWorkflowRunParams,
   UpdateWorkflowRunSnapshotParams,
   WorkflowRunRow,
+  WorkflowRunSummaryRow,
   WorkflowRunStatus,
 } from './workflow-run.repository.js'
 export { TeamDispatchRepository } from './team-dispatch.repository.js'

@@ -25,6 +25,7 @@
  * ## 审批节点答案解析
  * - findWorkflowApprovalAnswerImpl: 在 answers.answers（中按 question/数组下标定位）
  * - extractWorkflowApprovalTextImpl: 从单条答案里取出可读文本
+ * - isWorkflowApprovalCancelledImpl: 区分会话/进程取消与用户明确拒绝
  * - isWorkflowApprovalApprovedImpl: 判断审批是否被"明确批准"
  * - extractWorkflowApprovalCommentImpl: 提取审批修改意见
  *
@@ -32,25 +33,43 @@
  * - WORKFLOW_LLM_ATOMIC_KINDS / WORKFLOW_READONLY_DISALLOWED_TOOLS / WORKFLOW_READONLY_ALLOWED_TOOL_IDS
  * - workflowAtomicMemberId: 临时 worker id 生成
  * - shouldRunWorkflowAtomicNodeAsAgent: 节点是否走真实执行
- * - createWorkflowAtomicMember: 构造临时原子 worker
+ * - createWorkflowAtomicMember: 构造临时原子 worker（builtin 工具直调时锁定单工具）
  * - buildWorkflowAtomicInstruction: 真实执行时给临时 worker 的指令
  * - buildWorkflowRouteDecisionInstruction: route 节点专用指令
  * - buildWorkflowInputStructuredInstruction: input 节点专用指令
  * - resolveWorkflowArtifactExportPath: artifact 节点导出路径解析（防路径穿越）
  *
+ * ## 工具节点确定性调用
+ * - getWorkflowToolInvocationSpec: 解析 toolSource/toolServerId/toolName/toolArgs 配置
+ * - buildWorkflowToolInvocationInstruction: builtin 源锁定 worker 的强约束指令
+ * - formatWorkflowMcpToolResult: MCP 直调结果 → 节点输出文本
+ * - formatWorkflowPlatformToolResult: 平台工具（自定义工具/工具包）直调结果 → 节点输出文本
+ *
  * 依赖：workflow-executor.js (NormalizedWorkflowNode) + storage (AgentItem, WorkflowItem) +
- *      protocol (AgentEvent, UserQuestionPrompt, WorkflowNodeKind, WORKFLOW_RESTRICTABLE_TOOL_NAMES)
+ *      protocol (AgentEvent, UserQuestionPrompt, WorkflowNodeKind, WORKFLOW_RESTRICTABLE_TOOL_NAMES) +
+ *      mcp/mcp-client.js (McpToolResult)
  *
  * session.service.ts 顶部 re-export 9 个外部 helper，保持向后兼容。
  */
 
 import path from 'node:path'
-import type { UserQuestionPrompt, WorkflowNodeKind } from '@spark/protocol'
+import type { McpToolResult } from '../mcp/mcp-client.js'
+import type {
+  UserQuestionPrompt,
+  WorkflowNodeKind,
+  WorkflowProgressNode,
+  WorkflowProgressNodeStatus,
+} from '@spark/protocol'
 import { WORKFLOW_RESTRICTABLE_TOOL_NAMES } from '@spark/protocol'
 import { normalizeReasoningBudgetTokens } from '@spark/shared'
 import type { AgentItem, WorkflowItem } from '@spark/storage'
-import type { NormalizedWorkflowGraph, NormalizedWorkflowNode } from './workflow-executor.js'
-import { getWorkflowNodeWorkerId } from './workflow-executor.js'
+import type {
+  NormalizedWorkflowGraph,
+  NormalizedWorkflowNode,
+  WorkflowAgentExecutionRecord,
+  WorkflowAtomicNodeExecutionRecord,
+} from './workflow-executor.js'
+import { getWorkflowNodeEffectiveWorkerId, getWorkflowNodeWorkerId } from './workflow-executor.js'
 import { buildWorkflowSystemPrompt } from './workflow-system-prompt.js'
 import type { WorkflowExecutionMode } from './workflow-system-prompt.js'
 
@@ -100,56 +119,38 @@ export function hasWorkflowExecutableNodes(
 
 export function createWorkflowSubagentMember(
   node: NormalizedWorkflowNode,
-  hostAgent: AgentItem,
+  baseAgent: AgentItem,
   workerId: string,
+  mcpSelectionConfigured = false,
 ): AgentItem {
   const now = new Date(0).toISOString()
   const reasoningBudgetTokens = normalizeReasoningBudgetTokens(
-    hostAgent.metadata.reasoningBudgetTokens,
+    baseAgent.metadata.reasoningBudgetTokens,
   )
-  const prompt =
-    typeof node.config.prompt === 'string' && node.config.prompt.trim().length > 0
-      ? node.config.prompt.trim()
-      : node.title
+  const overridden = applyWorkflowNodeOverrides(baseAgent, node)
   const role =
     typeof node.config.role === 'string' && node.config.role.trim().length > 0
       ? node.config.role.trim()
-      : ''
+      : overridden.description
   return {
+    ...overridden,
     id: workerId,
     name: node.title,
     description: role,
     builtIn: false,
     enabled: true,
     isDefault: false,
-    providerProfileId:
-      typeof node.config.providerProfileId === 'string'
-        ? node.config.providerProfileId
-        : (hostAgent.providerProfileId ?? null),
-    modelId:
-      typeof node.config.modelId === 'string' ? node.config.modelId : (hostAgent.modelId ?? null),
-    agentAdapter:
-      typeof node.config.agentAdapter === 'string'
-        ? node.config.agentAdapter
-        : hostAgent.agentAdapter,
     // 节点级 permissionMode 覆盖已下线：executeMemberTurn 里成员权限统一走 claude-auto
     // （避免并行 dispatch 时多个审批框互相打断），节点上配这个字段从来不会真正生效，
     // 干脆不再提供这个"看起来能配但没用"的入口。
-    permissionMode: hostAgent.permissionMode,
-    reasoningEffort:
-      typeof node.config.reasoningEffort === 'string'
-        ? node.config.reasoningEffort
-        : hostAgent.reasoningEffort,
-    prompt,
-    ruleIds: stringArrayConfig(node.config.ruleIds),
-    skillIds: stringArrayConfig(node.config.skillIds),
-    disabledSkillIds: stringArrayConfig(node.config.disabledSkillIds),
-    mcpServerIds: stringArrayConfig(node.config.mcpServerIds),
+    permissionMode: baseAgent.permissionMode,
     hookConfig: {},
     workflowId: null,
     metadata: {
+      ...overridden.metadata,
       workflowNodeId: node.id,
       temporaryWorkflowSubagent: true,
+      ...(mcpSelectionConfigured ? { workflowMcpSelectionConfigured: true } : {}),
       ...(reasoningBudgetTokens != null ? { reasoningBudgetTokens } : {}),
       ...workflowNodeToolIdsMeta(node),
     },
@@ -158,7 +159,10 @@ export function createWorkflowSubagentMember(
   }
 }
 
-export function applyWorkflowNodeOverrides(member: AgentItem, node: NormalizedWorkflowNode): AgentItem {
+export function applyWorkflowNodeOverrides(
+  member: AgentItem,
+  node: NormalizedWorkflowNode,
+): AgentItem {
   const prompt =
     typeof node.config.prompt === 'string' && node.config.prompt.trim().length > 0
       ? node.config.prompt.trim()
@@ -167,6 +171,16 @@ export function applyWorkflowNodeOverrides(member: AgentItem, node: NormalizedWo
     typeof node.config.role === 'string' && node.config.role.trim().length > 0
       ? node.config.role.trim()
       : member.description
+  const metadata: Record<string, unknown> = {
+    ...member.metadata,
+    workflowNodeId: node.id,
+    workflowNodeOverrides: true,
+  }
+  if (Array.isArray(node.config.toolIds)) {
+    const toolIds = stringArrayConfig(node.config.toolIds)
+    if (toolIds.length > 0) metadata.toolIds = toolIds
+    else delete metadata.toolIds
+  }
   return {
     ...member,
     description,
@@ -190,12 +204,7 @@ export function applyWorkflowNodeOverrides(member: AgentItem, node: NormalizedWo
     mcpServerIds: Array.isArray(node.config.mcpServerIds)
       ? stringArrayConfig(node.config.mcpServerIds)
       : member.mcpServerIds,
-    metadata: {
-      ...member.metadata,
-      workflowNodeId: node.id,
-      workflowNodeOverrides: true,
-      ...workflowNodeToolIdsMeta(node),
-    },
+    metadata,
   }
 }
 
@@ -217,7 +226,15 @@ export function memberDisallowedToolsFromConfig(member: AgentItem): string[] {
   return WORKFLOW_RESTRICTABLE_TOOL_NAMES.filter((name) => !allowed.has(name))
 }
 
-export function nullableStringConfig(value: unknown, fallback: string | null | undefined): string | null {
+/** 只读原子节点不得挂载可改变会话/worktree 状态的 spark_session MCP。 */
+export function shouldAttachWorkflowSessionMcp(member: AgentItem): boolean {
+  return member.metadata?.workflowCapability !== 'readonly'
+}
+
+export function nullableStringConfig(
+  value: unknown,
+  fallback: string | null | undefined,
+): string | null {
   if (value === null) return null
   if (typeof value !== 'string') return fallback ?? null
   const trimmed = value.trim()
@@ -270,7 +287,7 @@ export async function runWorkflowVerifyNode(
         // 只是输出太长"误报成 verify 失败。放宽到 20MB，给复杂项目留够余量。
         maxBuffer: 20 * 1024 * 1024,
       })
-      outputs.push(formatWorkflowVerifyCommandOutput(command, stdout, stderr))
+      outputs.push(formatWorkflowVerifyCommandOutput(command, stdout, stderr, 0))
     } catch (error) {
       const stdout =
         typeof (error as { stdout?: unknown }).stdout === 'string'
@@ -281,7 +298,9 @@ export async function runWorkflowVerifyNode(
           ? (error as { stderr: string }).stderr
           : ''
       const message = error instanceof Error ? error.message : String(error)
-      const content = formatWorkflowVerifyCommandOutput(command, stdout, stderr)
+      const rawExitCode = (error as { code?: unknown }).code
+      const exitCode = typeof rawExitCode === 'number' ? rawExitCode : null
+      const content = formatWorkflowVerifyCommandOutput(command, stdout, stderr, exitCode)
       return {
         state: 'failed',
         content,
@@ -299,9 +318,11 @@ export function formatWorkflowVerifyCommandOutput(
   command: string,
   stdout: string,
   stderr: string,
+  exitCode: number | null,
 ): string {
   return [
     `$ ${command}`,
+    `[exit code: ${exitCode ?? 'unknown'}]`,
     stdout.trim().length > 0 ? stdout.trim() : '',
     stderr.trim().length > 0 ? stderr.trim() : '',
   ]
@@ -413,7 +434,12 @@ export function extractWorkflowRouteDecision(rawContent: string): string {
   } catch {
     // Plain-text route values are the preferred output; JSON is only accepted for resilience.
   }
-  return stripped.split(/\r?\n/, 1)[0]?.trim().replace(/^["']|["']$/g, '') ?? ''
+  return (
+    stripped
+      .split(/\r?\n/, 1)[0]
+      ?.trim()
+      .replace(/^["']|["']$/g, '') ?? ''
+  )
 }
 
 export function validateWorkflowRouteDecisionContent(
@@ -422,7 +448,20 @@ export function validateWorkflowRouteDecisionContent(
 ):
   | { ok: true; content: string; decision: string }
   | { ok: false; content: string; decision: string; message: string } {
-  const decision = extractWorkflowRouteDecision(rawContent)
+  const extractedDecision = extractWorkflowRouteDecision(rawContent)
+  const options = normalizeWorkflowRouteOptions(config)
+  // 部分 Provider 会把工具调用前后的过程文本一并聚合进 reply.content，尽管指令要求
+  // 只输出 value。保留首行/JSON 的既有解析；仅当它不命中已配置分支时，才接受末尾
+  // 独占一行的合法 value，避免从普通说明句里误抓分支词。
+  const trailingDecision =
+    options.length > 0 && !options.some((option) => option.value === extractedDecision)
+      ? rawContent
+          .split(/\r?\n/)
+          .map((line) => line.trim().replace(/^[`"']|[`"']$/g, ''))
+          .reverse()
+          .find((line) => options.some((option) => option.value === line))
+      : undefined
+  const decision = trailingDecision ?? extractedDecision
   if (decision.length === 0) {
     return {
       ok: false,
@@ -431,7 +470,6 @@ export function validateWorkflowRouteDecisionContent(
       message: '路由节点没有输出分支值。',
     }
   }
-  const options = normalizeWorkflowRouteOptions(config)
   if (options.length === 0) {
     return { ok: true, content: decision, decision }
   }
@@ -488,6 +526,16 @@ export function extractWorkflowApprovalTextImpl(raw: unknown): string {
   return ''
 }
 
+/**
+ * 判断审批问询是否因会话取消、应用退出等系统中断而结束。
+ *
+ * PendingUserQuestionStore.cancelSession 会以 `{ cancelled: true }` 解析挂起的
+ * Promise。这不代表用户选择了“拒绝”，调用方应将节点标记为 canceled。
+ */
+export function isWorkflowApprovalCancelledImpl(answers: Record<string, unknown>): boolean {
+  return answers.cancelled === true
+}
+
 /** 判断审批 decision 问题是否被「明确批准」（cancelled/declined/skipped/无明确 approve 视为未批准）。 */
 export function isWorkflowApprovalApprovedImpl(
   answers: Record<string, unknown>,
@@ -538,7 +586,8 @@ export const WORKFLOW_LLM_ATOMIC_KINDS = new Set<WorkflowNodeKind>([
 ])
 
 /**
- * plan / review 节点限制为「只读」工具集：禁掉写与执行类工具（Write/Edit/MultiEdit/NotebookEdit/Bash），
+ * input / route / plan / review / artifact 节点限制为「只读」工具集：
+ * 禁掉写与执行类工具（Write/Edit/MultiEdit/NotebookEdit/Bash），
  * 只保留探索（Read/Grep/Glob/Web*）与协作类，产出计划/复核文本而不去改动工作区。
  * 用禁用名单而不是白名单，是为了与 memberDisallowedToolsFromConfig 的 disallowedTools 语义一致
  * （allowedTools 在 SDK 里只是免审批名单，挡不住其它工具）。
@@ -551,7 +600,7 @@ export const WORKFLOW_READONLY_DISALLOWED_TOOLS: string[] = [
   'Bash',
 ]
 
-/** 供 plan/review 节点用的「只读」toolIds 白名单（= 全量可限制工具 - 写/执行类）。 */
+/** 供只读原子节点用的 toolIds 白名单（= 全量可限制工具 - 写/执行类）。 */
 export const WORKFLOW_READONLY_ALLOWED_TOOL_IDS: string[] = WORKFLOW_RESTRICTABLE_TOOL_NAMES.filter(
   (name) => !WORKFLOW_READONLY_DISALLOWED_TOOLS.includes(name),
 )
@@ -581,16 +630,40 @@ export function shouldRunWorkflowAtomicNodeAsAgent(node: NormalizedWorkflowNode)
  * 再按节点类型收窄能力面：
  * - skill：只挂节点所选 skillIds；tool：把 toolIds 交给 metadata（executeMemberTurn 换算 disallowedTools）。
  *   MCP 不再按 Agent 或节点收窄，所有已启用的应用 MCP 都由运行时统一挂载。
- * - input / plan / review：纯 LLM 任务（结构化解析 / 计划 / 复核），不需要外部写与执行类工具——
- *   额外用只读 toolIds 覆盖，禁掉 Write/Edit/Bash 等。
+ * - input / route / plan / review / artifact：纯 LLM 任务（结构化解析 / 路由 / 计划 / 复核 /
+ *   整理产物），不需要外部写与执行类工具——额外用只读 toolIds 覆盖，禁掉 Write/Edit/Bash 等。
+ *   artifact 的 exportPath 仍由运行时收尾逻辑负责写盘，不依赖 worker 的写入权限。
  */
-export function createWorkflowAtomicMember(node: NormalizedWorkflowNode, hostAgent: AgentItem): AgentItem {
+export function createWorkflowAtomicMember(
+  node: NormalizedWorkflowNode,
+  hostAgent: AgentItem,
+): AgentItem {
   const workerId = workflowAtomicMemberId(node.id)
   const base = createWorkflowSubagentMember(node, hostAgent, workerId)
-  if (node.kind !== 'input' && node.kind !== 'route' && node.kind !== 'plan' && node.kind !== 'review') {
+  if (node.kind === 'tool') {
+    // 确定性调用（builtin 源）：无论 toolIds 旧值是什么，强制锁定为所选的单个内置工具，
+    // 保证 worker 除该工具外其它可限制工具全部被禁用（memberDisallowedToolsFromConfig 换算）。
+    const invocation = getWorkflowToolInvocationSpec(node.config, node.kind)
+    if (invocation?.source === 'builtin') {
+      return {
+        ...base,
+        metadata: {
+          ...base.metadata,
+          toolIds: [invocation.toolName],
+        },
+      }
+    }
+  }
+  if (
+    node.kind !== 'input' &&
+    node.kind !== 'route' &&
+    node.kind !== 'plan' &&
+    node.kind !== 'review' &&
+    node.kind !== 'artifact'
+  ) {
     return base
   }
-  // input/route/plan/review：若节点自己配了 toolIds 就取「所选 ∩ 只读集」，否则直接用整个只读集。
+  // 只读原子节点：若节点自己配了 toolIds 就取「所选 ∩ 只读集」，否则直接用整个只读集。
   const configured = stringArrayConfig(node.config.toolIds)
   const readonlyIds =
     configured.length > 0
@@ -604,6 +677,128 @@ export function createWorkflowAtomicMember(node: NormalizedWorkflowNode, hostAge
       toolIds: readonlyIds,
     },
   }
+}
+
+// ─── 工具节点确定性调用 ─────────────────────────────────────────────────────
+
+export interface WorkflowToolInvocationSpec {
+  source: 'mcp' | 'builtin' | 'platform'
+  /** mcp 源：目标 MCP 服务器 id（builtin/platform 源缺省）。 */
+  serverId?: string
+  toolName: string
+  args: Record<string, unknown>
+}
+
+function toolArgsRecordConfig(value: unknown): Record<string, unknown> {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return {}
+  return { ...(value as Record<string, unknown>) }
+}
+
+/**
+ * 解析工具/MCP 节点的确定性调用配置：toolSource + toolName（mcp 源另需 toolServerId）齐备才生效，
+ * 否则返回 null（节点回落旧的受限 worker 模式）。builtin 源的工具名必须在可限制目录内，
+ * 否则视为无效配置同样回落，避免锁定出一个 SDK 根本不认的工具名。
+ * platform 源不在解析层校验存在性——平台工具目录是动态的（包可被禁用/卸载），
+ * 查找不到在执行期以 workflow_tool_invoke_failed 报错并可重试更合适。
+ * kind='mcp' 节点只认 mcp 源（builtin 锁定派发与 platform 平台直调仅对 tool 节点提供，
+ * UI 也不给 mcp 节点这两个入口）。
+ */
+export function getWorkflowToolInvocationSpec(
+  config: Record<string, unknown>,
+  kind?: WorkflowNodeKind,
+): WorkflowToolInvocationSpec | null {
+  const source =
+    config.toolSource === 'mcp' ||
+    config.toolSource === 'builtin' ||
+    config.toolSource === 'platform'
+      ? config.toolSource
+      : null
+  if (source == null) return null
+  if ((source === 'builtin' || source === 'platform') && kind === 'mcp') return null
+  const toolName = typeof config.toolName === 'string' ? config.toolName.trim() : ''
+  if (toolName.length === 0) return null
+  if (source === 'mcp') {
+    const serverId = typeof config.toolServerId === 'string' ? config.toolServerId.trim() : ''
+    if (serverId.length === 0) return null
+    return { source, serverId, toolName, args: toolArgsRecordConfig(config.toolArgs) }
+  }
+  if (source === 'platform') {
+    return { source, toolName, args: toolArgsRecordConfig(config.toolArgs) }
+  }
+  if (!WORKFLOW_RESTRICTABLE_TOOL_NAMES.includes(toolName)) return null
+  return { source, toolName, args: toolArgsRecordConfig(config.toolArgs) }
+}
+
+/**
+ * 工具节点确定性调用（builtin 源）给锁定 worker 的指令：参数已在上游插值渲染完毕，
+ * 指令要求 worker 只调用该工具、按给定参数原样传参——工具面已被 metadata.toolIds 收窄到
+ * 仅剩这一个可限制工具，LLM 的自由度被压到「怎么包装结果」而不是「调什么、传什么」。
+ */
+export function buildWorkflowToolInvocationInstruction(
+  request: {
+    title: string
+    objective: string
+    inputs: Record<string, unknown>
+    config: Record<string, unknown>
+  },
+  spec: WorkflowToolInvocationSpec,
+): string {
+  const parts: string[] = [
+    `[Tool invocation]\n本节点要求确定性地调用内置工具 \`${spec.toolName}\`。请调用该工具一次完成任务，调用参数必须原样使用下方给出的 JSON（不要改写参数名、不要增删参数），除该工具外其它工具均已被禁用。完成后把工具结果作为本节点的最终输出，不要额外解释。`,
+    `Tool: ${spec.toolName}`,
+    `Arguments: ${JSON.stringify(spec.args)}`,
+  ]
+  const prompt = typeof request.config.prompt === 'string' ? request.config.prompt.trim() : ''
+  if (prompt.length > 0) parts.push(`[Node directive]\n${prompt}`)
+  if (request.objective.trim().length > 0) {
+    parts.push(`[Workflow objective]\n${request.objective.trim()}`)
+  }
+  const inputKeys = Object.keys(request.inputs)
+  if (inputKeys.length > 0) {
+    parts.push(`[Upstream inputs]\n${JSON.stringify(request.inputs)}`)
+  }
+  return parts.join('\n\n')
+}
+
+/** MCP 工具直调结果 → 节点输出文本：text 内容原样拼接，非文本块降级为可读摘要。 */
+export function formatWorkflowMcpToolResult(result: McpToolResult): string {
+  const parts: string[] = []
+  for (const item of result.content) {
+    if (item.type === 'text' && item.text != null) {
+      parts.push(item.text)
+      continue
+    }
+    if (item.type === 'image') {
+      parts.push(`[image: ${item.mimeType ?? 'unknown'}，${item.data?.length ?? 0} 字节]`)
+      continue
+    }
+    parts.push(JSON.stringify(item))
+  }
+  return parts.length > 0 ? parts.join('\n') : '(MCP 工具未返回内容)'
+}
+
+/**
+ * 平台工具直调结果（platform 源）→ 节点输出文本。两个目录的 invoke 返回形态不同且
+ * 各自内部还有适配器差异（custom 恒为 { text, meta?, traceId? }；工具包 remote-http /
+ * process 返回任意 JSON，mcp-import 为 { content: [...] }），按宽容优先级归一：
+ * string → 原样；{ text } → text；{ content: [...] } → 复用 MCP 拼接；其余 → JSON 序列化。
+ */
+export function formatWorkflowPlatformToolResult(value: unknown): string {
+  if (value == null) return '(平台工具未返回内容)'
+  if (typeof value === 'string') return value.length > 0 ? value : '(平台工具未返回内容)'
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    if (typeof record.text === 'string' && record.text.length > 0) return record.text
+    if (Array.isArray(record.content)) {
+      const formatted = formatWorkflowMcpToolResult({
+        content: record.content as McpToolResult['content'],
+        isError: false,
+      })
+      if (formatted !== '(MCP 工具未返回内容)') return formatted
+    }
+  }
+  const serialized = JSON.stringify(value, null, 2)
+  return serialized != null && serialized.length > 0 ? serialized : '(平台工具未返回内容)'
 }
 
 /**
@@ -756,4 +951,144 @@ export function resolveWorkflowArtifactExportPath(
     return { ok: false, reason: 'exportPath 超出工作区范围' }
   }
   return { ok: true, absolutePath }
+}
+
+// ─── 运行进度节点组装（workflow_progress 事件 payload） ─────────────────────
+
+/** workflow_progress 节点的展示元数据：session.service 按 worker 解析后传入。 */
+export interface WorkflowProgressNodeMetaInput {
+  nodeId: string
+  title: string
+  kind: string
+  agentId?: string
+  agentName?: string
+  modelId?: string
+}
+
+/**
+ * 解析 workflow_progress 使用的静态节点身份。
+ *
+ * 托管 workflow_run 不允许空绑定或失效绑定回落到宿主 Agent；这里必须与执行器使用
+ * 相同的 availableWorkerIds 语义，否则进度面板会把最终以 missing_agent_id 失败的节点
+ * 错误展示成由宿主 Agent 执行。
+ */
+export function buildWorkflowProgressNodeMetas(
+  nodes: Iterable<NormalizedWorkflowNode>,
+  members: Iterable<Pick<AgentItem, 'id' | 'name' | 'modelId'>>,
+): WorkflowProgressNodeMetaInput[] {
+  const membersById = new Map([...members].map((member) => [member.id, member]))
+  const availableWorkerIds = new Set(membersById.keys())
+  return [...nodes].map((node) => {
+    const agentId = getWorkflowNodeEffectiveWorkerId(node, { availableWorkerIds })
+    const member = agentId != null ? membersById.get(agentId) : undefined
+    const modelId =
+      typeof node.config.modelId === 'string' && node.config.modelId.trim().length > 0
+        ? node.config.modelId.trim()
+        : (member?.modelId ?? undefined)
+    return {
+      nodeId: node.id,
+      title: node.title,
+      kind: node.kind,
+      ...(agentId != null ? { agentId } : {}),
+      ...(member?.name != null ? { agentName: member.name } : {}),
+      ...(modelId != null ? { modelId } : {}),
+    }
+  })
+}
+
+/** 终态快照每节点输出预览的截断上限（控制事件体积）。 */
+export const WORKFLOW_PROGRESS_PREVIEW_MAX_CHARS = 400
+
+interface WorkflowProgressNodeTiming {
+  startedAt?: string
+  endedAt?: string
+  lastContent?: string
+  lastError?: { code?: string; message: string }
+}
+
+/**
+ * 把执行快照组装为 workflow_progress 事件节点列表：
+ * - 状态优先级：failedNode 命中 > completed > skipped > running > pending。
+ * - error：failedNode 的 error 优先（覆盖 deadlock 等无执行记录的失败）；否则取该节点
+ *   最后一条执行记录的 error（重试中途失败在运行中也可见）。
+ * - startedAt/endedAt：该节点首/末条执行记录的时间戳（重试多记录时取跨度）。
+ * - outputPreview：仅终态快照（terminal=true）携带，取最后一条记录 content 截断，
+ *   失败节点的 content 常含诊断信息，同样携带。
+ */
+export function buildWorkflowProgressNodes(input: {
+  metas: Iterable<WorkflowProgressNodeMetaInput>
+  executions: WorkflowAgentExecutionRecord[]
+  atomicExecutions: WorkflowAtomicNodeExecutionRecord[]
+  runningNodeIds: ReadonlySet<string>
+  completedNodeIds: ReadonlySet<string>
+  skippedNodeIds: ReadonlySet<string>
+  failedNodeId?: string
+  failedNodeError?: { code?: string; message: string }
+  terminal: boolean
+}): WorkflowProgressNode[] {
+  const timingByNode = new Map<string, WorkflowProgressNodeTiming>()
+  const touch = (
+    nodeId: string,
+    startedAt: string | undefined,
+    endedAt: string | undefined,
+    content: string | undefined,
+    error: WorkflowProgressNodeTiming['lastError'],
+  ): void => {
+    const existing = timingByNode.get(nodeId)
+    const nextStartedAt = existing?.startedAt ?? startedAt
+    const nextEndedAt = endedAt ?? existing?.endedAt
+    const nextContent = content ?? existing?.lastContent
+    const nextError = error ?? existing?.lastError
+    timingByNode.set(nodeId, {
+      ...(nextStartedAt != null ? { startedAt: nextStartedAt } : {}),
+      ...(nextEndedAt != null ? { endedAt: nextEndedAt } : {}),
+      ...(nextContent != null ? { lastContent: nextContent } : {}),
+      ...(nextError != null ? { lastError: nextError } : {}),
+    })
+  }
+  for (const record of input.executions) {
+    touch(record.nodeId, record.startedAt, record.endedAt, record.content, record.error)
+  }
+  for (const record of input.atomicExecutions) {
+    touch(record.nodeId, record.startedAt, record.endedAt, record.content, record.error)
+  }
+
+  const nodes: WorkflowProgressNode[] = []
+  for (const meta of input.metas) {
+    const timing = timingByNode.get(meta.nodeId)
+    const status: WorkflowProgressNodeStatus =
+      input.failedNodeId === meta.nodeId
+        ? 'failed'
+        : input.completedNodeIds.has(meta.nodeId)
+          ? 'completed'
+          : input.skippedNodeIds.has(meta.nodeId)
+            ? 'skipped'
+            : input.runningNodeIds.has(meta.nodeId)
+              ? 'running'
+              : 'pending'
+    const error =
+      input.failedNodeId === meta.nodeId && input.failedNodeError != null
+        ? input.failedNodeError
+        : timing?.lastError
+    const outputPreview =
+      input.terminal && timing?.lastContent != null && timing.lastContent.length > 0
+        ? timing.lastContent.length > WORKFLOW_PROGRESS_PREVIEW_MAX_CHARS
+          ? `${timing.lastContent.slice(0, WORKFLOW_PROGRESS_PREVIEW_MAX_CHARS)}…`
+          : timing.lastContent
+        : undefined
+    nodes.push({
+      nodeId: meta.nodeId,
+      title: meta.title,
+      kind: meta.kind,
+      status,
+      ...(meta.agentId != null ? { agentId: meta.agentId } : {}),
+      ...(meta.agentName != null ? { agentName: meta.agentName } : {}),
+      ...(meta.modelId != null ? { modelId: meta.modelId } : {}),
+      ...(error != null ? { error } : {}),
+      ...(outputPreview != null ? { outputPreview } : {}),
+      ...(timing?.startedAt != null ? { startedAt: timing.startedAt } : {}),
+      ...(timing?.endedAt != null ? { endedAt: timing.endedAt } : {}),
+    })
+  }
+  return nodes
 }

@@ -34,11 +34,7 @@ import {
 } from '@xyflow/react'
 import { Icons } from '../../Icons'
 import { CanvasNode, type CanvasFlowNodeData } from './CanvasNode'
-import {
-  CANVAS_EDGE_TYPE,
-  CanvasFlowEdgeRenderer,
-  type CanvasFlowEdgeData,
-} from './CanvasFlowEdge'
+import { CANVAS_EDGE_TYPE, CanvasFlowEdgeRenderer, type CanvasFlowEdgeData } from './CanvasFlowEdge'
 import { CanvasZoomControls } from './CanvasZoomControls'
 import type { CanvasNodeData } from './canvas.types'
 import { mergeFlowNodes } from './canvasStageNodeSync'
@@ -59,6 +55,10 @@ import {
 } from './canvasAlignment'
 import { absoluteToRelativeFor, resolveFlowNodeAbsoluteOrigin } from './canvasFlowNodeCoordinates'
 import { CanvasMultiSelectToolbar } from './CanvasMultiSelectToolbar'
+import {
+  CanvasMultiSelectToolbarOverlay,
+  type CanvasMultiSelectToolbarOverlayHandle,
+} from './CanvasMultiSelectToolbarOverlay'
 import { shouldDelegateNodeDoubleClickToCollapsedGroup } from './canvasStageDoubleClick'
 import { persistCanvasNodeLayoutChanges } from './canvasStageLayout'
 import { isOperationNode } from './canvas.capabilities'
@@ -957,28 +957,6 @@ function CanvasStageInner({
     [selectedNodeIdSet, snapshotNodeById],
   )
 
-  // 多选浮动工具栏：跟随选区包围盒上方的屏幕坐标 anchor，viewport 变化时 rAF 节流重算
-  const [multiSelectToolbarTick, setMultiSelectToolbarTick] = useState(0)
-  const multiSelectToolbarRafRef = useRef<number | null>(null)
-  const scheduleMultiSelectToolbarUpdate = useCallback(() => {
-    if (selectedNodeIds.length < 2) return
-    if (multiSelectToolbarRafRef.current != null) return
-    multiSelectToolbarRafRef.current = window.requestAnimationFrame(() => {
-      multiSelectToolbarRafRef.current = null
-      setMultiSelectToolbarTick((value) => value + 1)
-    })
-  }, [selectedNodeIds.length])
-  useEffect(() => {
-    setMultiSelectToolbarTick((value) => value + 1)
-  }, [selectedNodeIds])
-  useEffect(
-    () => () => {
-      if (multiSelectToolbarRafRef.current != null) {
-        window.cancelAnimationFrame(multiSelectToolbarRafRef.current)
-      }
-    },
-    [],
-  )
   const lineageSummaries = useMemo(
     () => buildLineageSummaries(groupCollapseProjection.visibleEdges),
     [groupCollapseProjection.visibleEdges],
@@ -1088,56 +1066,12 @@ function CanvasStageInner({
   const stageRef = useRef<HTMLDivElement>(null)
   const paneContextMenuRef = useRef<HTMLDivElement>(null)
   const edgeContextMenuRef = useRef<HTMLDivElement>(null)
+  const multiSelectToolbarOverlayRef = useRef<CanvasMultiSelectToolbarOverlayHandle>(null)
   const flowInstanceRef = useRef<ReactFlowInstance<
     Node<CanvasFlowNodeData>,
     Edge<CanvasFlowEdgeData>
   > | null>(null)
-  // 多选浮动工具栏：跟随选区包围盒上方的屏幕坐标 anchor，viewport/拖动变化时 rAF 节流重算。
-  // 必须在 flowInstanceRef 之后声明 —— useMemo factory 同步读取 flowInstanceRef.current，
-  // 声明在前会触发 TDZ ReferenceError（选第 2 个节点即白屏）。
-  const multiSelectToolbarGeometry = useMemo(() => {
-    void multiSelectToolbarTick
-    if (selectedNodeIds.length < 2) return null
-    if (!onAlignSelected && !onArrangeGridSelection) return null
-    const instance = flowInstanceRef.current
-    if (!instance) return null
-    const internalNodes = Array.from(selectedNodeIdSet)
-      .map((nodeId) => instance.getInternalNode(nodeId))
-      .filter((node): node is NonNullable<typeof node> => Boolean(node))
-    if (internalNodes.length < 2) return null
-    const bounds = instance.getNodesBounds(internalNodes)
-    if (!bounds || (bounds.width === 0 && bounds.height === 0)) return null
-    const stageRect = stageRef.current?.getBoundingClientRect()
-    if (!stageRect) return null
-    const centerX = bounds.x + bounds.width / 2
-    const toStagePosition = (point: { x: number; y: number }) => {
-      const screen = instance.flowToScreenPosition(point)
-      return { x: screen.x - stageRect.left, y: screen.y - stageRect.top }
-    }
-    const topScreen = toStagePosition({ x: centerX, y: bounds.y })
-    const bottomScreen = toStagePosition({ x: centerX, y: bounds.y + bounds.height })
-    // flowToScreenPosition 返回窗口坐标，而工具栏 anchor 是画布容器内的绝对定位元素，
-    // 先转换到 stage 局部坐标；再留出明确间距，避免工具栏压住选区顶部。
-    const TOOLBAR_HEIGHT = 38
-    const GAP = 24
-    const EDGE = 8
-    const stageHeight = stageRef.current?.clientHeight ?? 0
-    // 优先浮在选区正上方；当上方空间不足以容纳工具栏 + 间隙时翻转到选区下方，
-    // 避免被视口顶部 clamp 后压住最顶部的选中节点（即"位置太低/与节点重叠"的根因）。
-    const placeAbove = topScreen.y >= TOOLBAR_HEIGHT + GAP + EDGE
-    const idealTop = placeAbove ? topScreen.y - GAP - TOOLBAR_HEIGHT : bottomScreen.y + GAP
-    const top =
-      stageHeight > 0
-        ? Math.max(EDGE, Math.min(idealTop, stageHeight - TOOLBAR_HEIGHT - EDGE))
-        : idealTop
-    return { left: topScreen.x, top, placeAbove }
-  }, [
-    multiSelectToolbarTick,
-    selectedNodeIds,
-    selectedNodeIdSet,
-    onAlignSelected,
-    onArrangeGridSelection,
-  ])
+  const getFlowInstance = useCallback(() => flowInstanceRef.current, [])
   const flowNodesRef = useRef(flowNodes)
   const latestViewportRef = useRef<Viewport>(boardViewport)
   const appliedBoardViewportRef = useRef(boardId)
@@ -1618,14 +1552,12 @@ function CanvasStageInner({
     setPaneContextMenu(null)
     setEdgeContextMenu(null)
     viewportInteractingRef.current = true
-    stageRef.current?.setAttribute('data-viewport-moving', 'true')
     cancelScheduledSync()
   }, [cancelScheduledSync])
 
   const handleViewportMoveEnd = useCallback(
     (_event?: MouseEvent | TouchEvent | null, viewport?: Viewport) => {
       viewportInteractingRef.current = false
-      stageRef.current?.removeAttribute('data-viewport-moving')
       flushPendingNodesSync()
       if (viewport) notifyViewportChange(viewport)
     },
@@ -1635,9 +1567,9 @@ function CanvasStageInner({
   const handleViewportMove = useCallback(
     (_event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
       notifyViewportChange(viewport)
-      scheduleMultiSelectToolbarUpdate()
+      multiSelectToolbarOverlayRef.current?.schedulePositionUpdate()
     },
-    [notifyViewportChange, scheduleMultiSelectToolbarUpdate],
+    [notifyViewportChange],
   )
 
   const handleMinimapClick = useCallback((_event: ReactMouseEvent, position: XYPosition) => {
@@ -1658,6 +1590,7 @@ function CanvasStageInner({
       latestViewportRef.current = viewport
       void instance.setViewport(viewport, { duration: 0 })
       notifyViewportChange(viewport)
+      multiSelectToolbarOverlayRef.current?.schedulePositionUpdate()
     },
     [boardViewport, notifyViewportChange],
   )
@@ -2275,7 +2208,7 @@ function CanvasStageInner({
       node: Node<CanvasFlowNodeData>,
       draggedNodes: Node<CanvasFlowNodeData>[],
     ) => {
-      scheduleMultiSelectToolbarUpdate()
+      multiSelectToolbarOverlayRef.current?.schedulePositionUpdate()
       pendingGuideDragRef.current = draggedNodes.length > 0 ? draggedNodes : [node]
       if (guideFrameRef.current != null) return
       guideFrameRef.current = window.requestAnimationFrame(() => {
@@ -2291,7 +2224,7 @@ function CanvasStageInner({
         setAlignmentGuides(computeCanvasAlignmentGuides(nextNodes, movingNodes))
       })
     },
-    [scheduleMultiSelectToolbarUpdate],
+    [],
   )
 
   const handleNodeDragStart = useCallback(
@@ -2716,50 +2649,47 @@ function CanvasStageInner({
             </button>
           </div>
         )}
-        {selectedNodeIds.length >= 2 && multiSelectToolbarGeometry && (
-          <div
-            className="canvas-multi-select-toolbar-anchor"
-            style={{
-              position: 'absolute',
-              left: multiSelectToolbarGeometry.left,
-              top: multiSelectToolbarGeometry.top,
-              transform: 'translateX(-50%)',
-              zIndex: 'var(--z-canvas-context, 30)',
-              pointerEvents: 'auto',
-            }}
+        {selectedNodeIds.length >= 2 && (onAlignSelected || onArrangeGridSelection) && (
+          <CanvasMultiSelectToolbarOverlay
+            ref={multiSelectToolbarOverlayRef}
+            stageRef={stageRef}
+            getFlowInstance={getFlowInstance}
+            selectedNodeIds={selectedNodeIdSet}
           >
-            <CanvasMultiSelectToolbar
-              selectedCount={selectedNodeIds.length}
-              canCreateGroup={selectedContext.canCreateGroup}
-              canMergeSelectionToImage={selectedContext.canMergeSelectionToImage}
-              canBatchConfigureTasks={selectedContext.canBatchConfigureTasks}
-              canBatchSubmitTasks={selectedContext.canBatchSubmitTasks}
-              batchTaskConfigureDisabledReason={selectedContext.batchTaskConfigureDisabledReason}
-              batchTaskSubmitDisabledReason={selectedContext.batchTaskSubmitDisabledReason}
-              arranging={arranging ?? false}
-              {...(onExtractSelectionToWorkflow ? { onExtractSelectionToWorkflow } : {})}
-              {...(onConfigureSelectedTasks
-                ? {
-                    onConfigureSelectedTasks: () =>
-                      onConfigureSelectedTasks(selectedContext.batchTaskNodeIds),
-                  }
-                : {})}
-              {...(onSubmitSelectedTasks
-                ? {
-                    onSubmitSelectedTasks: () =>
-                      onSubmitSelectedTasks(selectedContext.batchTaskNodeIds),
-                  }
-                : {})}
-              {...(onAddNodesToAgent ? { onAddNodesToAgent } : {})}
-              onCreateGroup={() => onCreateGroupFromSelection()}
-              onMergeSelectionToImage={onMergeSelectionToImage}
-              onAlign={(mode) => onAlignSelected?.(mode)}
-              onArrangeGrid={(columns) => onArrangeGridSelection?.(columns)}
-              popoverSide={multiSelectToolbarGeometry.placeAbove ? 'bottom' : 'top'}
-              {...(onDuplicateSelectedNodes ? { onDuplicate: onDuplicateSelectedNodes } : {})}
-              {...(onDeleteSelectedNodes ? { onDelete: onDeleteSelectedNodes } : {})}
-            />
-          </div>
+            {(popoverSide) => (
+              <CanvasMultiSelectToolbar
+                selectedCount={selectedNodeIds.length}
+                canCreateGroup={selectedContext.canCreateGroup}
+                canMergeSelectionToImage={selectedContext.canMergeSelectionToImage}
+                canBatchConfigureTasks={selectedContext.canBatchConfigureTasks}
+                canBatchSubmitTasks={selectedContext.canBatchSubmitTasks}
+                batchTaskConfigureDisabledReason={selectedContext.batchTaskConfigureDisabledReason}
+                batchTaskSubmitDisabledReason={selectedContext.batchTaskSubmitDisabledReason}
+                arranging={arranging ?? false}
+                {...(onExtractSelectionToWorkflow ? { onExtractSelectionToWorkflow } : {})}
+                {...(onConfigureSelectedTasks
+                  ? {
+                      onConfigureSelectedTasks: () =>
+                        onConfigureSelectedTasks(selectedContext.batchTaskNodeIds),
+                    }
+                  : {})}
+                {...(onSubmitSelectedTasks
+                  ? {
+                      onSubmitSelectedTasks: () =>
+                        onSubmitSelectedTasks(selectedContext.batchTaskNodeIds),
+                    }
+                  : {})}
+                {...(onAddNodesToAgent ? { onAddNodesToAgent } : {})}
+                onCreateGroup={() => onCreateGroupFromSelection()}
+                onMergeSelectionToImage={onMergeSelectionToImage}
+                onAlign={(mode) => onAlignSelected?.(mode)}
+                onArrangeGrid={(columns) => onArrangeGridSelection?.(columns)}
+                popoverSide={popoverSide}
+                {...(onDuplicateSelectedNodes ? { onDuplicate: onDuplicateSelectedNodes } : {})}
+                {...(onDeleteSelectedNodes ? { onDelete: onDeleteSelectedNodes } : {})}
+              />
+            )}
+          </CanvasMultiSelectToolbarOverlay>
         )}
         {paneContextMenu &&
           createPortal(

@@ -43,7 +43,10 @@ import {
 } from './canvasPromptInitialization'
 import { selectCanvasMediaCapability } from './canvasMediaCapabilitySelection'
 import { canvasApi } from './canvas.api'
-import { expandCanvasInputNodes } from './canvasWorkspaceTaskInput'
+import {
+  expandCanvasInputNodes,
+  resolveCanvasPersistableInputNodeIds,
+} from './canvasWorkspaceTaskInput'
 import { readCanvasTextInputContent } from './canvasTextInputPresentation'
 import { confirmVideoSubmission, isVideoSubmissionOperation } from './canvasVideoSubmissionGate'
 import { useCanvasInputBindings } from './useCanvasInputBindings'
@@ -115,6 +118,8 @@ import {
   type CanvasDepthModelState,
 } from './canvasOperationPanelMode'
 import { resolveDepthVideoPreserveAudio } from './canvasDepthAudioPreference'
+import { resolveDepthRenderPreference } from './canvasDepthRenderPreference'
+import { CanvasDepthRenderOptions } from './CanvasDepthRenderOptions'
 import { isImageUnderstandingProvider } from './canvasPresetCenterModel'
 import {
   applyCanvasMediaInputModeToBindings,
@@ -852,6 +857,11 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
       node.data.modelParams?.preserveAudio ?? task?.modelParams?.preserveAudio,
     ),
   )
+  const [depthRender, setDepthRender] = useState(() =>
+    resolveDepthRenderPreference(
+      node.data.modelParams?.depthRender ?? task?.modelParams?.depthRender,
+    ),
+  )
   const [audioFormat, setAudioFormat] = useState<'copy' | 'mp3' | 'aac' | 'wav'>(
     (node.data.modelParams?.audioFormat as 'copy' | 'mp3' | 'aac' | 'wav' | undefined) ??
       (task?.modelParams?.audioFormat as 'copy' | 'mp3' | 'aac' | 'wav' | undefined) ??
@@ -896,6 +906,14 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
       ),
     )
   }, [node.data.modelParams?.preserveAudio, operation, task?.modelParams?.preserveAudio])
+  useEffect(() => {
+    if (operation !== 'video_depth_map') return
+    setDepthRender(
+      resolveDepthRenderPreference(
+        node.data.modelParams?.depthRender ?? task?.modelParams?.depthRender,
+      ),
+    )
+  }, [node.data.modelParams?.depthRender, operation, task?.modelParams?.depthRender])
   useEffect(() => {
     if (operation !== 'extract_audio') return
     const configuredValue = (node.data.modelParams?.audioFormat ??
@@ -1527,7 +1545,7 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
     return mergeCanvasPresetTargetModelParams(
       presetTargetId,
       operation === 'video_depth_map'
-        ? { ...modelParams, preserveAudio }
+        ? { ...modelParams, preserveAudio, depthRender }
         : operation === 'extract_audio'
           ? { ...modelParams, audioFormat }
           : modelParams,
@@ -1535,6 +1553,7 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
   }, [
     audioFormat,
     customParams,
+    depthRender,
     modelParamDraft,
     operation,
     parameterFields,
@@ -1789,7 +1808,7 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
       return item?.type === 'text' || item?.type === 'prompt'
     })
     const mediaNodeIds = new Set(mediaInputOptions.map((option) => String(option.value)))
-    const runInputNodeIds = usesExplicitMediaMode
+    const selectedRunInputNodeIds = usesExplicitMediaMode
       ? Array.from(
           new Set([
             ...executionInputBindings
@@ -1814,6 +1833,14 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
             ...materializedPromptNodeIds,
           ]),
         )
+    // 上游任务节点的产物未物化为画布节点时，输入展开链路给出 operation-output:* 虚拟视图 id；
+    // 持久化连线与任务血缘必须指向真实物理节点，否则 runOperationNode 删边重建后
+    // 产生悬空边、画布连线丢失。执行输入编译仍按产物视图（bindings / prompt 文档引用）进行。
+    const runInputNodeIds = resolveCanvasPersistableInputNodeIds(
+      selectedRunInputNodeIds,
+      sourceInputNodes,
+      snapshot,
+    )
     if (isVideoSubmissionOperation(operation)) {
       const proceed = await confirmVideoSubmission({
         prompt: prompt.trim(),
@@ -1904,6 +1931,7 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
     submitting,
     selectedSkillIds,
     snapshot,
+    sourceInputNodes,
     expandedSourceInputNodes,
     explicitFrameNodeIds,
     firstFrameNodeId,
@@ -2381,6 +2409,15 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
                     }}
                   />
                 </div>
+                <CanvasDepthRenderOptions
+                  value={depthRender}
+                  disabled={running}
+                  compact
+                  onChange={(next) => {
+                    markConfigurationTouched()
+                    setDepthRender(next)
+                  }}
+                />
               </>
             )}
             {operation === 'extract_audio' && (
@@ -2846,6 +2883,14 @@ export const CanvasOperationPanel = memo(function CanvasOperationPanel({
                 开启后会将原视频音轨保留到转换结果中。
               </div>
             </div>
+            <CanvasDepthRenderOptions
+              value={depthRender}
+              disabled={running}
+              onChange={(next) => {
+                markConfigurationTouched()
+                setDepthRender(next)
+              }}
+            />
           </>
         )}
 

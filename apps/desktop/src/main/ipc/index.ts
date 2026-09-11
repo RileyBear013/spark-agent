@@ -16,6 +16,7 @@ import { registerOutcomeRoomIpc } from './registerOutcomeRoomIpc.js'
 import { registerTeamP1Ipc } from './registerTeamP1Ipc.js'
 import { registerTeamOutcomeIpc } from './registerTeamOutcomeIpc.js'
 import { createWorkspaceInfoMapper } from './workspace-info.js'
+import { resolveSessionScopedWorkspaceRoot } from './sessionWorkspaceRoot.js'
 import { readTextFileForRenderer } from './file-read.js'
 import {
   buildCanvasMediaProviderPrompt,
@@ -168,6 +169,14 @@ import {
   MemoryStoreService,
   MemoryWriterService,
   EmbeddingService,
+  ensureSessionWorkspaceRootPath,
+  NO_PROJECT_WORKSPACE_NAME,
+  detectWorkflowConditionReferenceErrors,
+  detectWorkflowGraphCycles,
+  formatWorkflowConditionReferenceError,
+  formatWorkflowCycleError,
+  normalizeWorkflowGraph,
+  SCHEDULED_TASK_SESSION_TITLE_PREFIX,
 } from '@spark/agent-runtime'
 import type {
   MediaProviderProfile as MediaProviderProfileRuntime,
@@ -226,6 +235,7 @@ import type {
   CanvasMediaPreviewTemplateInvocationResponse,
   MediaCapabilityId,
   SessionId,
+  RemoteConnectionConfig,
 } from '@spark/protocol'
 import type {
   CanvasAssetDownloadBatchResultItem,
@@ -234,6 +244,7 @@ import type {
   SessionAttachment,
   SessionListResponse,
   SystemNotificationNavigateRequest,
+  WorkflowPlatformToolsResponse,
 } from '@spark/protocol'
 import {
   MediaModelManifestSchema,
@@ -269,13 +280,14 @@ import { getUpdateService } from '../services/UpdateService.js'
 import { detectExternalTools, openProjectInTool } from '../services/ExternalToolService.js'
 import { getTerminalService } from '../services/TerminalService.js'
 import { registerTerminalIpc } from './registerTerminalIpc.js'
-import { registerDataIpc } from './registerDataIpc.js'
 import { registerProviderFilesIpc } from './registerProviderFilesIpc.js'
 import { registerVideoChannelTaskIpc } from './registerVideoChannelTaskIpc.js'
 import { registerCanvasMediaRepollIpc } from './registerCanvasMediaRepollIpc.js'
 import { registerFontAssetIpc } from './registerFontAssetIpc.js'
 import { registerVoiceIpc } from './registerVoiceIpc.js'
 import { registerCanvasWorkflowIpc } from './registerCanvasWorkflowIpc.js'
+import { registerWorkflowRunIpc } from './registerWorkflowRunIpc.js'
+import { registerWorkflowTestRunIpc } from './registerWorkflowTestRunIpc.js'
 import { registerCanvasDepthTaskIpc } from './registerCanvasDepthTaskIpc.js'
 import { registerCanvasAudioExtractIpc } from './registerCanvasAudioExtractIpc.js'
 import { registerCanvasFrameExtractIpc } from './registerCanvasFrameExtractIpc.js'
@@ -293,6 +305,7 @@ import { getPluginManager, registerPluginIpc } from './registerPluginIpc.js'
 import { registerFilePreviewIpc } from './registerFilePreviewIpc.js'
 import { registerFileOperationsIpc } from './registerFileOperationsIpc.js'
 import { registerPromptLibraryPackageIpc } from './registerPromptLibraryPackageIpc.js'
+import { registerWorkflowBundleIpc } from './registerWorkflowBundleIpc.js'
 import { registerPastedTextIpc } from './registerPastedTextIpc.js'
 import { registerSessionImageOptimizerIpc } from './registerSessionImageOptimizerIpc.js'
 import { createComputerUseMcpProvider } from '../services/computer-use/ComputerUseMcpProvider.js'
@@ -301,7 +314,9 @@ import { sparkMediaUploader } from '../services/media/SparkMediaUploader.js'
 import { registerPlatformModelIpc } from '../services/PlatformModel/registerPlatformModelIpc.js'
 import {
   getWorkspaceBranches,
+  getWorkspaceGitCommitFiles,
   getWorkspaceGitFileDiff,
+  getWorkspaceGitFileHistory,
   getWorkspaceGitLog,
   getWorkspaceGitStatus,
   discardWorkspacePaths,
@@ -367,9 +382,10 @@ import type {
 } from './remote-command-utils.js'
 import { registerGitHubConnectorIpc } from '../services/GitHubConnector/registerGitHubConnectorIpc.js'
 import { registerPluginRuntimeIpc } from '../services/PluginRuntime/registerPluginRuntimeIpc.js'
-import { registerSubAppIpc } from './registerSubAppIpc.js'
+import { registerSubAppPlatformIpc } from './registerSubAppPlatformIpc.js'
 import { getCustomToolService, registerCustomToolsIpc } from './registerCustomToolsIpc.js'
 import { registerToolPackagesIpc } from './registerToolPackagesIpc.js'
+import { createDesktopToolPackageCapabilities } from './toolPackageExtendedCapabilities.js'
 import { registerHtmlRuntimeDocIpc } from './registerHtmlRuntimeDocIpc.js'
 import { getDatabase, getDatabasePath } from '../db.js'
 import { getMainWindow } from '../windows/index.js'
@@ -394,7 +410,6 @@ const canvasSnapshotWriteCoordinator = new CanvasSnapshotWriteCoordinator()
 const AUTO_WINDOW_WIDTH_TOLERANCE = 12
 const RUNTIME_PERMISSION_SETTINGS_CATEGORY = 'runtime-permissions'
 const RUNTIME_PERMISSION_SETTINGS_KEY = 'defaults'
-const NO_PROJECT_WORKSPACE_NAME = '不使用项目'
 const skillInstallStatusByKey = new Map<string, SkillInstallStatusItem>()
 
 function skillInstallStatusKey(source: SkillInstallJobSource, slug: string): string {
@@ -457,11 +472,11 @@ const browserAutomationMcpProvider: BrowserAutomationMcpProvider = async (
   }
 }
 
+const computerUseAgentController = new ComputerUseAgentController({
+  resolveDecisionModel: (sessionId) => getSessionService().resolveComputerDecisionModel(sessionId),
+})
 const computerUseMcpProvider: ComputerUseMcpProvider = createComputerUseMcpProvider({
-  controller: new ComputerUseAgentController({
-    resolveDecisionModel: (sessionId) =>
-      getSessionService().resolveComputerDecisionModel(sessionId),
-  }),
+  controller: computerUseAgentController,
 })
 
 let autoWindowWidthState: { baselineWidth: number; managedWidth: number } | null = null
@@ -1548,7 +1563,13 @@ async function ensureSessionWorkspacePaths(sessionId: string): Promise<void> {
   const session = sessionRepo.get(sessionId)
   if (session == null) return
   const workspaceIds = sessionRepo.getWorkspaceIds(sessionId)
-  await Promise.all(workspaceIds.map((workspaceId) => ensureNoProjectWorkspacePath(workspaceId)))
+  await Promise.all(
+    workspaceIds.map(async (workspaceId) => {
+      await ensureNoProjectWorkspacePath(workspaceId)
+      const workspace = new WorkspaceRepository(getDatabase()).get(workspaceId)
+      if (workspace != null) await ensureSessionWorkspaceRootPath(workspace, sessionId)
+    }),
+  )
 }
 
 /**
@@ -1889,12 +1910,25 @@ function mapTaskPermissionMode(
     mode === 'claude-bypass' ||
     mode === 'codex-default' ||
     mode === 'codex-auto-review' ||
-    mode === 'codex-full-access'
+    mode === 'codex-full-access' ||
+    mode === 'spark-default' ||
+    mode === 'spark-accept-edits' ||
+    mode === 'spark-plan' ||
+    mode === 'spark-bypass' ||
+    mode === 'spark-auto'
   ) {
     return mode
   }
-  if (mode === 'bypass') return adapter === 'codex' ? 'codex-full-access' : 'claude-bypass'
-  if (mode === 'auto') return adapter === 'codex' ? 'codex-auto-review' : 'claude-auto'
+  if (mode === 'bypass') {
+    if (adapter === 'codex') return 'codex-full-access'
+    if (adapter === 'spark') return 'spark-bypass'
+    return 'claude-bypass'
+  }
+  if (mode === 'auto') {
+    if (adapter === 'codex') return 'codex-auto-review'
+    if (adapter === 'spark') return 'spark-auto'
+    return 'claude-auto'
+  }
   return undefined
 }
 
@@ -1984,6 +2018,10 @@ const scheduledTaskExecutor: TaskExecutorFn = async (params) => {
       {
         getSession: (sessionId) => sessionRepo.get(sessionId),
         submitTurn: (turn) => sessionService.submitTurn(turn),
+        renameSessionTitle: (sessionId, title) => {
+          sessionRepo.updateTitle(sessionId, title)
+          pushStreamEvent('stream:session:renamed', { sessionId, title })
+        },
       },
     )
   }
@@ -2014,7 +2052,7 @@ const scheduledTaskExecutor: TaskExecutorFn = async (params) => {
     ...(workspaceId != null ? { workspaceId } : {}),
     ...(explicitAgentAdapter != null ? { agentAdapter: explicitAgentAdapter } : {}),
     ...(explicitPermissionMode != null ? { permissionMode: explicitPermissionMode } : {}),
-    title: `[⏰] ${params.taskName}`,
+    title: `${SCHEDULED_TASK_SESSION_TITLE_PREFIX}${params.taskName}`,
   })
 
   // Notify renderer to refresh session list (same as session:create IPC handler)
@@ -2143,7 +2181,14 @@ function getRuntimePermissionDefaults(): {
 function readRuntimeAgentAdapter(value: unknown): SessionAgentAdapter {
   if (value != null && typeof value === 'object' && 'adapter' in value) {
     const adapter = (value as { adapter?: unknown }).adapter
-    if (adapter === 'claude' || adapter === 'claude-sdk' || adapter === 'codex') return adapter
+    if (
+      adapter === 'claude' ||
+      adapter === 'claude-sdk' ||
+      adapter === 'codex' ||
+      adapter === 'spark'
+    ) {
+      return adapter
+    }
   }
   return 'claude-sdk'
 }
@@ -2156,7 +2201,9 @@ function readRuntimePermissionMode(
     const mode = (value as { permissionMode?: unknown }).permissionMode
     if (typeof mode === 'string' && isPermissionModeForAdapter(mode, adapter)) return mode
   }
-  return adapter === 'codex' ? 'codex-default' : 'claude-ask'
+  if (adapter === 'codex') return 'codex-default'
+  if (adapter === 'spark') return 'spark-default'
+  return 'claude-ask'
 }
 
 function isPermissionModeForAdapter(
@@ -2166,6 +2213,16 @@ function isPermissionModeForAdapter(
   if (adapter === 'codex') {
     return (
       value === 'codex-default' || value === 'codex-auto-review' || value === 'codex-full-access'
+    )
+  }
+  if (adapter === 'spark') {
+    return (
+      value === 'spark-default' ||
+      value === 'spark-auto' ||
+      value === 'spark-bypass' ||
+      // 存量会话兼容：旧档位仍被识别，UI/引擎映射会回落到手动审批。
+      value === 'spark-accept-edits' ||
+      value === 'spark-plan'
     )
   }
   return (
@@ -2315,8 +2372,15 @@ function handleRemoteTurnEvent(event: Parameters<SessionEventHandler>[0]): void 
       })
   } else if (event.type === 'agent_error') {
     remoteTurnTargets.delete(event.turnId)
+    const commandPrefix = getRemoteConnectionService()
+      .list()
+      .connections.find((connection) => connection.id === target.connectionId)?.commandPrefix
     void getRemoteConnectionService()
-      .sendReply(target.connectionId, target.externalId, buildRemoteErrorGuidance(event.message))
+      .sendReply(
+        target.connectionId,
+        target.externalId,
+        buildRemoteErrorGuidance(event.message, commandPrefix),
+      )
       .catch((err) => {
         log.warn(`Failed to send remote error reply: ${String(err)}`)
       })
@@ -2506,11 +2570,12 @@ function getSessionService(): SessionService {
  * 按来源解析导入会话使用的 Provider / adapter：
  *   claude-code → 本地 Claude CLI provider（不可用则任一 anthropic / 默认 provider）
  *   codex       → 本地 Codex CLI provider（不可用则任一 openai / 默认 provider）
- *   zcode       → 回落用户默认 Provider（SparkWork 无 zcode 执行器，续聊走默认引擎；
- *                 anthropic 型默认给 claude 内核，否则 codex 内核）
+ *   zcode       → 按会话后端引擎（providerHint）：claude→claude 分支、codex→codex 分支、
+ *                 glm / 未知→claude-sdk + anthropic fallback（GLM coding plan 兼容 anthropic 协议）
  */
 async function resolveImportProvider(
   source: HistoryImportSource,
+  providerHint?: string,
 ): Promise<ImportProviderResolution> {
   const svc = getProviderService()
   const profiles = await svc.listProviders()
@@ -2519,7 +2584,7 @@ async function resolveImportProvider(
     profiles.find((p) => p.isDefault) ??
     profiles[0]
 
-  if (source === 'claude-code') {
+  if (source === 'claude-code' || (source === 'zcode' && providerHint === 'claude')) {
     let profileId: string | undefined
     if (await svc.isLocalCliAvailable()) {
       profileId = (await svc.ensureLocalCliProvider()).id
@@ -2534,30 +2599,23 @@ async function resolveImportProvider(
     }
   }
 
-  if (source === 'zcode') {
-    const profile = profiles.find((p) => p.isDefault) ?? profiles[0]
-    if (profile == null) throw new Error('没有可用的 Provider，请先在「Providers」中添加')
-    return profile.provider === 'anthropic'
-      ? {
-          providerProfileId: profile.id,
-          agentAdapter: 'claude-sdk',
-          permissionMode: 'claude-ask',
-        }
-      : {
-          providerProfileId: profile.id,
-          agentAdapter: 'codex',
-          permissionMode: 'codex-default',
-        }
+  if (source === 'codex' || (source === 'zcode' && providerHint === 'codex')) {
+    let profileId: string | undefined
+    if (await svc.isLocalCodexCliAvailable()) {
+      profileId = (await svc.ensureLocalCodexCliProvider()).id
+    } else {
+      profileId = pickFallback('openai')?.id
+    }
+    if (profileId == null) throw new Error('没有可用的 Provider，请先在「Providers」中添加')
+    return { providerProfileId: profileId, agentAdapter: 'codex', permissionMode: 'codex-default' }
   }
 
-  let profileId: string | undefined
-  if (await svc.isLocalCodexCliAvailable()) {
-    profileId = (await svc.ensureLocalCodexCliProvider()).id
-  } else {
-    profileId = pickFallback('openai')?.id
-  }
+  // zcode 的 glm / 未知后端：续聊走 claude-sdk + anthropic 协议 fallback
+  // （GLM coding plan 的 anthropic 兼容端点是 zcode 的默认后端形态）。
+  // 不复用本地 Claude CLI provider——其登录态与 zcode 会话并不同源。
+  const profileId = pickFallback('anthropic')?.id
   if (profileId == null) throw new Error('没有可用的 Provider，请先在「Providers」中添加')
-  return { providerProfileId: profileId, agentAdapter: 'codex', permissionMode: 'codex-default' }
+  return { providerProfileId: profileId, agentAdapter: 'claude-sdk', permissionMode: 'claude-ask' }
 }
 
 /** 构造一次性 HistoryImportService（可选进度回调） */
@@ -2711,8 +2769,26 @@ function parseRemoteCommand(
   return { name: name.toLowerCase(), args, text: body }
 }
 
+function formatRemoteCommand(
+  connection: Pick<RemoteConnectionConfig, 'commandPrefix'>,
+  name: string,
+  argument?: string,
+): string {
+  const prefix = connection.commandPrefix.trim() || '/'
+  return `${prefix}${name}${argument == null ? '' : ` ${argument}`}`
+}
+
+function formatRemoteCommandUsage(
+  usage: string,
+  connection: Pick<RemoteConnectionConfig, 'commandPrefix'>,
+): string {
+  const prefix = connection.commandPrefix.trim() || '/'
+  return usage.replace(/^\/([a-z][a-z-]*)/iu, `${prefix}$1`)
+}
+
 const REMOTE_SELECTION_CACHE_TTL_MS = 10 * 60_000
 const remoteSelectionCache = new Map<string, { expiresAt: number; rows: RemoteSelectionRow[] }>()
+const remoteSelectionActive = new Map<string, { kind: RemoteSelectionKind; expiresAt: number }>()
 const remoteAuditLog: Array<{
   at: string
   connectionId: string
@@ -2727,10 +2803,13 @@ function cacheRemoteSelection(
   kind: RemoteSelectionKind,
   rows: RemoteSelectionRow[],
 ): void {
+  const expiresAt = Date.now() + REMOTE_SELECTION_CACHE_TTL_MS
   remoteSelectionCache.set(`${connectionId}:${kind}`, {
-    expiresAt: Date.now() + REMOTE_SELECTION_CACHE_TTL_MS,
+    expiresAt,
     rows,
   })
+  if (rows.length === 0) remoteSelectionActive.delete(connectionId)
+  else remoteSelectionActive.set(connectionId, { kind, expiresAt })
   if (remoteSelectionCache.size > 200) {
     for (const [key, value] of remoteSelectionCache) {
       if (value.expiresAt < Date.now()) remoteSelectionCache.delete(key)
@@ -2745,6 +2824,28 @@ function getCachedRemoteSelection(
   const cached = remoteSelectionCache.get(`${connectionId}:${kind}`)
   if (cached == null || cached.expiresAt < Date.now()) return null
   return cached.rows
+}
+
+function getActiveRemoteSelectionKind(connectionId: string): RemoteSelectionKind | null {
+  const active = remoteSelectionActive.get(connectionId)
+  if (active == null || active.expiresAt < Date.now()) {
+    if (active != null) remoteSelectionActive.delete(connectionId)
+    return null
+  }
+  if (getCachedRemoteSelection(connectionId, active.kind) == null) {
+    remoteSelectionActive.delete(connectionId)
+    return null
+  }
+  return active.kind
+}
+
+const REMOTE_SELECTION_COMMANDS: Record<RemoteSelectionKind, string> = {
+  providers: 'use-provider',
+  models: 'use-model',
+  agents: 'use-agent',
+  sessions: 'use-session',
+  workspaces: 'new-session',
+  windows: 'focus',
 }
 
 function appendRemoteAudit(entry: Omit<(typeof remoteAuditLog)[number], 'at'>): void {
@@ -2798,6 +2899,17 @@ function formatRemoteSessionStatus(status: RemoteSessionStatus): string {
   return '空闲'
 }
 
+function formatRemoteSelectionList(
+  rows: RemoteSelectionRow[],
+  empty: string,
+  kindLabel: string,
+  useCommand: string,
+): string {
+  const list = formatRows(rows, empty)
+  if (rows.length === 0) return list
+  return `${list}\n\n发送序号即可选择${kindLabel}；也可发送 ${useCommand} <序号|名称>。`
+}
+
 async function listRemoteSessionRows(status?: RemoteSessionStatus): Promise<{
   rows: RemoteSelectionRow[]
   total: number
@@ -2837,12 +2949,12 @@ async function executeRemoteCommand(
     if (connection.capabilities[capability]) return null
     const hint =
       capability === 'switchSession'
-        ? '请在设置中启用会话切换能力；启用后可使用 /sessions 和 /use-session。'
+        ? `请在设置中启用会话切换能力；启用后可使用 ${formatRemoteCommand(connection, 'sessions')} 和 ${formatRemoteCommand(connection, 'use-session')}。`
         : capability === 'switchModel'
-          ? '请在设置中启用模型切换能力；启用后可使用 /providers、/models 和 /use-model。'
+          ? `请在设置中启用模型切换能力；启用后可使用 ${formatRemoteCommand(connection, 'providers')}、${formatRemoteCommand(connection, 'models')} 和 ${formatRemoteCommand(connection, 'use-model')}。`
           : capability === 'switchAgent'
-            ? '请在设置中启用 Agent 切换能力；启用后可使用 /agents 和 /use-agent。'
-            : '请在设置中启用对应能力，或发送 /help 查看当前连接可用命令。'
+            ? `请在设置中启用 Agent 切换能力；启用后可使用 ${formatRemoteCommand(connection, 'agents')} 和 ${formatRemoteCommand(connection, 'use-agent')}。`
+            : `请在设置中启用对应能力，或发送 ${formatRemoteCommand(connection, 'help')} 查看当前连接可用命令。`
     return { ok: false, title: '功能未授权', text: `该连接没有启用 ${capability} 能力。\n${hint}` }
   }
 
@@ -2871,19 +2983,22 @@ async function executeRemoteCommand(
               .map((cmd) => {
                 const enabled =
                   cmd.capability === 'system' || connection.capabilities[cmd.capability]
-                return `${enabled ? '·' : '·（未授权）'} ${cmd.usage} - ${cmd.description}`
+                return `${enabled ? '·' : '·（未授权）'} ${formatRemoteCommandUsage(cmd.usage, connection)} - ${cmd.description}`
               })
             return `${group}\n${lines.join('\n')}`
           })
           .join('\n\n') +
-        '\n\n示例：/providers 后发送 /use-provider 2；也可发送 /use-provider 智谱 GLM Coding Plan 或完整 ID。',
+        `\n\n示例：${formatRemoteCommand(connection, 'providers')} 后发送 ${formatRemoteCommand(connection, 'use-provider', '2')}；也可发送 ${formatRemoteCommand(connection, 'use-provider', '智谱 GLM Coding Plan')} 或完整 ID。`,
       ...(connection.capabilities.runCommands
         ? {
             actions: [
-              { label: '查看会话', command: '/sessions' },
-              { label: '查看运行中', command: '/sessions running' },
-              { label: '查看模型', command: '/models' },
-              { label: '查看 Provider', command: '/providers' },
+              { label: '查看会话', command: formatRemoteCommand(connection, 'sessions') },
+              {
+                label: '查看运行中',
+                command: formatRemoteCommand(connection, 'sessions', 'running'),
+              },
+              { label: '查看模型', command: formatRemoteCommand(connection, 'models') },
+              { label: '查看 Provider', command: formatRemoteCommand(connection, 'providers') },
             ],
           }
         : {}),
@@ -2915,7 +3030,7 @@ async function executeRemoteCommand(
   if (command.name === 'sessions') {
     const blocked = requireCapability('switchSession')
     if (blocked != null) return blocked
-    const filter = parseRemoteSessionFilter(command.args)
+    const filter = parseRemoteSessionFilter(command.args, connection.commandPrefix)
     if (filter.error != null) {
       return {
         ok: false,
@@ -2934,9 +3049,9 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: `主机会话 · ${statusText}`,
-      text: `${formatRows(visibleRows, '暂无符合条件的会话')}${suffix}`,
+      text: `${formatRemoteSelectionList(visibleRows, '暂无符合条件的会话', '会话', formatRemoteCommand(connection, 'use-session'))}${suffix}`,
       ...(connection.capabilities.runCommands
-        ? { actions: buildRemoteSessionActions(visibleRows) }
+        ? { actions: buildRemoteSessionActions(visibleRows, connection.commandPrefix) }
         : {}),
     }
   }
@@ -2949,14 +3064,14 @@ async function executeRemoteCommand(
       return {
         ok: false,
         title: '缺少目标会话',
-        text: '用法：/use-session <序号|名称|sessionId>。请先发送 /sessions 查看会话。',
+        text: `用法：${formatRemoteCommand(connection, 'use-session', '<序号|名称|sessionId>')}。请先发送 ${formatRemoteCommand(connection, 'sessions')} 查看会话。`,
       }
     }
     const result = await listRemoteSessionRows()
     const rows = result.rows
     const resolved = resolveRemoteSelection(target, rows, {
       kindLabel: '会话',
-      listCommand: '/sessions',
+      listCommand: formatRemoteCommand(connection, 'sessions'),
       cachedRows: getCachedRemoteSelection(connection.id, 'sessions'),
     })
     if (!resolved.ok) return resolved
@@ -2964,7 +3079,7 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: '已切换默认会话',
-      text: `${resolved.row.label}\n${resolved.row.id}\n\n后续手机消息会继续进入该会话。发送 /status 可确认当前默认会话。`,
+      text: `${resolved.row.label}\n${resolved.row.id}\n\n后续手机消息会继续进入该会话。发送 ${formatRemoteCommand(connection, 'status')} 可确认当前默认会话。`,
     }
   }
 
@@ -2981,12 +3096,17 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: '模型配置',
-      text: formatRows(rows, '暂无模型配置'),
+      text: formatRemoteSelectionList(
+        rows,
+        '暂无模型配置',
+        '模型',
+        formatRemoteCommand(connection, 'use-model'),
+      ),
       ...(connection.capabilities.runCommands
         ? {
-            actions: rows.slice(0, 6).map((row, index) => ({
+            actions: rows.slice(0, 6).map((row) => ({
               label: `切换 ${row.label}`,
-              command: `/use-model ${index + 1}`,
+              command: formatRemoteCommand(connection, 'use-model', row.id),
               style: 'primary' as const,
             })),
           }
@@ -3003,12 +3123,17 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: 'Provider 配置',
-      text: formatRows(rows, '暂无 Provider'),
+      text: formatRemoteSelectionList(
+        rows,
+        '暂无 Provider',
+        'Provider',
+        formatRemoteCommand(connection, 'use-provider'),
+      ),
       ...(connection.capabilities.runCommands
         ? {
-            actions: rows.slice(0, 6).map((row, index) => ({
+            actions: rows.slice(0, 6).map((row) => ({
               label: `切换 ${row.label}`,
-              command: `/use-provider ${index + 1}`,
+              command: formatRemoteCommand(connection, 'use-provider', row.id),
               style: 'primary' as const,
             })),
           }
@@ -3025,12 +3150,17 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: 'Agent',
-      text: formatRows(rows, '暂无 Agent'),
+      text: formatRemoteSelectionList(
+        rows,
+        '暂无 Agent',
+        'Agent',
+        formatRemoteCommand(connection, 'use-agent'),
+      ),
       ...(connection.capabilities.runCommands
         ? {
-            actions: rows.slice(0, 6).map((row, index) => ({
+            actions: rows.slice(0, 6).map((row) => ({
               label: `切换 ${row.label}`,
-              command: `/use-agent ${index + 1}`,
+              command: formatRemoteCommand(connection, 'use-agent', row.id),
               style: 'primary' as const,
             })),
           }
@@ -3049,7 +3179,12 @@ async function executeRemoteCommand(
     return {
       ok: true,
       title: '工作区',
-      text: formatRows(rows, '暂无工作区'),
+      text: formatRemoteSelectionList(
+        rows,
+        '暂无工作区',
+        '工作区',
+        formatRemoteCommand(connection, 'new-session'),
+      ),
     }
   }
 
@@ -3065,7 +3200,7 @@ async function executeRemoteCommand(
         .map((item) => ({ id: item.id, label: item.name, meta: item.rootPath }))
       const resolved = resolveRemoteSelection(workspaceInput, rows, {
         kindLabel: '工作区',
-        listCommand: '/workspaces',
+        listCommand: formatRemoteCommand(connection, 'workspaces'),
         cachedRows: getCachedRemoteSelection(connection.id, 'workspaces'),
       })
       if (!resolved.ok) return resolved
@@ -3080,7 +3215,11 @@ async function executeRemoteCommand(
     if (blocked != null) return blocked
     const rootPath = command.text.replace(/^open-workspace\s*/i, '').trim()
     if (rootPath.length === 0)
-      return { ok: false, title: '缺少项目路径', text: '用法：/open-workspace <path>' }
+      return {
+        ok: false,
+        title: '缺少项目路径',
+        text: `用法：${formatRemoteCommand(connection, 'open-workspace', '<path>')}`,
+      }
     const workspace = await getWorkspaceService().openWorkspace(rootPath, undefined, {
       create: false,
     })
@@ -3103,10 +3242,10 @@ async function executeRemoteCommand(
     if (target.length === 0) {
       const listCommand =
         command.name === 'use-model'
-          ? '/models'
+          ? formatRemoteCommand(connection, 'models')
           : command.name === 'use-provider'
-            ? '/providers'
-            : '/agents'
+            ? formatRemoteCommand(connection, 'providers')
+            : formatRemoteCommand(connection, 'agents')
       return executeRemoteCommand(connectionId, listCommand, sessionId)
     }
     let resolved: { ok: true; row: RemoteSelectionRow } | { ok: false; title: string; text: string }
@@ -3118,7 +3257,7 @@ async function executeRemoteCommand(
       }))
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: 'Provider',
-        listCommand: '/providers',
+        listCommand: formatRemoteCommand(connection, 'providers'),
         cachedRows: getCachedRemoteSelection(connection.id, 'providers'),
       })
     } else if (command.name === 'use-model') {
@@ -3131,7 +3270,7 @@ async function executeRemoteCommand(
         }))
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: '模型',
-        listCommand: '/models',
+        listCommand: formatRemoteCommand(connection, 'models'),
         cachedRows: getCachedRemoteSelection(connection.id, 'models'),
       })
     } else {
@@ -3145,7 +3284,7 @@ async function executeRemoteCommand(
         }))
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: 'Agent',
-        listCommand: '/agents',
+        listCommand: formatRemoteCommand(connection, 'agents'),
         cachedRows: getCachedRemoteSelection(connection.id, 'agents'),
       })
     }
@@ -3170,7 +3309,11 @@ async function executeRemoteCommand(
     const blocked = requireCapability('manageRuntime')
     if (blocked != null) return blocked
     if (sessionId == null)
-      return { ok: false, title: '缺少默认会话', text: '请先使用 /use-session 绑定会话。' }
+      return {
+        ok: false,
+        title: '缺少默认会话',
+        text: `请先使用 ${formatRemoteCommand(connection, 'use-session')} 绑定会话。`,
+      }
     const queue = getSessionService().getQueueState({ sessionId })
     return {
       ok: true,
@@ -3188,7 +3331,7 @@ async function executeRemoteCommand(
       .reverse()
       .map(
         (item, index) =>
-          `${index + 1}. ${item.at} · /${item.command} · ${item.ok ? '成功' : `失败：${item.error ?? '未知错误'}`}${item.target != null ? ` · ${item.target}` : ''}`,
+          `${index + 1}. ${item.at} · ${formatRemoteCommand(connection, item.command)} · ${item.ok ? '成功' : `失败：${item.error ?? '未知错误'}`}${item.target != null ? ` · ${item.target}` : ''}`,
       )
     return { ok: true, title: '远程审计', text: rows.join('\n') || '暂无远程命令记录' }
   }
@@ -3197,7 +3340,11 @@ async function executeRemoteCommand(
     const blocked = requireCapability('manageRuntime')
     if (blocked != null) return blocked
     if (sessionId == null)
-      return { ok: false, title: '缺少默认会话', text: '请先使用 /use-session 绑定会话。' }
+      return {
+        ok: false,
+        title: '缺少默认会话',
+        text: `请先使用 ${formatRemoteCommand(connection, 'use-session')} 绑定会话。`,
+      }
     const cancelled = await getSessionService().cancelTurn(sessionId)
     return { ok: true, title: cancelled.cancelled ? '已取消' : '没有可取消任务', text: sessionId }
   }
@@ -3223,7 +3370,7 @@ async function executeRemoteCommand(
       text:
         rows.length > 0
           ? formatRows(rows, '暂无窗口')
-          : '当前未找到可观察窗口。远程截图/图像回传将在后续渠道适配中启用。',
+          : `当前未找到可观察窗口。远程截图/图像回传将在后续渠道适配中启用。发送 ${formatRemoteCommand(connection, 'help')} 查看可用命令。`,
     }
   }
 
@@ -3233,7 +3380,7 @@ async function executeRemoteCommand(
     return {
       ok: false,
       title: '桌面控制需要原生适配',
-      text: '已预留权限和命令入口；当前版本仅开放 /screen 与 /windows 观察能力，点击/输入/快捷键需接入平台级安全执行器后启用。',
+      text: `已预留权限和命令入口；当前版本仅开放 ${formatRemoteCommand(connection, 'screen')} 与 ${formatRemoteCommand(connection, 'windows')} 观察能力，点击/输入/快捷键需接入平台级安全执行器后启用。`,
     }
   }
 
@@ -3251,9 +3398,15 @@ async function executeRemoteCommand(
       return {
         ok: false,
         title: '缺少默认会话',
-        text: '请先使用 /use-session <sessionId> 绑定会话。',
+        text: `请先使用 ${formatRemoteCommand(connection, 'use-session', '<sessionId>')} 绑定会话。`,
       }
-    if (text.length === 0) return { ok: false, title: '消息为空', text: '用法：/send <message>' }
+    if (text.length === 0) {
+      return {
+        ok: false,
+        title: '消息为空',
+        text: `用法：${formatRemoteCommand(connection, 'send', '<message>')}`,
+      }
+    }
     const result = await getSessionService().sendTurn({
       sessionId,
       message: text,
@@ -3276,33 +3429,54 @@ async function executeRemoteCommand(
     ok: false,
     error: 'unknown-command',
   })
-  return { ok: false, title: '未知命令', text: '发送 /help 查看可用命令。' }
+  return {
+    ok: false,
+    title: '未知命令',
+    text: `发送 ${formatRemoteCommand(connection, 'help')} 查看可用命令。`,
+  }
 }
 
 async function handleRemoteInboundMessage(
   message: RemoteInboundMessage,
 ): Promise<RemoteInboundResponse | void> {
   const prefix = message.connection.commandPrefix.trim() || '/'
-  const isCommandMessage = message.text.trim().startsWith(prefix)
-  if (isCommandMessage) {
+  const trimmedText = message.text.trim()
+  const isCommandMessage = trimmedText.startsWith(prefix)
+  const activeSelectionKind =
+    !isCommandMessage && /^\d+$/.test(trimmedText)
+      ? getActiveRemoteSelectionKind(message.connection.id)
+      : null
+  if (isCommandMessage || activeSelectionKind != null) {
     if (!message.connection.capabilities.runCommands) {
       return {
         title: '功能未授权',
-        text: '该连接没有启用远程命令能力。请在设置中启用后发送 /help 查看可用操作。',
+        text: `该连接没有启用远程命令能力。请在设置中启用后发送 ${formatRemoteCommand(message.connection, 'help')} 查看可用操作。`,
       }
     }
+    const commandMessage =
+      activeSelectionKind == null
+        ? message.text
+        : formatRemoteCommand(
+            message.connection,
+            REMOTE_SELECTION_COMMANDS[activeSelectionKind],
+            trimmedText,
+          )
     const result = await executeRemoteCommand(
       message.connection.id,
-      message.text,
+      commandMessage,
       message.connection.defaultSessionId,
     )
-    return { title: result.title, text: result.text }
+    return {
+      title: result.title,
+      text: result.text,
+      ...(result.actions == null ? {} : { actions: result.actions }),
+    }
   }
 
   if (!message.connection.capabilities.sendMessages) {
     return {
       title: '功能未授权',
-      text: '该连接没有启用消息投递能力。请在设置中启用后再发送任务消息；发送 /help 可查看命令。',
+      text: `该连接没有启用消息投递能力。请在设置中启用后再发送任务消息；发送 ${formatRemoteCommand(message.connection, 'help')} 可查看命令。`,
     }
   }
   const sessionId =
@@ -3332,11 +3506,14 @@ async function handleRemoteInboundMessage(
     log.warn(`Failed to send remote reply from history: ${String(err)}`)
     if (!remoteTurnTargets.has(result.turnId)) return
     remoteTurnTargets.delete(result.turnId)
+    const commandPrefix = getRemoteConnectionService()
+      .list()
+      .connections.find((connection) => connection.id === target.connectionId)?.commandPrefix
     void getRemoteConnectionService()
       .sendReply(
         target.connectionId,
         target.externalId,
-        buildRemoteErrorGuidance(err instanceof Error ? err.message : String(err)),
+        buildRemoteErrorGuidance(err instanceof Error ? err.message : String(err), commandPrefix),
       )
       .catch((sendErr) => {
         log.warn(`Failed to send remote history error reply: ${String(sendErr)}`)
@@ -3350,11 +3527,17 @@ export function registerAllIpcHandlers(): void {
   registerFilePreviewIpc()
   registerFileOperationsIpc()
   registerPromptLibraryPackageIpc()
+  registerWorkflowBundleIpc({ getMcpService })
   registerPastedTextIpc()
   registerSessionImageOptimizerIpc()
   registerFontAssetIpc()
   registerVoiceIpc()
   registerCanvasWorkflowIpc()
+  registerWorkflowRunIpc()
+  registerWorkflowTestRunIpc({
+    providerService: getProviderService(),
+    sessionService: getSessionService(),
+  })
   registerCanvasDepthTaskIpc()
   registerCanvasAudioExtractIpc()
   registerCanvasFrameExtractIpc()
@@ -3518,6 +3701,7 @@ export function registerAllIpcHandlers(): void {
       ...(req.teamConfig != null ? { teamConfig: req.teamConfig } : {}),
       ...(req.mentionAgentId != null ? { mentionAgentId: req.mentionAgentId } : {}),
       ...(req.interruptActive === true ? { interruptActive: true } : {}),
+      ...(req.resumePausedQueue === true ? { resumePausedQueue: true } : {}),
     })
   })
 
@@ -3559,6 +3743,7 @@ export function registerAllIpcHandlers(): void {
         ...(req.teamConfig != null ? { teamConfig: req.teamConfig } : {}),
         ...(req.mentionAgentId != null ? { mentionAgentId: req.mentionAgentId } : {}),
         ...(req.interruptActive === true ? { interruptActive: true } : {}),
+        ...(req.resumePausedQueue === true ? { resumePausedQueue: true } : {}),
       },
       { startAfter: workspaceReady },
     )
@@ -3593,6 +3778,11 @@ export function registerAllIpcHandlers(): void {
     return getSessionService().sendQueuedTurnNow(req)
   })
 
+  typedIpcHandle('session:resume-queue', async (req) => {
+    log.info(`session:resume-queue requested, sessionId=${req.sessionId}`)
+    return getSessionService().resumeQueue(req)
+  })
+
   typedIpcHandle('session:cancel', async (req) => {
     log.info(`session:cancel requested, sessionId=${req.sessionId}`)
     return getSessionService().cancelTurn(req.sessionId)
@@ -3625,6 +3815,11 @@ export function registerAllIpcHandlers(): void {
       getScheduledTaskService().setSessionArchived(req.sessionId, req.archived)
     }
     return result
+  })
+
+  typedIpcHandle('session:extract-title', async (req) => {
+    log.info(`session:extract-title requested, sessionId=${req.sessionId}`)
+    return getSessionService().extractSessionTitle(req.sessionId)
   })
 
   typedIpcHandle('session:delete', async (req) => {
@@ -3684,6 +3879,27 @@ export function registerAllIpcHandlers(): void {
       `session:delete-message requested, sessionId=${req.sessionId} eventCount=${req.eventIds.length}`,
     )
     return getSessionService().deleteMessage(req.sessionId, req.eventIds)
+  })
+
+  typedIpcHandle('session:rewind-last-turn', async (req) => {
+    log.info(`session:rewind-last-turn requested, sessionId=${req.sessionId} turnId=${req.turnId}`)
+    const result = await getSessionService().rewindLastTurnForEdit(req.sessionId, req.turnId)
+    // 这是一条仅供当前 renderer 立即修订本地窗口的瞬态通知；权威历史中的整轮事件
+    // 已经在同一 IPC 调用内删除，重新进入会话时会自然从删减后的历史重建。
+    pushStreamEvent('stream:session:agent-event', {
+      id: crypto.randomUUID(),
+      type: 'transcript_retraction',
+      sessionId: req.sessionId,
+      turnId: req.turnId,
+      timestamp: new Date().toISOString(),
+      // Keep the transient retraction after any history page that may already be
+      // hydrating in the renderer. Otherwise a page sorted after a seq=0
+      // retraction could briefly resurrect the just-removed turn.
+      seq: Number.MAX_SAFE_INTEGER,
+      eventIds: result.retractedEventIds,
+      reason: 'user_edit',
+    })
+    return result
   })
 
   typedIpcHandle('session:answer-question', async (req) => {
@@ -4384,7 +4600,11 @@ export function registerAllIpcHandlers(): void {
       requestTimeoutMs: number,
     ): Promise<CanvasTextTaskCreateResponse> => {
       const permissionMode: SessionPermissionMode =
-        adapter === 'codex' ? 'codex-full-access' : 'claude-bypass'
+        adapter === 'codex'
+          ? 'codex-full-access'
+          : adapter === 'spark'
+            ? 'spark-bypass'
+            : 'claude-bypass'
       const selectedSkillIds = Array.isArray(req.skillIds)
         ? req.skillIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
         : []
@@ -5691,7 +5911,7 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('history-import:preview', async (req) => {
     log.info(`history-import:preview requested, source=${req.source}`)
     const svc = createHistoryImportService()
-    return svc.preview(req.source, req.filePath, req.limit ?? 20, req.sourceSessionId)
+    return svc.preview(req.source, req.filePath, req.limit ?? 20, req.sourceSessionId, req.origin)
   })
 
   typedIpcHandle('history-import:import', async (req) => {
@@ -5781,8 +6001,8 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workspace:open-folder', async (req) => {
     log.info(`workspace:open-folder requested, workspaceId=${req.workspaceId}`)
-    const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
-    shell.showItemInFolder(workspace.root_path)
+    const rootPath = await resolveSessionScopedWorkspaceRoot(req.workspaceId, req.sessionId)
+    shell.showItemInFolder(rootPath)
     return { opened: true }
   })
 
@@ -5796,7 +6016,8 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workspace:list-directory', async (req) => {
     log.info(`workspace:list-directory requested, workspaceId=${req.workspaceId}`)
-    const entries = await getWorkspaceService().listDirectoryTree(req.workspaceId, req)
+    const rootPath = await resolveSessionScopedWorkspaceRoot(req.workspaceId, req.sessionId)
+    const entries = await getWorkspaceService().listDirectoryTreeAtRoot(rootPath, req)
     return { entries }
   })
 
@@ -5936,7 +6157,12 @@ export function registerAllIpcHandlers(): void {
     log.info(`workspace:git-file-diff requested, workspaceId=${req.workspaceId}, path=${req.path}`)
     const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
     try {
-      return await getWorkspaceGitFileDiff(workspace.root_path, req.path, req.untracked === true)
+      return await getWorkspaceGitFileDiff(
+        workspace.root_path,
+        req.path,
+        req.untracked === true,
+        req.commitHash,
+      )
     } catch (error) {
       throw asSparkGitError(error, '读取 Git diff 失败')
     }
@@ -6071,6 +6297,30 @@ export function registerAllIpcHandlers(): void {
       return await getWorkspaceGitLog(workspace.root_path, req.limit)
     } catch (err) {
       throw asSparkGitError(err, '获取提交记录失败')
+    }
+  })
+
+  typedIpcHandle('workspace:git-commit-files', async (req) => {
+    log.info(`workspace:git-commit-files requested, workspaceId=${req.workspaceId}`)
+    const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
+    try {
+      assertWorkspaceGitReady(await getGitCommandService().probeRepository(workspace.root_path))
+      return await getWorkspaceGitCommitFiles(workspace.root_path, req.hash)
+    } catch (err) {
+      throw asSparkGitError(err, '获取提交文件失败')
+    }
+  })
+
+  typedIpcHandle('workspace:git-file-history', async (req) => {
+    log.info(
+      `workspace:git-file-history requested, workspaceId=${req.workspaceId}, path=${req.path}`,
+    )
+    const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
+    try {
+      assertWorkspaceGitReady(await getGitCommandService().probeRepository(workspace.root_path))
+      return await getWorkspaceGitFileHistory(workspace.root_path, req.path, req.limit)
+    } catch (err) {
+      throw asSparkGitError(err, '获取文件变更历史失败')
     }
   })
 
@@ -6278,9 +6528,9 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workspace:watch-start', async (req) => {
     log.info(`workspace:watch-start requested, workspaceId=${req.workspaceId}`)
-    const workspace = new WorkspaceRepository(getDatabase()).findByIdOrFail(req.workspaceId)
+    const rootPath = await resolveSessionScopedWorkspaceRoot(req.workspaceId, req.sessionId)
     const watcherService = getFileWatcherService()
-    watcherService.start(req.workspaceId, workspace.root_path, req.ignorePatterns)
+    watcherService.start(req.workspaceId, rootPath, req.ignorePatterns)
     return { watching: true }
   })
 
@@ -6836,6 +7086,62 @@ export function registerAllIpcHandlers(): void {
     return { tools }
   })
 
+  // 工作流工具节点「平台工具直调」候选清单：两个运行时目录即时快照（与执行期同一目录，
+  // 所见即所得），按工具包显示名分组标注；schema 收窄到面板渲染所需的最小结构。
+  typedIpcHandle('workflow:platform-tools', async () => {
+    const toolPackageService = getSessionService().getToolPackageService()
+    const packageNames = new Map(toolPackageService.list().map((row) => [row.id, row.display_name]))
+    const toInputSchema = (
+      raw: Record<string, unknown> | undefined,
+    ): WorkflowPlatformToolsResponse['tools'][number]['inputSchema'] | undefined => {
+      if (raw == null || raw.type !== 'object') return undefined
+      if (
+        raw.properties == null ||
+        typeof raw.properties !== 'object' ||
+        Array.isArray(raw.properties)
+      ) {
+        return undefined
+      }
+      return {
+        type: 'object',
+        properties: raw.properties as Record<string, unknown>,
+        ...(Array.isArray(raw.required)
+          ? { required: raw.required.filter((item): item is string => typeof item === 'string') }
+          : {}),
+      }
+    }
+    const unifiedTools = await getSessionService().listUnifiedTools()
+    const packageTools = unifiedTools
+      .filter((entry) => entry.sourceKind === 'tool-package')
+      .map((entry): WorkflowPlatformToolsResponse['tools'][number] => {
+        const packageName = packageNames.get(entry.sourceId)
+        const inputSchema = toInputSchema(entry.tool.inputSchema)
+        return {
+          name: entry.tool.name,
+          title: entry.tool.title.length > 0 ? entry.tool.title : entry.tool.name,
+          description: entry.tool.description,
+          source: 'package',
+          ...(packageName != null ? { packageName } : {}),
+          ...(inputSchema != null ? { inputSchema } : {}),
+        }
+      })
+    const customTools = unifiedTools
+      .filter((entry) => entry.sourceKind === 'custom-tool')
+      .map((entry): WorkflowPlatformToolsResponse['tools'][number] => {
+        const inputSchema = toInputSchema(entry.tool.inputSchema)
+        return {
+          name: entry.tool.name,
+          title: entry.tool.title.length > 0 ? entry.tool.title : entry.tool.name,
+          description: entry.tool.description,
+          source: 'custom',
+          ...(inputSchema != null ? { inputSchema } : {}),
+        }
+      })
+    const tools: WorkflowPlatformToolsResponse['tools'] = [...packageTools, ...customTools]
+    log.info(`workflow:platform-tools requested, tools=${tools.length}`)
+    return { tools }
+  })
+
   // ─── Skill Handlers ─────────────────────────────────────────────────────────
 
   typedIpcHandle('skill:list', async (req) => {
@@ -7315,8 +7621,22 @@ export function registerAllIpcHandlers(): void {
     return { workflow: workflow != null ? toWorkflowItem(workflow) : null }
   })
 
+  // 保存前环校验：环图在运行时只能以 workflow_deadlock 失败（英文裸 node id 报错），
+  // 这里在持久化前用拓扑排序即时拦截，报错带节点标题便于用户定位。
+  const assertWorkflowGraphValid = (graph: unknown): void => {
+    if (graph == null) return
+    const normalized = normalizeWorkflowGraph(graph as Parameters<typeof normalizeWorkflowGraph>[0])
+    const cycleReports = detectWorkflowGraphCycles(normalized)
+    if (cycleReports.length > 0) throw new Error(formatWorkflowCycleError(cycleReports))
+    const referenceReports = detectWorkflowConditionReferenceErrors(normalized)
+    if (referenceReports.length > 0) {
+      throw new Error(formatWorkflowConditionReferenceError(referenceReports))
+    }
+  }
+
   typedIpcHandle('workflow:create', async (req) => {
     const { graph, ...fields } = req
+    assertWorkflowGraphValid(graph)
     const workflow = getWorkflowRepository().create({
       ...fields,
       ...(graph !== undefined ? { graph: graph as unknown as Record<string, unknown> } : {}),
@@ -7326,6 +7646,7 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workflow:update', async (req) => {
     const { id, graph, ...fields } = req
+    assertWorkflowGraphValid(graph)
     const workflow = getWorkflowRepository().update(id, {
       ...fields,
       ...(graph !== undefined ? { graph: graph as unknown as Record<string, unknown> } : {}),
@@ -7506,6 +7827,7 @@ export function registerAllIpcHandlers(): void {
       })),
     }
   })
+
 
   // ─── Installable Skill Catalog（内置可安装技能卡片） ───────────────────
 
@@ -7995,13 +8317,26 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('log:read', async (req) => {
     const maxLines = req.maxLines ?? 500
     const levels = req.levels
-    const lines = readLogTail(
+    const namespacePrefixes =
+      req.scope === 'canvas'
+        ? [...CANVAS_TASK_LOG_NAMESPACE_PREFIXES]
+        : req.scope === 'tools'
+          ? ['tools:', 'tool-package:', 'custom-tools', 'plugin-runtime:']
+          : undefined
+    const scopedLines = readLogTail(
       maxLines,
       levels,
-      req.scope === 'canvas'
-        ? { namespacePrefixes: [...CANVAS_TASK_LOG_NAMESPACE_PREFIXES] }
-        : undefined,
+      namespacePrefixes != null ? { namespacePrefixes } : undefined,
     )
+    const namespaceNeedle = req.namespace?.trim().toLowerCase()
+    const keywordNeedle = req.keyword?.trim().toLowerCase()
+    const lines = scopedLines.filter((line) => {
+      const normalized = line.toLowerCase()
+      return (
+        (namespaceNeedle == null || normalized.includes(`[${namespaceNeedle}`)) &&
+        (keywordNeedle == null || normalized.includes(keywordNeedle))
+      )
+    })
     const info = getLogInfo()
     return {
       lines,
@@ -9713,9 +10048,6 @@ export function registerAllIpcHandlers(): void {
   // ─── Built-in Terminal Panel (session-scoped PTY dock) ───────────────────────
   registerTerminalIpc()
 
-  // ─── Data（dev 实例继承安装版数据库） ────────────────────────────────────────
-  registerDataIpc()
-
   registerProviderFilesIpc({
     getProfile: async (id) =>
       (await getProviderService().listProviders()).find((profile) => profile.id === id),
@@ -9750,9 +10082,31 @@ export function registerAllIpcHandlers(): void {
   registerSidebarOrderIpc()
   registerWorkspaceSearchIpc()
   registerPluginIpc()
-  registerSubAppIpc()
+  registerSubAppPlatformIpc({
+    database: getDatabase(),
+    userDataPath: app.getPath('userData'),
+    platformVersion: app.getVersion(),
+    setRuntimeBridge: (bridge) => getSessionService().setSubAppRuntimeBridge(bridge),
+    emitServiceEvent: (event) => pushStreamEvent('stream:subapp:service-event', event),
+    emitJobChanged: (event) => pushStreamEvent('stream:subapp:job-changed', event),
+  })
   registerCustomToolsIpc()
-  registerToolPackagesIpc(getSessionService().getToolPackageService())
+  registerToolPackagesIpc(
+    getSessionService().getToolPackageService(),
+    createDesktopToolPackageCapabilities({
+      db: getDatabase(),
+      sessionService: getSessionService(),
+      computerController: computerUseAgentController,
+      resolveMediaProviders: resolveCanvasMediaProviders,
+      mediaTaskRuntime: getMediaTaskRuntimeService(),
+      defaultMediaOutputDir: getDefaultCanvasMediaDir(),
+      assertMediaInputPath: (filePath) => {
+        if (!isSafeFilePathAllowed(filePath)) {
+          throw new Error('媒体输入文件不在允许读取的项目或应用目录内')
+        }
+      },
+    }),
+  )
 
   log.info('All IPC handlers registered')
 }

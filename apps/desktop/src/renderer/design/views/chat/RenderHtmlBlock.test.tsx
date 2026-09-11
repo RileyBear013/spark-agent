@@ -4,6 +4,8 @@ import React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { HtmlCodePreview, HtmlRenderProvider, RenderHtmlBlock } from './RenderHtmlBlock'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -25,6 +27,22 @@ describe('RenderHtmlBlock', () => {
   let container: HTMLDivElement
   let root: Root | null = null
   let invoke: ReturnType<typeof vi.fn>
+
+  it('lets the fullscreen panel fill the available viewport', () => {
+    const styles = readFileSync(resolve(__dirname, 'RenderHtmlBlock.less'), 'utf8')
+    const fullscreenPanelRule = styles.match(/\.render-html-fullscreen-panel\s*\{([^}]*)\}/)?.[1]
+
+    expect(fullscreenPanelRule).toContain('width: 100%')
+    expect(fullscreenPanelRule).toContain('height: 100%')
+    expect(fullscreenPanelRule).not.toContain('1200px')
+    expect(fullscreenPanelRule).not.toContain('820px')
+  })
+
+  it('keeps the fullscreen action large enough to discover and click', () => {
+    const markup = renderToStaticMarkup(<RenderHtmlBlock block={block} />)
+
+    expect(markup).toContain('render-html-fullscreen-action')
+  })
 
   beforeEach(() => {
     container = document.createElement('div')
@@ -96,6 +114,59 @@ describe('RenderHtmlBlock', () => {
 
     const src = container.querySelector('iframe')?.src ?? ''
     expect(src).toMatch(/\?v=2$/)
+  })
+
+  it('gates external-resource HTML behind an explicit allow action', async () => {
+    const externalBlock = {
+      ...block,
+      toolCallId: 'html-ext-1',
+      html: '<script src="https://cdn.example.com/mindmap.js"></script>',
+      title: '外链思维导图',
+      warnings: ['检测到外部资源引用，沙盒 CSP 将允许网络加载；请确认来源可信'],
+    }
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(<RenderHtmlBlock block={externalBlock} />)
+    })
+    await act(async () => {})
+
+    // 门控态：警告 + 按钮可见，但不挂载 iframe。
+    expect(container.querySelector('iframe')).toBeNull()
+    expect(container.textContent).toContain('允许渲染')
+
+    const allowButton = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === '允许渲染',
+    )
+    expect(allowButton).toBeDefined()
+    await act(async () => {
+      allowButton?.click()
+    })
+    await act(async () => {})
+
+    // 点击后立即渲染。
+    const iframe = container.querySelector('iframe')
+    expect(iframe).not.toBeNull()
+    expect(iframe?.src).toMatch(/^capability-asset:\/\/html-render\/hr-/)
+  })
+
+  it('remembers the external-resource allowance across remounts', async () => {
+    // 上一用例已允许 html-ext-1：重挂载（滚动重建/主题切换）后不再阻拦。
+    const externalBlock = {
+      ...block,
+      toolCallId: 'html-ext-1',
+      html: '<script src="https://cdn.example.com/mindmap.js"></script>',
+      warnings: ['检测到外部资源引用，沙盒 CSP 将允许网络加载；请确认来源可信'],
+    }
+    root = createRoot(container)
+    await act(async () => {
+      root?.render(<RenderHtmlBlock block={externalBlock} />)
+    })
+    await act(async () => {})
+
+    expect(container.textContent).not.toContain('允许渲染')
+    expect(container.querySelector('iframe')).not.toBeNull()
+    // 外部资源警告已在确认时呈现过，不再常驻底部提示条。
+    expect(container.querySelector('.render-html-warning')).toBeNull()
   })
 
   it('shows a structured error state without executing failed content', () => {

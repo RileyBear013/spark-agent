@@ -1,165 +1,265 @@
 /**
- * 确保原生模块已针对 Electron ABI 编译（真实加载校验版）
+ * 确保原生模块已针对 Electron ABI 编译
  *
- * 在 `pnpm dev` 前运行，用真实 Electron 运行时逐个加载 better-sqlite3 / keytar
- * 校验可用性（复用 verify-native-electron-abi.cjs），而不是仅凭编译命令退出码
- * 或 Electron 版本号判定就绪。本脚本修复的两个历史问题：
+ * 在 `pnpm dev` 前运行，检查 better-sqlite3 / keytar 是否已针对当前安装的
+ * Electron 版本编译。若未编译或 Electron 版本变更，则自动恢复/重建。
  *
- *   1. 旧版在 rebuild 失败（含 better-sqlite3 本身失败）时仍写入就绪标记，
- *      后续启动直接跳过重建，dev 启动报 NODE_MODULE_VERSION 错误；
- *   2. 旧版标记只记录 Electron 版本+架构，`pnpm install` 重装依赖后模块回退
- *      为系统 Node ABI，标记仍判定「已就绪」导致带病启动。
+ * 原理：
+ *   pnpm install 阶段原生模块编译为系统 Node.js ABI；Electron 内嵌的
+ *   Node.js 使用不同的 modules ABI，直接加载会失败。
  *
- * 流程：
- *   1) Electron 运行时真实加载校验（秒级，每次启动执行）→ 通过则写标记放行；
- *   2) 校验失败 → 复用仓库 rebuild:native 的 staging 方案重建
- *      （rebuild-native-for-electron.sh）；
- *   3) 重建后必须再次通过加载校验才写就绪标记；仍失败则删除标记并以非 0 退出。
+ * 指纹 + 真实加载验证：
+ *   旧实现只看标记文件里的 Electron 版本号，但 `pnpm test:unit` 收尾会把
+ *   better-sqlite3 切换回系统 Node ABI（scripts/sqlite-abi.sh），版本号没变
+ *   却会跳过检查，导致 Electron 启动时 NODE_MODULE_VERSION 不匹配崩溃。
+ *   因此标记文件记录每个 live 二进制的 sha256 指纹，ready 判定必须逐个核对；
+ *   且指纹必须来自「在真实 Electron 里 require 成功」的二进制（scripts/
+ *   verify-native-electron-abi.cjs）—— @electron/rebuild 报成功但实际没有
+ *   替换二进制（缓存空转）的情况出现过，不能只信重建退出码。
  *
- * 重要：不要直接调 @electron/rebuild API 重建——hoisted 布局下它从
- * apps/desktop 发现不到根 node_modules 里的原生模块，会「报成功但实际什么
- * 都没编译」（空转）。rebuild-native-for-electron.sh 通过把模块 stage 进
- * apps/desktop/node_modules 再编译、完成后回拷，绕开了这个发现缺陷。
+ * 恢复顺序（未通过指纹校验时）：
+ *   1. vendor/prebuilds/better-sqlite3 的 electron 预编译产物（macOS，经
+ *      scripts/sqlite-abi.sh 拷贝，秒级；产物按 vendor/prebuilds/better-sqlite3/
+ *      README.md 在依赖升级时重新生成）→ 拷贝后在 Electron 里验证；
+ *   2. @electron/rebuild 全量重建 → 重建后在 Electron 里验证。
+ *   两条路都必须验证通过才写标记；验证失败则退出非零，阻断 dev 启动。
+ *
+ * 重要：electron-rebuild 必须从 apps/desktop/ 目录运行（其 package.json 的
+ * dependencies 中声明了原生模块），否则无法发现需要重建的模块。
  *
  * 注意：node-pty 不在此处编译，因为它依赖 Spectre-mitigated 库（Windows），
- * 该库可能未安装且缺失不应阻塞数据库初始化，故不在校验/重建集合内。
+ * 该库可能未安装且缺失不应阻塞数据库初始化（verify 脚本会检查它，缺失时报错
+ * 但不写标记，可按需单独处理）。
  */
 
-import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const appDir = join(__dirname, '..')
 const rootDir = join(appDir, '..', '..')
 
-/** 数据库启动需要的最小模块集合（全部要求在 Electron 运行时真实可加载） */
-const MODULES = ['better-sqlite3', 'keytar']
+/** 数据库启动需要的最小模块集合及其 live 二进制路径 */
+const MODULE_BINARIES = {
+  'better-sqlite3': join(
+    rootDir,
+    'node_modules',
+    'better-sqlite3',
+    'build',
+    'Release',
+    'better_sqlite3.node',
+  ),
+  keytar: join(rootDir, 'node_modules', 'keytar', 'build', 'Release', 'keytar.node'),
+}
 
-/** Electron 冷启动 + 模块加载的校验超时 */
-const PROBE_TIMEOUT_MS = 120_000
+const SQLITE_ABI_SCRIPT = join(rootDir, 'scripts', 'sqlite-abi.sh')
+const VENDOR_ELECTRON_BINARY = join(
+  rootDir,
+  'vendor',
+  'prebuilds',
+  'better-sqlite3',
+  'better_sqlite3.node.electron',
+)
+const VERIFY_SCRIPT = join(__dirname, 'verify-native-electron-abi.cjs')
+
+function sha256(file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
 
 const electronPkgPath = join(rootDir, 'node_modules', 'electron', 'package.json')
 if (!existsSync(electronPkgPath)) {
   console.error('[native] Electron 未安装，请先执行 `pnpm install`。')
   process.exit(1)
 }
-const electronVersion = JSON.parse(readFileSync(electronPkgPath, 'utf-8')).version
 
-// Electron 可执行文件（electron npm 包的 dist 布局），校验时以应用方式运行
-// verify 脚本（默认 app 直接以传入的 .cjs 作为主进程模块），不使用 ELECTRON_RUN_AS_NODE
-const electronBin = join(
-  rootDir,
-  'node_modules',
-  'electron',
-  'dist',
-  process.platform === 'win32'
-    ? 'electron.exe'
-    : process.platform === 'darwin'
-      ? 'Electron.app/Contents/MacOS/Electron'
-      : 'electron',
-)
-if (!existsSync(electronBin)) {
-  console.error('[native] Electron 二进制缺失（node_modules/electron/dist），请先执行 `pnpm install`。')
-  process.exit(1)
-}
+const pkg = JSON.parse(readFileSync(electronPkgPath, 'utf-8'))
+const electronVersion = pkg.version
 
 const markerDir = join(appDir, 'node_modules')
 const markerPath = join(markerDir, '.electron-native-abi')
-const expectedMarker = `electron-${electronVersion}-${process.arch}`
 
-function writeMarker() {
-  mkdirSync(markerDir, { recursive: true })
-  writeFileSync(markerPath, expectedMarker, 'utf-8')
-}
-
-function clearMarker() {
+/**
+ * 读取标记文件。
+ * 兼容旧版纯文本格式（electron-<ver>-<arch>）：无法校验指纹，返回 null 走恢复流程。
+ */
+function readMarker() {
+  if (!existsSync(markerPath)) return null
   try {
-    rmSync(markerPath, { force: true })
+    const parsed = JSON.parse(readFileSync(markerPath, 'utf-8'))
+    if (
+      parsed &&
+      parsed.electron === electronVersion &&
+      parsed.arch === process.arch &&
+      Array.isArray(parsed.goodHashes) &&
+      parsed.goodHashes.every((h) => typeof h === 'string')
+    ) {
+      return parsed
+    }
   } catch {
-    // 标记清理失败不影响主流程：每次启动都会重新做真实校验
+    // 旧版纯文本标记，按指纹未校验处理
   }
+  return null
 }
 
 /**
- * 用真实 Electron 运行时加载校验（verify-native-electron-abi.cjs）。
- * 返回 true 表示 MODULES 全部真实可用；失败明细由子进程直接输出。
+ * 在真实 Electron 里加载全部原生模块，验证 ABI 兼容。
+ * 返回 true = 全部加载成功。
  */
-function verifyWithElectron() {
-  console.log(`[native] 使用 Electron ${electronVersion} (${process.arch}) 真实加载校验...`)
-  const res = spawnSync(electronBin, [join(__dirname, 'verify-native-electron-abi.cjs'), ...MODULES], {
-    cwd: appDir, // verify 脚本按 cwd 解析模块
-    stdio: ['ignore', 'pipe', 'inherit'],
-    timeout: PROBE_TIMEOUT_MS,
-    windowsHide: true,
+function verifyInElectron() {
+  // electron npm 包在 Node 环境下导出 Electron 可执行文件路径
+  const require = createRequire(import.meta.url)
+  let electronBinary
+  try {
+    electronBinary = require(join(rootDir, 'node_modules', 'electron'))
+  } catch (err) {
+    console.error(`[native] 无法定位 Electron 可执行文件：${err.message}`)
+    return false
+  }
+
+  console.log('[native] 在 Electron 中加载验证原生模块...')
+  const result = spawnSync(electronBinary, [VERIFY_SCRIPT], {
+    cwd: appDir,
+    timeout: 120_000,
+    encoding: 'utf-8',
   })
-  const out = res.stdout ? res.stdout.toString() : ''
-  if (out) {
-    process.stdout.write(out)
+
+  if (result.status === 0) {
+    if (result.stdout) process.stdout.write(result.stdout)
+    return true
   }
-  if (res.error) {
-    console.error(`[native] 校验进程启动失败：${res.error.message}`)
+
+  console.error('[native] Electron 加载验证失败：')
+  if (result.stdout) process.stdout.write(result.stdout)
+  if (result.stderr) process.stderr.write(result.stderr)
+  return false
+}
+
+/** 用 vendor electron 预编译产物恢复 better-sqlite3（复用 sqlite-abi.sh 的拷贝语义） */
+function restoreFromVendor() {
+  if (process.platform !== 'darwin') return false
+  if (!existsSync(VENDOR_ELECTRON_BINARY) || !existsSync(SQLITE_ABI_SCRIPT)) {
     return false
   }
-  if (res.signal) {
-    console.error(`[native] 校验进程异常终止（${res.signal}，可能超过 ${PROBE_TIMEOUT_MS}ms 超时）`)
+  console.log('[native] 尝试用 vendor electron 预编译产物恢复 better-sqlite3 ...')
+  const result = spawnSync('bash', [SQLITE_ABI_SCRIPT, 'electron'], {
+    cwd: rootDir,
+    encoding: 'utf-8',
+  })
+  if (result.status !== 0) {
+    console.error('[native] vendor 预编译产物拷贝失败。')
+    if (result.stderr) process.stderr.write(result.stderr)
     return false
   }
-  if (res.status !== 0) {
-    console.error(`[native] 校验未通过（exit ${res.status ?? 'unknown'}）`)
-    return false
-  }
-  // exit 0 时从 ok 行提取已确认模块，防御性兜底：解析不到即视为校验失败（触发重建）
-  const okModules = new Set()
-  for (const m of out.matchAll(/\[native-verify\] ok: require\("([^"]+)"\)/g)) {
-    okModules.add(m[1])
-  }
-  const missing = MODULES.filter((name) => !okModules.has(name))
-  if (missing.length > 0) {
-    console.error(`[native] 以下模块未确认加载成功：${missing.join(', ')}`)
-    return false
-  }
+  process.stdout.write(result.stdout)
   return true
 }
 
-// ── 第一步：真实加载校验（秒级；天然覆盖依赖重装、Electron 升级等场景） ──
-if (verifyWithElectron()) {
-  writeMarker()
-  console.log('[native] 原生模块已就绪 ✓')
-  process.exit(0)
+const markerFileExists = existsSync(markerPath)
+const marker = readMarker()
+
+// 当前 live 二进制指纹（缺失的模块不记录）
+const liveHashes = new Map()
+for (const [mod, binary] of Object.entries(MODULE_BINARIES)) {
+  if (existsSync(binary)) liveHashes.set(mod, sha256(binary))
 }
 
-console.log('[native] 原生模块与当前 Electron ABI 不匹配或加载失败，开始重建...')
+const allBinariesPresent = liveHashes.size === Object.keys(MODULE_BINARIES).length
 
-// ── 第二步：复用仓库 rebuild:native 的 staging 方案重建 ──
-// 脚本内含 staging 编译 + 回拷 + native:verify 自检；NATIVE_MODULES 覆盖为
-// 最小集合以排除 node-pty（Spectre 依赖可能缺失，见文件头注释）。脚本自身的
-// native:verify 终检含 node-pty，可能误报失败——以本脚本第三步校验为准。
-console.log('[native]   运行 rebuild-native-for-electron.sh（staging 编译，可能需要数分钟）...')
-const rebuildSpawn = spawnSync('bash', [join(__dirname, 'rebuild-native-for-electron.sh')], {
-  cwd: appDir,
-  stdio: 'inherit',
-  env: { ...process.env, NATIVE_MODULES: MODULES.join(',') },
-  timeout: 15 * 60_000,
-  windowsHide: true,
-})
-if (rebuildSpawn.error) {
-  if (rebuildSpawn.error.code === 'ENOENT') {
-    console.error('[native] 未找到 bash：重建脚本需要 Git Bash 在 PATH 中。')
+if (marker && allBinariesPresent) {
+  const allKnown = [...liveHashes.values()].every((hash) => marker.goodHashes.includes(hash))
+  if (allKnown) {
+    console.log(`[native] 原生模块已就绪 (Electron ${electronVersion}, ${process.arch})`)
+    process.exit(0)
+  }
+  console.log('[native] 原生二进制与 ABI 标记不一致（可能跑过单测切到 Node ABI，或依赖被重装）...')
+} else if (markerFileExists) {
+  console.log('[native] ABI 标记过期或格式升级，执行恢复...')
+} else if (!allBinariesPresent) {
+  console.log('[native] 原生模块二进制缺失，执行恢复...')
+} else {
+  console.log(`[native] 首次启动：为 Electron ${electronVersion} (${process.arch}) 准备原生模块...`)
+}
+
+// ---- 恢复流程：先 vendor 快速恢复，再全量重建；两者都以 Electron 真实加载为准 ----
+
+let verified = false
+
+if (restoreFromVendor()) {
+  verified = verifyInElectron()
+  if (verified) {
+    console.log('[native] vendor 预编译产物加载验证通过 ✓')
   } else {
-    console.error(`[native] 重建脚本启动失败：${rebuildSpawn.error.message}`)
+    console.error('[native] vendor 预编译产物与当前依赖不匹配，转为全量重建...')
   }
 }
 
-// ── 第三步：重建后必须再次通过真实加载校验，才允许写就绪标记 ──
-if (!verifyWithElectron()) {
-  clearMarker()
+if (!verified) {
+  let rebuildFailed = false
+  try {
+    const { rebuild } = await import('@electron/rebuild')
+
+    // 逐个重建，避免一个模块失败阻塞其他模块
+    for (const mod of Object.keys(MODULE_BINARIES)) {
+      try {
+        console.log(`[native]   重建 ${mod}...`)
+        await rebuild({
+          // 必须指向 apps/desktop/，electron-rebuild 依据其 package.json
+          // 的 dependencies 发现需要重建的原生模块
+          buildPath: appDir,
+          electronVersion,
+          arch: process.arch,
+          onlyModules: [mod],
+          force: true,
+        })
+        console.log(`[native]   ${mod} ✓`)
+      } catch (err) {
+        rebuildFailed = true
+        console.error(`[native]   ${mod} ✗ ${err.message}`)
+      }
+    }
+  } catch (err) {
+    console.error('[native] @electron/rebuild 加载失败：')
+    console.error(err.message)
+    process.exit(1)
+  }
+
+  if (rebuildFailed) {
+    console.error('')
+    console.error('[native] 部分模块编译失败（见上）。')
+    if (process.platform === 'win32') {
+      console.error('[native] Windows 下 node-pty 需安装 Spectre-mitigated 库。')
+    }
+  }
+
+  verified = verifyInElectron()
+}
+
+if (!verified) {
   console.error('')
-  console.error('[native] 重建后校验仍未通过，已终止启动（未写入就绪标记）。')
-  console.error('[native] 建议：删除 node_modules 后重新 `pnpm install`；Windows 下确认已安装 VS Build Tools（含 C++ 工作负载）。')
+  console.error('[native] 原生模块在 Electron 中加载验证未通过，不写入 ABI 标记。')
+  console.error('[native] 可尝试：cd apps/desktop && pnpm run rebuild:native 后重新启动。')
   process.exit(1)
 }
 
-writeMarker()
-console.log('[native] 原生模块编译并校验完成 ✓')
+// 验证通过后才写标记；指纹取自验证通过时的 live 二进制
+const goodHashes = new Set()
+for (const binary of Object.values(MODULE_BINARIES)) {
+  if (existsSync(binary)) goodHashes.add(sha256(binary))
+}
+
+mkdirSync(markerDir, { recursive: true })
+writeFileSync(
+  markerPath,
+  JSON.stringify(
+    { electron: electronVersion, arch: process.arch, goodHashes: [...goodHashes] },
+    null,
+    2,
+  ),
+  'utf-8',
+)
+
+console.log('[native] 原生模块已就绪（ABI 标记已更新） ✓')

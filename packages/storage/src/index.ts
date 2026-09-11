@@ -17,6 +17,13 @@
 // 数据库核心
 export { SparkDatabase, createDatabase } from './database.js'
 export type { SqliteDatabase } from './database.js'
+export {
+  SubAppPackageService,
+  validatePackageFiles,
+  digestFiles,
+  assertPackagePath,
+} from './sub-app-package.service.js'
+export { SubAppPlatformRepository } from './repositories/sub-app-platform.repository.js'
 
 // CJK 逐字预分词（memory_fts 写入/查询两侧共用，禁止各自实现）
 export { segmentCjk, buildFtsMatchQuery } from './segment-cjk.js'
@@ -81,6 +88,7 @@ export type {
 export {
   SessionRepository,
   SessionCollaborationRepository,
+  SessionHistoryRepository,
   WorkspaceRepository,
   EventRepository,
   TurnRequestRepository,
@@ -143,6 +151,15 @@ export {
   SubAppStateError,
   CustomToolRepository,
   ToolPackageRepository,
+  ToolInvocationRepository,
+  ToolPackageStorageRepository,
+  WorkflowBundleRepository,
+} from './repositories/index.js'
+
+export type {
+  ImportSubAppDataInput,
+  ImportSubAppParams,
+  ImportSubAppReleaseInput,
 } from './repositories/index.js'
 
 export type {
@@ -229,6 +246,7 @@ export type {
   CreateWorkflowRunParams,
   UpdateWorkflowRunSnapshotParams,
   WorkflowRunRow,
+  WorkflowRunSummaryRow,
   WorkflowRunStatus,
   TeamDispatchRow,
   TeamDispatchState,
@@ -324,4 +342,12 @@ export type {
   ToolPackageConfigRow,
   ToolPackagePermissionRow,
   InstallToolPackageVersionParams,
+  FinishToolInvocationParams,
+  ListToolInvocationsParams,
+  StartToolInvocationParams,
+  ToolInvocationRow,
+  ToolInvocationSource,
+  ToolInvocationSourceKind,
+  ToolInvocationStatus,
+  ToolPackageStorageEntry,
 } from './repositories/index.js'

@@ -28,7 +28,9 @@ import type {
   SkillItem,
   ProviderIconConfig,
   ProviderProfile,
+  SessionAgentAdapter,
   SessionChatMode,
+  SessionPermissionMode,
 } from '@spark/protocol'
 import { SUB_APP_SOURCE_HARD_LIMIT, SUB_APP_SURFACES, type SubAppSurface } from '@spark/protocol'
 import type { SubAppDraftPatch, SubAppListRequest } from '@spark/protocol'
@@ -59,7 +61,11 @@ import type { UpdateWorkflowParams } from '@spark/storage'
 import type { AgentRepository } from '@spark/storage'
 import type { UpdateAgentParams } from '@spark/storage'
 import type { SettingsRepository } from '@spark/storage'
-import type { SubAppRepository } from '@spark/storage'
+import type {
+  SubAppPackageService,
+  SubAppPlatformRepository,
+  SubAppRepository,
+} from '@spark/storage'
 import type { TeamDefinitionRepository } from '@spark/storage'
 import {
   SubAppConflictError,
@@ -84,10 +90,12 @@ import type {
   SessionScheduleCreateInput,
   SessionScheduleUpdateInput,
 } from './session-schedule-agent-tools.js'
+import type { SessionHistoryRetrievalTools } from './session/session-history-retrieval-tools.js'
 import {
   normalizeSparkReasoningEffort,
   type SparkReasoningEffort,
 } from '../sdk/reasoning-effort.js'
+import { handleSubAppV2BridgeMethod } from './platform-bridge-sub-apps-v2.js'
 
 const log = createLogger('platform-bridge')
 
@@ -406,9 +414,25 @@ export interface PlatformBridgeDeps {
   settingsRepo: SettingsRepository
   /** 自定义子应用仓库（spark_app MCP 桥的 subapp.* RPC 直访）。 */
   subAppRepo: SubAppRepository
+  subAppPackageService: SubAppPackageService
+  subAppPlatformRepo: SubAppPlatformRepository
+  subAppRuntime?: {
+    serviceStatus(params: Record<string, unknown>): unknown | Promise<unknown>
+    serviceLogs(params: Record<string, unknown>): unknown | Promise<unknown>
+    serviceRestart(params: Record<string, unknown>): unknown | Promise<unknown>
+    jobCreate(params: Record<string, unknown>): unknown | Promise<unknown>
+    jobGet(params: Record<string, unknown>): unknown | Promise<unknown>
+    jobList(params: Record<string, unknown>): unknown | Promise<unknown>
+    jobCancel(params: Record<string, unknown>): unknown | Promise<unknown>
+    diagnose(params: Record<string, unknown>): unknown | Promise<unknown>
+    releaseChanged(params: Record<string, unknown>): unknown | Promise<unknown>
+    preflightProject(params: Record<string, unknown>): unknown | Promise<unknown>
+  }
   pluginManager: PluginManager
   githubConnectorService: GitHubConnectorService
   sessionScheduleTools: SessionScheduleAgentTools
+  /** 会话全量历史检索门面（session_history.* RPC，仅当前会话） */
+  sessionHistoryTools: SessionHistoryRetrievalTools
   sessionService: {
     updateSession(params: {
       sessionId: string
@@ -418,8 +442,8 @@ export interface PlatformBridgeDeps {
       providerProfileId?: string
       modelId?: string | null
       agentId?: string
-      agentAdapter?: 'claude' | 'claude-sdk' | 'codex'
-      permissionMode?: string
+      agentAdapter?: SessionAgentAdapter
+      permissionMode?: SessionPermissionMode
       chatMode?: SessionChatMode
       reasoningEffort?: SparkReasoningEffort
     }): Promise<{ session: Record<string, unknown> }>
@@ -629,6 +653,8 @@ export class PlatformBridgeService {
 
   private async dispatch(method: string, params: Record<string, unknown>): Promise<unknown> {
     const d = this.deps!
+    const subAppV2 = await handleSubAppV2BridgeMethod(method, d, params)
+    if (subAppV2.handled) return subAppV2.value
     switch (method) {
       // ── Skills ──
       case 'skills.list':
@@ -685,6 +711,9 @@ export class PlatformBridgeService {
         return await this.customToolDelete(d, params)
 
       // ── Generic Tool Packages ──
+      // 与 ToolPackageBridgeMethod 联合类型及 MCP methodMap 保持一一对应，
+      // 缺一个 case 就会出现「工具已 advertised 但调用报 Unknown method」，
+      // 迫使 Agent 绕过平台受控路径执行（曾导致 run_project_step 失效）。
       case 'tool_packages.guide':
       case 'tool_packages.list':
       case 'tool_packages.get':
@@ -693,12 +722,19 @@ export class PlatformBridgeService {
       case 'tool_packages.list_project_files':
       case 'tool_packages.read_project_file':
       case 'tool_packages.write_project_file':
+      case 'tool_packages.run_project_step':
       case 'tool_packages.install_directory':
+      case 'tool_packages.install_archive':
+      case 'tool_packages.install_git':
+      case 'tool_packages.install_remote':
+      case 'tool_packages.install_mcp_import':
       case 'tool_packages.environment_status':
       case 'tool_packages.configure_environment':
       case 'tool_packages.request_secret':
       case 'tool_packages.set_permission':
       case 'tool_packages.set_enabled':
+      case 'tool_packages.uninstall':
+      case 'tool_packages.delete_version':
       case 'tool_packages.test':
         return handleToolPackageBridgeMethod(
           d.toolPackageService,
@@ -838,6 +874,26 @@ export class PlatformBridgeService {
           }),
         )
 
+      // ── Current-session full history retrieval（上下文压缩后的全量存档逃生门）──
+      // 会话身份由子进程 env 注入后经 requireSessionId 回传校验；仓库层所有查询
+      // 都强制以该 sessionId 为条件，模型无法越权读取其他会话。
+      case 'session_history.list':
+        return d.sessionHistoryTools.list(requireSessionId(params), {
+          ...(typeof params.cursor === 'number' ? { cursor: params.cursor } : {}),
+          ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
+          ...(params.order === 'desc' ? { order: 'desc' as const } : {}),
+        })
+      case 'session_history.read':
+        return this.sessionHistoryRead(d, params)
+      case 'session_history.search':
+        return d.sessionHistoryTools.search(requireSessionId(params), {
+          query: requireText(params, 'query', 200),
+          ...(Array.isArray(params.eventTypes)
+            ? { eventTypes: params.eventTypes.filter((t): t is string => typeof t === 'string') }
+            : {}),
+          ...(typeof params.limit === 'number' ? { limit: params.limit } : {}),
+        })
+
       // ── Current-session scheduled tasks ──
       case 'session_schedule.list':
         return this.sessionScheduleList(d, params)
@@ -945,7 +1001,6 @@ export class PlatformBridgeService {
         return this.subAppDataSet(d, params)
       case 'subapp.data_delete':
         return this.subAppDataDelete(d, params)
-
       default:
         throw new Error(`Unknown method: ${method}`)
     }
@@ -1917,6 +1972,25 @@ export class PlatformBridgeService {
     return d.sessionScheduleTools.delete(requireSessionId(params), taskId)
   }
 
+  // ── Current-session history retrieval handlers ──
+
+  private sessionHistoryRead(d: PlatformBridgeDeps, params: Record<string, unknown>) {
+    const { sessionId: _sessionId, ...input } = params
+    if (input.mode === 'event') {
+      return d.sessionHistoryTools.read(requireSessionId(params), {
+        mode: 'event',
+        turnId: String(input.turnId ?? ''),
+        seq: typeof input.seq === 'number' ? input.seq : -1,
+      })
+    }
+    return d.sessionHistoryTools.read(requireSessionId(params), {
+      mode: 'turns',
+      ...(typeof input.cursor === 'number' ? { cursor: input.cursor } : {}),
+      ...(typeof input.turnLimit === 'number' ? { turnLimit: input.turnLimit } : {}),
+      ...(input.order === 'desc' ? { order: 'desc' as const } : {}),
+    })
+  }
+
   // ── Memory handlers（codex CLI / claude CLI 的 stdio spark_memory 子进程桥接）──
   // 子进程通过 env 收到 sessionId，RPC 调用时带回来；SessionService 按 sessionId 解析
   // 该会话生效的 scope 集合（user/project/agent），底层复用与 claude SDK 路径相同的
@@ -2530,25 +2604,33 @@ export class PlatformBridgeService {
     }
   }
 
-  private subAppDeleteRelease(d: PlatformBridgeDeps, params: Record<string, unknown>) {
+  private async subAppDeleteRelease(d: PlatformBridgeDeps, params: Record<string, unknown>) {
     const appId = requireText(params, 'appId', 80)
     const releaseVersion = optionalSubAppInt(params.releaseVersion, 'releaseVersion', 1)
     if (releaseVersion == null) throw new Error('Missing parameter: releaseVersion')
     try {
       const deleted = d.subAppRepo.deleteRelease(appId, releaseVersion)
       if (!deleted) throw new SubAppReleaseNotFoundError()
+      await d.subAppPackageService.cleanupOrphanedArtifacts()
       return { deleted: true, appId, releaseVersion }
     } catch (error) {
       throw subAppBridgeError(error)
     }
   }
 
-  private subAppRollback(d: PlatformBridgeDeps, params: Record<string, unknown>) {
+  private async subAppRollback(d: PlatformBridgeDeps, params: Record<string, unknown>) {
     const appId = requireText(params, 'appId', 80)
     const releaseVersion = optionalSubAppInt(params.releaseVersion, 'releaseVersion', 1)
     if (releaseVersion == null) throw new Error('Missing parameter: releaseVersion')
     const expectedDraftRevision = requireSubAppRevision(params, 'expectedDraftRevision')
     try {
+      if (d.subAppPlatformRepo.getPackageByVersion(appId, releaseVersion) != null) {
+        await d.subAppPackageService.rollback(appId, releaseVersion, expectedDraftRevision)
+        const details = d.subAppRepo.get(appId)
+        if (details == null) throw new SubAppNotFoundError()
+        d.onConfigChanged?.('sub-app', 'update', appId)
+        return details
+      }
       const details = d.subAppRepo.rollbackDraft(appId, releaseVersion, expectedDraftRevision)
       if (details == null) throw new SubAppNotFoundError()
       d.onConfigChanged?.('sub-app', 'update', appId)
@@ -2588,11 +2670,14 @@ export class PlatformBridgeService {
    * 桥接层做幂等收口：应用已不存在时返回 deleted=false 的空操作结果，
    * 不重复报错——stdio 侧的工具描述已要求 agent 先向用户确认。
    */
-  private subAppDelete(d: PlatformBridgeDeps, params: Record<string, unknown>) {
+  private async subAppDelete(d: PlatformBridgeDeps, params: Record<string, unknown>) {
     const appId = requireText(params, 'appId', 80)
     try {
       const deleted = d.subAppRepo.delete(appId)
-      if (deleted) d.onConfigChanged?.('sub-app', 'delete', appId)
+      if (deleted) {
+        await d.subAppPackageService.cleanupDeletedApp(appId).catch(() => {})
+        d.onConfigChanged?.('sub-app', 'delete', appId)
+      }
       return deleted
         ? { deleted: true, appId }
         : { deleted: false, appId, note: '应用不存在（可能已被删除），本次为幂等空操作。' }

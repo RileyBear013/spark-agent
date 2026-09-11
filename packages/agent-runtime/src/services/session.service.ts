@@ -32,6 +32,7 @@ import type {
 } from '@spark/storage'
 import type { SparkDatabase, MemoryScopeFilter } from '@spark/storage'
 import { resolveProviderApiKey } from './provider-credential-resolver.js'
+import { ensureSessionWorkspaceRootPath } from './session-workspace-root.js'
 import {
   SessionWorktreeStateService,
   type SessionRuntimeWorktreeState,
@@ -51,8 +52,11 @@ import type {
   SessionChatMode,
   SessionClearQueuedTurnsResponse,
   SessionReorderQueuedTurnsResponse,
+  SessionResumeQueueResponse,
+  SessionQueueRuntimeSelection,
   SessionSendQueuedTurnNowResponse,
   SessionCreateResponse,
+  SessionExtractTitleResponse,
   SessionGetQueueResponse,
   SessionGoalResponse,
   SessionId,
@@ -119,12 +123,12 @@ import {
 } from './plugin-runtime/plugin-runtime-mcp-bridge.js'
 import { RuntimeBroker } from './plugin-runtime/runtime-broker.js'
 import { registerBuiltinRuntimeAdapters } from './plugin-runtime/builtin-runtimes.js'
-import { routeProviderVisionAttachments } from './custom-tools/provider-vision-router.js'
-import { createProviderVisionSessionEvents } from './custom-tools/provider-vision-session-events.js'
 import type { CustomToolService } from './custom-tools/custom-tool.service.js'
 import { CustomToolRuntimeCatalog } from './custom-tools/custom-tool-runtime-catalog.js'
 import { ToolPackageService } from './tool-packages/tool-package.service.js'
 import { ToolPackageRuntimeCatalog } from './tool-packages/tool-package-runtime-catalog.js'
+import { UnifiedToolCatalog } from './unified-tools/unified-tool-catalog.js'
+import { TOOL_GUIDANCE_SYSTEM_PROMPT } from './unified-tools/tool-guidance-system-prompt.js'
 
 /** Read the runtime-log toggle from the telemetry settings object shared with the renderer. */
 export function readRuntimeLogEnabled(settings: Pick<SettingsRepository, 'get'>): boolean {
@@ -157,14 +161,26 @@ import {
   buildPersistentCodexAppServerConfig,
   createCodexNativeThreadMetadataPatch,
   readCodexNativeThreadGeneration,
+  scopeRuntimeSessionIdentity,
   scopeCodexNativeThreadBindingKey,
   shouldUsePersistentCodexAppServer,
 } from './session/codex-native-thread-binding.js'
+import {
+  createSparkLedgerBindingPatch,
+  readSparkLedgerSessionId,
+} from './session/spark-ledger-binding.js'
+import { resolveSparkUpstreamProtocol } from '../sdk/index.js'
 // 原 codex 载具工厂整体迁入 codex descriptor；re-export 保持既有 import 面。
 export { createCodexExecutorForConfig } from './session/engine-registry.js'
 
 // ─── P1-W2-D1 turn 所有权注册表（迁出至 ./session/turn-registry.ts）───
 import { TurnRegistry } from './session/turn-registry.js'
+import {
+  applyQueueRuntimeSelection,
+  pickQueueRuntimeSelection,
+  QueueErrorPauseGate,
+  recoverQueueErrorPause,
+} from './session/queue-error-pause-gate.js'
 
 // ─── P1-W3-S2 命令系统（迁出至 ./session/session-commands.ts）───
 import { SessionCommandController } from './session/session-commands.js'
@@ -236,12 +252,14 @@ import {
   parseWorktreePromptMeta,
   pickGoalDrainableRuntimeSelection,
   prepareTurnAttachments,
+  getProviderUseSparkExecutor,
   providerRowsForModelRouter,
   assertModelNotScheduledBlocked,
   readSessionTeamConfig,
   resolveCodexMemberExecutionProfile,
   shouldDeriveSessionTitle,
   supportsOpenAIFastMode,
+  toLastRunOutcome,
   withAgentSnapshot,
 } from './session/session-pure-utils.js'
 import type { SessionRuntimePatch, WorktreePromptMeta } from './session/session-pure-utils.js'
@@ -272,6 +290,7 @@ import {
   createInterruptedTurnEvents,
   shouldRunTurnPostProcessing,
   collectCompleteAssistantTurnText,
+  makeEventBase,
 } from './session-event-helpers.js'
 export {
   createUserCancelledTurnEvent,
@@ -303,6 +322,7 @@ import {
   RENDER_DIAGRAM_SYSTEM_PROMPT,
   TOOL_RESULT_SYSTEM_PROMPT,
   TOOL_RESULT_TOOL_NAMES,
+  SESSION_HISTORY_SYSTEM_PROMPT,
   WEB_SEARCH_SYSTEM_PROMPT,
   SPARK_WEB_TOOL_SYSTEM_PROMPT,
   VALIDATION_SUGGESTION_TOOL_NAMES,
@@ -328,6 +348,7 @@ import {
   extractWorkflowApprovalCommentImpl,
   extractWorkflowApprovalTextImpl,
   findWorkflowApprovalAnswerImpl,
+  isWorkflowApprovalCancelledImpl,
   isWorkflowApprovalApprovedImpl,
   hasWorkflowExecutableNodes,
   resolveWorkflowArtifactExportPath,
@@ -341,12 +362,20 @@ import {
   createWorkflowAtomicMember,
   getDefaultWorkflowAtomicContent,
   memberDisallowedToolsFromConfig,
+  shouldAttachWorkflowSessionMcp,
   runWorkflowVerifyNode,
+  buildWorkflowToolInvocationInstruction,
+  buildWorkflowProgressNodes,
+  buildWorkflowProgressNodeMetas,
+  formatWorkflowMcpToolResult,
+  formatWorkflowPlatformToolResult,
+  getWorkflowToolInvocationSpec,
 } from './session-workflow-helpers.js'
 import { MediaPresentationCollector } from './media/media-presentation-collector.js'
 export {
   buildWorkflowAtomicInstruction,
   extractWorkflowApprovalCommentImpl,
+  isWorkflowApprovalCancelledImpl,
   isWorkflowApprovalApprovedImpl,
   hasWorkflowExecutableNodes,
   resolveWorkflowArtifactExportPath,
@@ -370,7 +399,7 @@ import type { CheckpointRestoreResult, CheckpointSnapshot, CommandListItem } fro
 import { McpService } from './mcp-server.service.js'
 import type { McpOAuthTokenProvider } from './mcp-server.service.js'
 import type { McpChangeEvent } from './mcp-server.service.js'
-import { PlatformBridgeService } from './platform-bridge.service.js'
+import { PlatformBridgeService, type PlatformBridgeDeps } from './platform-bridge.service.js'
 import { SESSION_SCHEDULE_AGENT_SYSTEM_PROMPT } from './session-schedule-agent-tools.js'
 import { getDebugLogServer } from './debug-log-server.service.js'
 import {
@@ -384,11 +413,11 @@ import { SessionQuestionGate } from './session-question-gate.js'
 import {
   executeWorkflowAgentPlan,
   getWorkflowNodesDeep,
-  getWorkflowNodeEffectiveWorkerId,
   getWorkflowNodeWorkerId,
   normalizeWorkflowGraph,
   type NormalizedWorkflowGraph,
   type WorkflowDispatchAttachment,
+  type WorkflowRunSnapshot,
 } from './workflow-executor.js'
 import { SkillLoader } from '../skills/skill-loader.js'
 import type {
@@ -400,6 +429,7 @@ import type {
   SDKQuestionRequestContext,
 } from '../sdk/index.js'
 import { CodexRuntimeMcpResourceCoordinator } from './session/codex-runtime-mcp-resources.js'
+import { buildSparkEngineMcpRuntime } from './session/spark-engine-runtime.js'
 import type { ActiveExecution } from '../sdk/index.js'
 import { getResumeCircuitBreaker } from '../sdk/index.js'
 import { isPermissionModeAware } from '../sdk/index.js'
@@ -574,6 +604,8 @@ type SendTurnParams = UserMessagePresentation & {
   teamConfig?: TeamModeConfig
   mentionAgentId?: string
   interruptActive?: boolean
+  /** 错误暂停条重试：恢复暂停并让本 turn 排到剩余队列最前。 */
+  resumePausedQueue?: boolean
   /** 仅供同进程诊断调用；不会进入持久化 turn 队列。 */
   invocationObserver?: (snapshot: SDKInvocationSnapshot) => void
 }
@@ -852,6 +884,8 @@ export class SessionService {
   private readonly maxConcurrentSessions: number = DEFAULT_MAX_CONCURRENT_SESSIONS
   /** 结构化问答独立闸门：SDK 流提前结束时仍保持，直到用户回答或明确关闭。 */
   private readonly pendingUserQuestionGate = new SessionQuestionGate()
+  /** turn error 后的 session 级队列暂停状态；会话状态负责重启恢复，本对象负责热路径。 */
+  private queueErrorPauseGate?: QueueErrorPauseGate = new QueueErrorPauseGate()
   private readonly eventSequencer = new SessionEventSequencer()
   /**
    * 当前 turn 该会话实际生效的对话模型 — 含 @mention agent 切换。
@@ -891,6 +925,7 @@ export class SessionService {
   /** sessionId:turnId → Host 与所有成员共享的文件变更路径键，避免同轮重复归因。 */
   private readonly fileChangeKeysByTurn = new Map<string, Set<string>>()
   private readonly platformBridge: PlatformBridgeService
+  private subAppRuntimeBridge: PlatformBridgeDeps['subAppRuntime']
   private pluginManager: PluginManager | null = null
   private customToolService: CustomToolService | null = null
   private customToolRuntimeUnsubscribe: (() => void) | null = null
@@ -1067,6 +1102,11 @@ export class SessionService {
     return this.worktreeStateService
   }
 
+  private getQueueErrorPauseGate(): QueueErrorPauseGate {
+    this.queueErrorPauseGate ??= new QueueErrorPauseGate()
+    return this.queueErrorPauseGate
+  }
+
   constructor(
     private readonly db: SparkDatabase,
     private readonly onEvent: SessionEventHandler,
@@ -1157,6 +1197,7 @@ export class SessionService {
     this.customToolRuntimeUnsubscribe?.()
     this.customToolRuntimeUnsubscribe = null
     this.customToolService = service
+    this.toolPackageService.setLegacyCustomToolService(service)
     if (service != null) {
       this.customToolRuntimeUnsubscribe = service.onChange((event) => {
         if (event.runtimeChanged === false) return
@@ -1415,7 +1456,11 @@ export class SessionService {
         const workspaceId = workspaceIds[0]
         if (workspaceId != null && workspaceId.length > 0) {
           const wsRepo = new WorkspaceRepository(this.db)
-          workspaceRootPath = wsRepo.get(workspaceId)?.root_path ?? undefined
+          const workspace = wsRepo.get(workspaceId)
+          workspaceRootPath =
+            workspace == null
+              ? undefined
+              : await ensureSessionWorkspaceRootPath(workspace, params.sessionId)
         }
       }
     } catch {
@@ -1494,6 +1539,8 @@ export class SessionService {
       appendInterruptedTurnEventsForSession(eventRepo, session.id)
 
       sessionRepo.updateStatus(session.id, 'idle')
+      // 中断恢复按 cancelled 收口（与补写的 agent_status cancelled 事件一致）。
+      sessionRepo.patchMetadata(session.id, { lastRunOutcome: 'cancelled' })
       this.pendingTurns.delete(session.id)
       this.onApprovalCancel?.(session.id)
       this.emitQueueChanged(session.id)
@@ -1530,6 +1577,8 @@ export class SessionService {
       const eventRepo = new EventRepository(this.db)
       const appended = appendInterruptedTurnEventsForSession(eventRepo, sessionId)
       sessionRepo.updateStatus(sessionId, 'idle')
+      // 僵尸会话回收按 cancelled 收口（与补写的 agent_status cancelled 事件一致）。
+      sessionRepo.patchMetadata(sessionId, { lastRunOutcome: 'cancelled' })
       this.deferredHostTerminalStatus.delete(sessionId)
       this.emitQueueChanged(sessionId)
       log.info('reconciled zombie running session', {
@@ -1549,6 +1598,8 @@ export class SessionService {
 
   private recoverAcceptedTurnRequests(): void {
     const repo = new TurnRequestRepository(this.db)
+    const sessionRepo = new SessionRepository(this.db)
+    const eventRepo = new EventRepository(this.db)
     const sessionsToStart = new Set<string>()
     for (const row of repo.listRecoverable()) {
       if (row.status === 'running') {
@@ -1569,6 +1620,18 @@ export class SessionService {
       }
     }
     for (const sessionId of sessionsToStart) {
+      const session = sessionRepo.get(sessionId)
+      if (session?.status === 'error') {
+        const rows = eventRepo.queryBySession({
+          sessionId,
+          eventType: 'agent_status',
+          limit: 32,
+        }).events
+        this.getQueueErrorPauseGate().pause(
+          sessionId,
+          recoverQueueErrorPause(rows, session.updated_at),
+        )
+      }
       setTimeout(() => this.startNextQueuedTurn(sessionId), 0)
     }
   }
@@ -1589,6 +1652,10 @@ export class SessionService {
   }): Promise<SessionCreateResponse> {
     const sessionRepo = new SessionRepository(this.db)
     const id = crypto.randomUUID()
+    if (params.workspaceId != null) {
+      const workspace = new WorkspaceRepository(this.db).get(params.workspaceId)
+      if (workspace != null) await ensureSessionWorkspaceRootPath(workspace, id)
+    }
     const agent = this.resolveAgent(params.agentId)
     const row = sessionRepo.create({
       id,
@@ -1774,7 +1841,14 @@ export class SessionService {
     const runtimePatch = getRuntimePatch(params)
     const sessionReferences = params.sessionReferences?.slice(0, 10) ?? []
     const turnId = crypto.randomUUID()
-    if (userMessagePresentation.userMessageVisibility !== 'hidden') {
+    const isVisibleUserTurn = userMessagePresentation.userMessageVisibility !== 'hidden'
+    const pausedQueue = isVisibleUserTurn
+      ? this.getQueueErrorPauseGate().getPause(
+          sessionId,
+          this.pendingTurns.get(sessionId)?.length ?? 0,
+        )
+      : null
+    if (isVisibleUserTurn) {
       // A new visible user turn supersedes any pending internal continuation.
       this.resetTeamDispatchAutoContinuation(sessionId)
       this.removeQueuedTeamDispatchAutoContinuations(sessionId)
@@ -1806,6 +1880,12 @@ export class SessionService {
     const collaboration =
       sessionReferences.length > 0 ? new SessionCollaborationRepository(this.db) : null
     const turnRequestRepository = durable ? new TurnRequestRepository(this.db) : null
+    const resumedErrorQueue = pausedQueue != null
+    if (resumedErrorQueue) {
+      // Re-snapshot the already accepted queue before accepting the new user turn. If this write
+      // fails, the pause remains in place and no orphaned retry request is created.
+      this.rebaseQueuedRuntimeSelection(sessionId, runtimePatch)
+    }
     // Reference attachment and durable acceptance form one database boundary.
     // A bad reference or a failed turn-request insert therefore leaves neither
     // a partial authorization nor an orphaned accepted turn behind.
@@ -1844,13 +1924,25 @@ export class SessionService {
       if (typeof database.raw?.transaction === 'function') database.raw.transaction(persistTurn)()
       else persistTurn()
     }
+    if (resumedErrorQueue) {
+      this.getQueueErrorPauseGate().resolve(sessionId)
+      new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+      this.emitQueueChanged(sessionId)
+    }
+    const enqueueDispatchedTurn = (): void => {
+      this.enqueueTurn(
+        sessionId,
+        pendingTurn,
+        resumedErrorQueue && params.resumePausedQueue === true ? 'front' : 'back',
+      )
+    }
     const currentGoal = new GoalRepository(this.db).getCurrent(sessionId)
     // spark-loop 目标活跃时用户消息入队，由下一轮迭代排空注入（drainQueuedUserTurnsForGoalIteration）。
     // codex-native 目标由 codex 侧自驱循环，Spark 不泵迭代——用户消息按普通流程执行
     // （若恰有 turn 在跑会落入下方 hasActiveSessionExecution 的常规排队，turn 结束即排空）。
     const goalOwnsDispatch = currentGoal?.status === 'active' && currentGoal.mode === 'spark-loop'
     if (goalOwnsDispatch || this.pendingUserQuestionGate.isBlocked(sessionId)) {
-      this.enqueueTurn(sessionId, pendingTurn)
+      enqueueDispatchedTurn()
       // goal 仍 active 但会话已无任何执行在跑（中断/异常释放后）：迭代 turn 这个
       // 排水泵已不存在，入队消息会永久滞留（表现为中断后发"继续"无响应）。
       // 入队后补一次泵：spark-loop 由 startGoalLoop 把刚入队的消息注入下一轮迭代；
@@ -1888,15 +1980,18 @@ export class SessionService {
           createUserCancelledTurnEvent(sessionId, interruptedTurnId),
           eventRepo,
         )
-        new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+        const interruptRepo = new SessionRepository(this.db)
+        interruptRepo.updateStatus(sessionId, 'idle')
+        // 显式中断（插队/停止）按 cancelled 收口（与补发的 cancelled 事件一致）。
+        interruptRepo.patchMetadata(sessionId, { lastRunOutcome: 'cancelled' })
       } else {
-        this.enqueueTurn(sessionId, pendingTurn)
+        enqueueDispatchedTurn()
         return { turnId, started: false }
       }
     }
 
     if (durable) {
-      this.enqueueTurn(sessionId, pendingTurn)
+      enqueueDispatchedTurn()
       const scheduleStart = () => setTimeout(() => this.startNextQueuedTurn(sessionId), 0)
       if (startAfter == null) {
         scheduleStart()
@@ -2238,7 +2333,6 @@ export class SessionService {
       supportsMillionContext?: boolean
       contextWindow?: number
       modelContextWindows?: Record<string, number>
-      modelType?: 'image' | 'text' | 'multimodal' | 'voice' | 'video'
       haikuModel?: string
       sonnetModel?: string
       opusModel?: string
@@ -2383,6 +2477,7 @@ export class SessionService {
           : session.agent_adapter,
       session.chat_mode,
       provider.provider_type,
+      getProviderUseSparkExecutor(provider.config_json),
     )
     const adapterKind = resolveEngineKind(agentAdapter)
     const resumeProviderProfileId =
@@ -2391,19 +2486,21 @@ export class SessionService {
         : effectiveRuntimeProviderProfileId
     // 非 mention turn 保持现有 hash（向后兼容续会话）；
     // mention turn 把被 @ 的 agent.id 加入 hash，避免与 Host SDK session 冲突且让重复 @ 同一 member 可续会话。
+    const nativeThreadGeneration = readCodexNativeThreadGeneration(session.metadata_json)
     const stableSdkSessionId = isMentionTurn
       ? this.resumeGate.makeRuntimeSessionId(
           sessionId,
           resumeProviderProfileId,
           model,
           agentAdapter,
-          `mention:${agent.id}`,
+          scopeRuntimeSessionIdentity(`mention:${agent.id}`, nativeThreadGeneration),
         )
       : this.resumeGate.makeRuntimeSessionId(
           sessionId,
           resumeProviderProfileId,
           model,
           agentAdapter,
+          scopeRuntimeSessionIdentity(undefined, nativeThreadGeneration),
         )
     const codexNativeThreadBindingKey = scopeCodexNativeThreadBindingKey(
       this.resumeGate.makeRuntimeSessionId(
@@ -2413,7 +2510,7 @@ export class SessionService {
         agentAdapter,
         buildCodexNativeThreadIdentityScope({ agentId: agent.id, isMentionTurn }),
       ),
-      readCodexNativeThreadGeneration(session.metadata_json),
+      nativeThreadGeneration,
     )
     const sdkResumeSafe = this.resumeGate.isSafe({
       providerType: provider.provider_type,
@@ -2446,6 +2543,14 @@ export class SessionService {
           agentAdapter,
           isMentionTurn ? `mention:${agent.id}:${turnId}` : turnId,
         )
+    // Spark 引擎续跑：bindingKey 复用 stableSdkSessionId（含 provider/model/adapter 与
+    // mention 身份）；ledger binding 存在即允许 resume——引擎原生 openSession 重放，
+    // 账本缺失时执行器自动降级新会话并回写，不走 claude 口径的 sdkResumeSafe 白名单。
+    const sparkLedgerBindingKey = stableSdkSessionId
+    const sparkLedgerSessionId =
+      adapterKind === 'spark'
+        ? readSparkLedgerSessionId(session.metadata_json, sparkLedgerBindingKey)
+        : null
     const contextWindowTokens = resolveModelContextWindowForProvider(
       model,
       config.supportsMillionContext === true,
@@ -2468,7 +2573,9 @@ export class SessionService {
             },
           }
         : {}),
-      ...(canResumeSdkSession || usePersistentCodexAppServer ? { deferForSdkResume: true } : {}),
+      ...(canResumeSdkSession || usePersistentCodexAppServer || sparkLedgerSessionId != null
+        ? { deferForSdkResume: true }
+        : {}),
     })
     const conversationHistoryPrompt = conversationContext.prompt
     const resumeRecoveryHistoryPrompt = conversationContext.recoveryPrompt
@@ -2524,21 +2631,21 @@ export class SessionService {
       const wsRepo = new WorkspaceRepository(this.db)
       const ws = wsRepo.get(primaryWorkspaceId ?? '')
       if (ws != null) {
-        workspaceRootPath = ws.root_path
+        workspaceRootPath = await ensureSessionWorkspaceRootPath(ws, sessionId)
         const worktreeMeta =
           typeof ws.worktree_meta_json === 'string' && ws.worktree_meta_json.trim().length > 0
             ? parseWorktreePromptMeta(ws.worktree_meta_json)
             : undefined
         workspaceInfo = {
           name: ws.name,
-          rootPath: ws.root_path,
+          rootPath: workspaceRootPath,
           projectKind: ws.project_kind,
           ...(worktreeMeta ? { worktreeMeta } : {}),
         }
         // Load Context Governor pin/exclude overrides for this workspace
         const ctxPrefRepo = new ContextPreferenceRepository(this.db)
         const { pinnedPaths, excludedPaths } = ctxPrefRepo.getOverrides(primaryWorkspaceId ?? '')
-        projectContext = projectContextService.discover(ws.root_path, {
+        projectContext = projectContextService.discover(workspaceRootPath, {
           mode: 'project-smart',
           budgetTokens: projectContextBudgetTokens,
           pinnedPaths,
@@ -2546,26 +2653,11 @@ export class SessionService {
         })
       }
     }
+    // Keep the user's turn authoritative. Image capability is decided by the selected model;
+    // the session host must not replace image attachments with a synthetic vision-tool result.
     const turnAttachments = prepareTurnAttachments(attachments, workspaceRootPath)
-    const providerVisionRoute = await routeProviderVisionAttachments({
-      database: this.db,
-      ...(config.modelType != null ? { modelType: config.modelType } : {}),
-      message,
-      attachments: turnAttachments,
-      sessionId,
-      turnId,
-    })
-    for (const event of createProviderVisionSessionEvents({
-      route: providerVisionRoute,
-      sessionId,
-      turnId,
-    })) {
-      this.emitAndPersist(sessionId, turnId, event, eventRepo)
-    }
-    const executorMessage = providerVisionRoute.message
-    const executorTurnAttachments = providerVisionRoute.attachments
     const attachmentDirectories = getAttachmentAdditionalDirectories(
-      executorTurnAttachments,
+      turnAttachments,
       workspaceRootPath,
     )
 
@@ -2911,6 +3003,7 @@ export class SessionService {
 
     const systemPromptSections = [
       APPLICATION_FOUNDATION_SYSTEM_PROMPT,
+      TOOL_GUIDANCE_SYSTEM_PROMPT,
       managedAgentPrompt,
       teamMemberContextPrompt,
       orchestrationModePrompt,
@@ -2968,6 +3061,7 @@ export class SessionService {
       mediaGenerationContext?.systemPrompt,
       platformMcpServer != null ? PLATFORM_MANAGEMENT_SYSTEM_PROMPT : undefined,
       platformMcpServer != null ? SESSION_SCHEDULE_AGENT_SYSTEM_PROMPT : undefined,
+      platformMcpServer != null ? SESSION_HISTORY_SYSTEM_PROMPT : undefined,
       webSearchMcpServer != null ? WEB_SEARCH_SYSTEM_PROMPT : undefined,
       presentFilesMcpServer != null ? PRESENT_FILES_SYSTEM_PROMPT : undefined,
       toolResultReaderAvailable ? TOOL_RESULT_SYSTEM_PROMPT : undefined,
@@ -3107,9 +3201,7 @@ export class SessionService {
           turnId,
           timestamp: new Date().toISOString(),
           seq: 0,
-          userMessage: runtimeLogEnabled
-            ? buildUserMessageSnapshot(executorMessage, executorTurnAttachments)
-            : '',
+          userMessage: runtimeLogEnabled ? buildUserMessageSnapshot(message, turnAttachments) : '',
           systemPromptSections: runtimeLogEnabled ? promptSections : [],
           model,
           providerProfileId: effectiveRuntimeProviderProfileId,
@@ -3128,7 +3220,7 @@ export class SessionService {
     // ── Context Ledger ──────────────────────────────────────────────────
     // Emit a detailed token breakdown of all context sections for UI display
     {
-      const attachmentPromptLedger = buildAttachmentPromptLedger(executorTurnAttachments)
+      const attachmentPromptLedger = buildAttachmentPromptLedger(turnAttachments)
       // 原生 resume / 常驻 app-server 路径：历史由 runtime 内部维护、不注入 Spark
       // prompt，若账本缺历史段，「上下文用量」会恒等于静态 prompt 规模冻结不动。
       // 用上一轮最后一次真实请求的 prompt 规模反推展示用历史段（clamp 到窗口）。
@@ -3165,7 +3257,7 @@ export class SessionService {
               conversationHistoryUsedTokens: Math.min(lastRealPromptTokens, contextWindowTokens),
             }
           : {}),
-        userMessage: executorMessage,
+        userMessage: message,
         attachmentPrompt: attachmentPromptLedger,
       })
       runtimeMetrics.recordPromptEstimate(totalEstimatedTokens)
@@ -3286,7 +3378,7 @@ export class SessionService {
               ),
             }
           : {}),
-        ...(executorTurnAttachments.length > 0 ? { attachments: executorTurnAttachments } : {}),
+        ...(turnAttachments.length > 0 ? { attachments: turnAttachments } : {}),
         ...(attachmentDirectories.length > 0
           ? { additionalDirectories: attachmentDirectories }
           : {}),
@@ -3360,7 +3452,7 @@ export class SessionService {
       await this.tryStartSDKTurn(
         sessionId,
         turnId,
-        executorMessage,
+        message,
         eventRepo,
         sessionRepo,
         sdkConfig,
@@ -3373,23 +3465,225 @@ export class SessionService {
       runtimeMetrics.markRequestSent()
       invocationObserver?.(snapshot)
     }
+    // ---- Spark 引擎分支（adapter 'spark'）----
+    // Spark 引擎消费宿主提示词、技能快照、customEnv、MCP 与模型预算；所有外部
+    // 注入仍经 Spark 自己的 schema、权限和事件账本边界收敛。
+    if (adapterKind === 'spark') {
+      const sparkRoute = resolveSparkUpstreamProtocol(provider.provider_type, config.codexApiKind)
+      const persistUserMessage = (): void => {
+        if (userMessageAlreadyPersisted) return
+        this.emitAndPersist(
+          sessionId,
+          turnId,
+          {
+            ...makeEventBase(sessionId, turnId),
+            type: 'user_message',
+            content: message,
+            ...userMessagePresentation,
+            ...(sessionReferences != null && sessionReferences.length > 0
+              ? { sessionReferences }
+              : {}),
+          },
+          eventRepo,
+        )
+      }
+      if (!sparkRoute.ok) {
+        // 组装期协议不可映射（如 chat/completions 渠道）：以明确错误终态收束本轮。
+        persistUserMessage()
+        this.emitAndPersist(
+          sessionId,
+          turnId,
+          {
+            ...makeEventBase(sessionId, turnId),
+            type: 'agent_error',
+            code: 'SPARK_PROTOCOL_UNMAPPABLE',
+            message: sparkRoute.reason,
+            retryable: false,
+          },
+          eventRepo,
+        )
+        this.emitAndPersist(
+          sessionId,
+          turnId,
+          {
+            ...makeEventBase(sessionId, turnId),
+            type: 'agent_status',
+            status: 'error',
+            message: 'Spark 引擎无法使用该渠道',
+          },
+          eventRepo,
+        )
+        sessionRepo.updateStatus(sessionId, 'error')
+        return
+      }
+      const sparkCustomMcpServers = await this.getMcpTooling().buildMcpServersForSDK()
+      const sparkMemoryMcpServer = await this.getMcpTooling().resolveSparkMemoryMcpServer(
+        sessionId,
+        workspaceRootPath,
+        runtimeAgent.id,
+      )
+      const sparkSessionMcpServer = await this.resolveSparkSessionMcpServer(sessionId)
+      const sparkToolResultServer = resolveToolResultReaderMcpServer(workspaceRootPath)
+      const sparkMcpRuntime = buildSparkEngineMcpRuntime({
+        customServers: sparkCustomMcpServers,
+        ...(imageGenerationContext != null
+          ? { imageServer: imageGenerationContext.mcpServer }
+          : {}),
+        ...(mediaGenerationContext != null
+          ? { mediaServer: mediaGenerationContext.mcpServer }
+          : {}),
+        ...(teamMcpServer != null
+          ? {
+              teamServer: teamMcpServer,
+              teamToolNames: [
+                ...(this.teamMcpToolNames.get(teamMcpServer) ??
+                  new Set(['agent_dispatch', 'agent_dispatch_batch'])),
+              ].map((name) => `mcp__${SPARK_TEAM_MCP_SERVER_NAME}__${name}`),
+            }
+          : {}),
+        ...(platformMcpServer != null ? { platformServer: platformMcpServer } : {}),
+        ...(pluginRuntimeMcp != null
+          ? { pluginServer: pluginRuntimeMcp.server, pluginToolNames: pluginRuntimeMcp.toolNames }
+          : {}),
+        ...(webSearchMcpServer != null ? { searchServer: webSearchMcpServer } : {}),
+        ...(subAppMcpServer != null ? { subAppServer: subAppMcpServer } : {}),
+        ...(presentFilesMcpServer != null ? { filesServer: presentFilesMcpServer } : {}),
+        ...(quickRepliesMcpServer != null ? { uiServer: quickRepliesMcpServer } : {}),
+        ...(browserAutomationMcpServer != null
+          ? { browserServer: browserAutomationMcpServer }
+          : {}),
+        ...(computerUseMcp != null
+          ? {
+              computerServer: computerUseMcp.server,
+              computerToolNames: computerUseMcp.allowedTools,
+            }
+          : {}),
+        ...(debugMcpServer != null ? { debugServer: debugMcpServer } : {}),
+        ...(sparkMemoryMcpServer != null ? { memoryServer: sparkMemoryMcpServer } : {}),
+        ...(sparkSessionMcpServer != null ? { sessionServer: sparkSessionMcpServer } : {}),
+        ...(sparkToolResultServer != null ? { toolResultServer: sparkToolResultServer } : {}),
+      })
+      const governedSparkMcpServers = governMcpServers(sparkMcpRuntime.servers, {
+        workspaceRootPath,
+        nodeExecutable: tryResolveMcpNodeRuntimeExecutable(),
+        proxyServerPath: resolveToolResultProxyMcpServerPath(),
+        readerServer: sparkToolResultServer,
+      })
+      runtimeMetrics.recordMcpConfiguration(
+        Object.keys(governedSparkMcpServers),
+        this.mcpService.getConnectedToolCatalogs(),
+      )
+      runtimeMetrics.pauseMcpConfiguration()
+      const sparkConfig: SDKExecutorConfig = {
+        apiKey,
+        model,
+        workspaceRootPath,
+        permissionMode,
+        contextWindowTokens,
+        ...(composedSystemPrompt != null ? { systemPrompt: composedSystemPrompt } : {}),
+        ...(composedSkillSystemPrompt != null
+          ? { skillSystemPrompt: composedSkillSystemPrompt }
+          : {}),
+        ...(runtimeContext.customEnv != null ? { customEnv: runtimeContext.customEnv } : {}),
+        ...(Object.keys(governedSparkMcpServers).length > 0
+          ? { mcpServers: governedSparkMcpServers }
+          : {}),
+        ...(sparkMcpRuntime.allowedTools.length > 0
+          ? { allowedTools: [...sparkMcpRuntime.allowedTools] }
+          : {}),
+        ...(config.maxTokens != null ? { maxTokens: config.maxTokens } : {}),
+        ...(session.reasoning_effort != null
+          ? { reasoningEffort: normalizeReasoningEffort(session.reasoning_effort) }
+          : {}),
+        ...(normalizeReasoningBudgetTokens(agent.metadata.reasoningBudgetTokens) != null
+          ? {
+              reasoningBudgetTokens: normalizeReasoningBudgetTokens(
+                agent.metadata.reasoningBudgetTokens,
+              ),
+            }
+          : {}),
+        ...(config.apiEndpoint != null ? { apiEndpoint: config.apiEndpoint } : {}),
+        sparkUpstreamProtocol: sparkRoute.protocol,
+        ...(sparkLedgerSessionId != null
+          ? { sdkSessionId: sparkLedgerSessionId, continueSession: true }
+          : {}),
+        sparkSessionIdObserver: (sparkSessionId) => {
+          sessionRepo.patchMetadata(
+            sessionId,
+            createSparkLedgerBindingPatch(sessionRepo.getMetadata(sessionId), {
+              bindingKey: sparkLedgerBindingKey,
+              sparkSessionId,
+            }),
+          )
+        },
+        ...(this.onApproval != null
+          ? {
+              // 审批桥（M3）：与 claude 分支同构——弹卡等待前后切换 waiting_permission
+              // 状态；卡片/规则/超时由 desktop 侧 permission service 统一处理。
+              approvalCallback: async (
+                sid: string,
+                toolName: string,
+                toolInput: Record<string, unknown>,
+                context: SDKPermissionRequestContext,
+              ) => {
+                this.emitAgentStatusEvent(sid, turnId, eventRepo, 'waiting_permission')
+                try {
+                  return await this.onApproval!(sid, toolName, toolInput, context)
+                } finally {
+                  this.emitAgentStatusEvent(sid, turnId, eventRepo, 'thinking')
+                }
+              },
+            }
+          : {}),
+        invocationObserver: observedInvocation,
+      }
+      const sparkTurnOptions: TryStartSDKTurnOptions = {
+        ...(isMentionTurn ? { mentionAgentId: agent.id } : {}),
+        primaryWorkspaceId: primaryWorkspaceId ?? '',
+        agentId: agent.id,
+        workspaceRootPath,
+        ...userMessagePresentation,
+        runtimeMetrics,
+        ...(userMessageAlreadyPersisted ? { userMessageAlreadyPersisted: true } : {}),
+        ...(sessionReferences != null && sessionReferences.length > 0 ? { sessionReferences } : {}),
+      }
+      if (shouldGenerateSessionTitle && !isMentionTurn) {
+        sparkTurnOptions.firstTurnTitleContext = {
+          providerType: provider.provider_type,
+          apiKey,
+          model,
+          ...(config.apiEndpoint != null ? { apiEndpoint: config.apiEndpoint } : {}),
+          userMessage: message,
+        }
+      }
+      await this.tryStartSparkEngineTurn(
+        sessionId,
+        turnId,
+        message,
+        eventRepo,
+        sessionRepo,
+        sparkConfig,
+        sparkTurnOptions,
+      )
+      return
+    }
     const openAIChatTools =
       config.codexApiKind === 'chat'
-        ? new ToolPackageRuntimeCatalog(this.toolPackageService)
-            .list({
+        ? (
+            await this.listUnifiedTools({
               sessionId,
               turnId,
               ...(primaryWorkspaceId != null ? { projectId: primaryWorkspaceId } : {}),
               agentId: runtimeAgent.id,
               ...(runtimeAgent.workflowId != null ? { workflowId: runtimeAgent.workflowId } : {}),
             })
-            .map((entry) => ({
-              name: entry.qualifiedName,
-              description: entry.tool.description,
-              inputSchema: entry.tool.inputSchema,
-              risk: entry.tool.risk,
-              invoke: entry.invoke,
-            }))
+          ).map((entry) => ({
+            name: entry.qualifiedName,
+            description: entry.tool.description,
+            inputSchema: entry.tool.inputSchema,
+            risk: entry.tool.risk,
+            invoke: entry.invoke,
+          }))
         : []
     const codexConfig: SDKExecutorConfig = {
       apiKey,
@@ -3476,7 +3770,7 @@ export class SessionService {
         ? { reasoningEffort: normalizeReasoningEffort(session.reasoning_effort) }
         : {}),
       fastMode: effectiveFastMode,
-      ...(executorTurnAttachments.length > 0 ? { attachments: executorTurnAttachments } : {}),
+      ...(turnAttachments.length > 0 ? { attachments: turnAttachments } : {}),
       ...(attachmentDirectories.length > 0 ? { additionalDirectories: attachmentDirectories } : {}),
       enableCheckpoints: false,
       sdkSessionId,
@@ -4984,6 +5278,271 @@ export class SessionService {
   }
 
   /**
+   * Spark 引擎 turn 启动（对照 tryStartCodexCliTurn 骨架，使用 Spark 自己的事件收敛）。
+   *
+   * 差异点：
+   * - Host MCP 由上游按 stdio / Streamable HTTP 组装后注入，unsupported transport 在组装期跳过；
+   * - 无媒体产物即时展示（mediaPresentationCollector）：spark 引擎 M2 事件流不产生
+   *   file_change / 媒体类事件，待引擎侧工具产物上抛通道打通后接入；
+   * - 终态语义与 codex 路径一致：completed 即时广播、无 result 标记的 error 扣留到
+   *   收尾补发（spark mapper 的事件均无 terminalSource，error 走扣留路径）。
+   */
+  private async tryStartSparkEngineTurn(
+    sessionId: string,
+    turnId: string,
+    message: string,
+    eventRepo: EventRepository,
+    sessionRepo: SessionRepository,
+    config: SDKExecutorConfig,
+    options: TryStartSDKTurnOptions = {},
+  ): Promise<void> {
+    const userMessagePresentation = pickUserMessagePresentation(options)
+    const sessionReferences = options.sessionReferences
+    const makeBase = () => makeEventBase(sessionId, turnId)
+    const persistUserMessage = (): void => {
+      if (options.userMessageAlreadyPersisted === true) return
+      this.emitAndPersist(
+        sessionId,
+        turnId,
+        {
+          ...makeBase(),
+          type: 'user_message',
+          content: message,
+          ...userMessagePresentation,
+          ...(sessionReferences != null && sessionReferences.length > 0
+            ? { sessionReferences }
+            : {}),
+        },
+        eventRepo,
+      )
+    }
+    const failTurn = (code: string, errorMessage: string, statusMessage: string): void => {
+      persistUserMessage()
+      this.emitAndPersist(
+        sessionId,
+        turnId,
+        { ...makeBase(), type: 'agent_error', code, message: errorMessage, retryable: false },
+        eventRepo,
+      )
+      this.emitAndPersist(
+        sessionId,
+        turnId,
+        { ...makeBase(), type: 'agent_status', status: 'error', message: statusMessage },
+        eventRepo,
+      )
+      sessionRepo.updateStatus(sessionId, 'error')
+    }
+
+    const workspaceIssue = await getWorkspaceRootIssue(config.workspaceRootPath)
+    if (workspaceIssue != null) {
+      failTurn(
+        'WORKSPACE_UNAVAILABLE',
+        `Workspace path is not available: ${config.workspaceRootPath}. ` +
+          'Reopen the workspace or update the session workspace before running the Spark engine.',
+        'Workspace path is not available',
+      )
+      return
+    }
+
+    try {
+      const { isSparkEngineAvailable } = await import('../sdk/index.js')
+      if (!(await isSparkEngineAvailable())) {
+        failTurn(
+          'SPARK_ENGINE_UNAVAILABLE',
+          'Spark engine SDK (@spark/agent) is not loadable in this runtime.',
+          'Spark 引擎不可用',
+        )
+        return
+      }
+    } catch (err) {
+      failTurn(
+        'SPARK_ENGINE_UNAVAILABLE',
+        `Spark engine SDK failed to load: ${
+          err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+        }`,
+        'Spark 引擎不可用',
+      )
+      return
+    }
+
+    const executor = this.engineRegistry.resolveExecutor('spark', config)
+    let pendingTerminalStatus: AgentStatusEvent | null = null
+    let pendingTerminalBroadcast = false
+    let completedBroadcast = false
+    const settlePendingTerminalStatus = (): AgentStatusEvent['status'] | null => {
+      if (pendingTerminalStatus == null) return null
+      const status = pendingTerminalStatus.status
+      if (!pendingTerminalBroadcast) {
+        this.emitAndPersist(sessionId, turnId, pendingTerminalStatus, eventRepo)
+      }
+      this.updateStatusAfterHostTerminal(sessionRepo, sessionId, status)
+      pendingTerminalStatus = null
+      return status
+    }
+    const mentionAgentId = options.mentionAgentId
+    const mentionMemberContext =
+      mentionAgentId != null
+        ? { dispatchId: `mention:${turnId}`, memberAgentId: mentionAgentId }
+        : undefined
+    const turnAgent = this.resolveAgent(options.agentId)
+    const observedFileChangeKeys = this.getTurnFileChangeKeys(sessionId, turnId)
+    const completeAssistantEvents: AssistantMessageEvent[] = []
+    executor.onEvent((event) => {
+      if (options.userMessageAlreadyPersisted === true && event.type === 'user_message') return
+      if (
+        !shouldAcceptSessionExecutorEvent({
+          activeLoops: this.turnRegistry.activeLoops,
+          cancelledTurnIds: this.turnRegistry.cancelledTurns,
+          sessionId,
+          turnId,
+          executor,
+        })
+      ) {
+        return
+      }
+      options.runtimeMetrics?.observe(event)
+      if (
+        event.type === 'agent_status' &&
+        (event.status === 'completed' || event.status === 'cancelled' || event.status === 'error')
+      ) {
+        if (event.status === 'completed' && completedBroadcast) return
+        if (event.status === 'completed') completedBroadcast = true
+        const terminalEvent = withAgentSnapshot(event, turnAgent) as AgentStatusEvent
+        pendingTerminalStatus = terminalEvent
+        const broadcastNow = event.status !== 'error' || event.terminalSource === 'result'
+        pendingTerminalBroadcast = broadcastNow
+        if (broadcastNow) {
+          this.emitAndPersist(sessionId, turnId, terminalEvent, eventRepo)
+        }
+        return
+      }
+      if (event.type === 'file_change') {
+        const key = workspaceRelativeChangeKey(config.workspaceRootPath, event.path)
+        if (key != null) observedFileChangeKeys.add(key)
+      }
+      let outgoing: AgentEvent = withAgentSnapshot(event, turnAgent)
+      if (event.type === 'user_message') {
+        outgoing = {
+          ...outgoing,
+          ...userMessagePresentation,
+          ...(sessionReferences != null && sessionReferences.length > 0
+            ? { sessionReferences }
+            : {}),
+        } as UserMessageEvent
+      }
+      if (mentionAgentId != null) {
+        if (event.type === 'assistant_message' && typeof event.content === 'string') {
+          outgoing = {
+            id: event.id,
+            type: 'team_member_message',
+            sessionId: event.sessionId,
+            turnId: event.turnId,
+            timestamp: event.timestamp,
+            seq: event.seq,
+            dispatchId: `mention:${turnId}`,
+            memberAgentId: mentionAgentId,
+            mode: event.mode,
+            content: event.content,
+            isFinal: event.isFinal,
+            ...(event.segmentId != null ? { segmentId: event.segmentId } : {}),
+          }
+        } else if (event.type === 'user_message') {
+          outgoing = { ...(outgoing as UserMessageEvent), mentionAgentId }
+        } else if (
+          mentionMemberContext != null &&
+          (event.type === 'tool_call' ||
+            event.type === 'tool_result' ||
+            event.type === 'file_change' ||
+            event.type === 'terminal_output')
+        ) {
+          outgoing = { ...event, teamMemberContext: mentionMemberContext }
+        }
+      }
+      outgoing = governAgentToolResultEvent(outgoing, config.workspaceRootPath)
+      this.emitAndPersist(sessionId, turnId, outgoing, eventRepo)
+      if (
+        event.type === 'assistant_message' &&
+        event.mode === 'complete' &&
+        typeof event.content === 'string'
+      ) {
+        completeAssistantEvents.push(event)
+      }
+    })
+
+    this.turnRegistry.registerExecutor(sessionId, turnId, executor)
+    sessionRepo.updateStatus(sessionId, 'running')
+    this.emitQueueChanged(sessionId)
+
+    // Checkpoint（会话开启时）：与 codex 路径一致，在 executor 改动文件前捕获起始状态。
+    if (config.workspaceRootPath != null && config.workspaceRootPath.length > 0) {
+      await this.maybeCaptureCheckpoint(
+        sessionId,
+        turnId,
+        config.workspaceRootPath,
+        eventRepo,
+        message,
+      )
+    }
+
+    if (this.disposing || !this.turnRegistry.isActiveExecutor(sessionId, executor)) {
+      if (this.turnRegistry.isActiveExecutor(sessionId, executor)) {
+        this.turnRegistry.releaseExecutorIfOwned(sessionId, turnId, executor)
+        sessionRepo.updateStatus(sessionId, 'idle')
+        this.emitQueueChanged(sessionId)
+      }
+      this.teamDispatchService?.clearTurn(turnId)
+      this.closeTeamMcpHandlesForTurn(turnId)
+      this.clearTurnFileChangeKeys(sessionId, turnId)
+      return
+    }
+
+    const executionPromise = executor.executeTurn(sessionId, turnId, message, config)
+    this.turnRegistry.trackExecution(executor, { sessionId, promise: executionPromise })
+    executionPromise
+      .then(async () => {
+        if (!shouldRunTurnPostProcessing(pendingTerminalStatus?.status ?? null)) {
+          this.settleTurnWithoutPostProcessing({
+            sessionId,
+            turnId,
+            executor,
+            sessionRepo,
+            eventRepo,
+            emitUnpresentedMedia: () => {},
+            settleTerminalStatus: settlePendingTerminalStatus,
+          })
+          return
+        }
+        this.runTurnPostProcessing({
+          sessionId,
+          turnId,
+          executor,
+          sessionRepo,
+          eventRepo,
+          config,
+          options,
+          message,
+          completeAssistantEvents,
+          emitUnpresentedMedia: () => {},
+          settleTerminalStatus: settlePendingTerminalStatus,
+        })
+      })
+      .catch(() => {
+        this.settleTurnFailure({
+          sessionId,
+          turnId,
+          executor,
+          sessionRepo,
+          eventRepo,
+          emitUnpresentedMedia: () => {},
+          settleTerminalStatus: settlePendingTerminalStatus,
+        })
+      })
+      .finally(() => {
+        this.settleTurnFinally({ sessionId, turnId, executor })
+      })
+  }
+
+  /**
    * Memory System：turn 结束后异步调用 MemoryWriterService。
    * 全过程 try/catch，任何异常仅 log，绝不向上抛（fire-and-forget）。
    */
@@ -5581,6 +6140,33 @@ export class SessionService {
     return this.platformBridge
   }
 
+  getSubAppRuntimeBridge(): NonNullable<PlatformBridgeDeps['subAppRuntime']> {
+    const invoke = (
+      method: keyof NonNullable<PlatformBridgeDeps['subAppRuntime']>,
+      params: Record<string, unknown>,
+    ) => {
+      const runtime = this.subAppRuntimeBridge
+      if (runtime == null) throw new Error('Sub-app desktop runtime is not initialized')
+      return runtime[method](params)
+    }
+    return {
+      serviceStatus: (params) => invoke('serviceStatus', params),
+      serviceLogs: (params) => invoke('serviceLogs', params),
+      serviceRestart: (params) => invoke('serviceRestart', params),
+      jobCreate: (params) => invoke('jobCreate', params),
+      jobGet: (params) => invoke('jobGet', params),
+      jobList: (params) => invoke('jobList', params),
+      jobCancel: (params) => invoke('jobCancel', params),
+      diagnose: (params) => invoke('diagnose', params),
+      releaseChanged: (params) => invoke('releaseChanged', params),
+      preflightProject: (params) => invoke('preflightProject', params),
+    }
+  }
+
+  setSubAppRuntimeBridge(bridge: PlatformBridgeDeps['subAppRuntime']): void {
+    this.subAppRuntimeBridge = bridge
+  }
+
   getPluginManager(): PluginManager | null {
     return this.pluginManager
   }
@@ -5591,6 +6177,26 @@ export class SessionService {
 
   getToolPackageService(): ToolPackageService {
     return this.toolPackageService
+  }
+
+  listUnifiedTools(
+    context: {
+      sessionId?: string
+      turnId?: string
+      projectId?: string
+      agentId?: string
+      workflowId?: string
+      correlationId?: string
+      invocationSource?: 'model' | 'workflow' | 'test' | 'platform' | 'nested'
+    } = {},
+  ) {
+    return new UnifiedToolCatalog(
+      this.pluginRuntimeBroker ?? undefined,
+      this.customToolService == null
+        ? undefined
+        : new CustomToolRuntimeCatalog(this.customToolService),
+      new ToolPackageRuntimeCatalog(this.toolPackageService),
+    ).list(context)
   }
 
   getUserSkillsDir(): string | null {
@@ -5717,16 +6323,31 @@ export class SessionService {
       if (node.kind !== 'agent') continue
       const workerId = getWorkflowNodeWorkerId(node)
       const configuredMember = workerId != null ? repo.get(workerId) : null
-      const effectiveMember =
-        configuredMember != null && configuredMember.enabled ? configuredMember : hostAgent
-      if (membersById.has(effectiveMember.id)) continue
-      membersById.set(effectiveMember.id, applyWorkflowNodeOverrides(effectiveMember, node))
+      if (configuredMember == null || !configuredMember.enabled) continue
+      if (membersById.has(configuredMember.id)) continue
+      membersById.set(configuredMember.id, applyWorkflowNodeOverrides(configuredMember, node))
     }
     for (const node of nodes) {
       if (node.kind !== 'subagent') continue
       const workerId = getWorkflowNodeWorkerId(node)
       if (workerId == null || workerId === hostAgent.id || membersById.has(workerId)) continue
-      membersById.set(workerId, createWorkflowSubagentMember(node, hostAgent, workerId))
+      const configuredAgentId =
+        typeof node.config.agentId === 'string' ? node.config.agentId.trim() : ''
+      const configuredMember = configuredAgentId.length > 0 ? repo.get(configuredAgentId) : null
+      // 显式绑定失效时不再静默继承宿主；不注册该 worker，让执行器以
+      // missing_agent_id 明确失败。未绑定 subagent 仍按设计继承宿主生成临时 worker。
+      if (configuredAgentId.length > 0 && (configuredMember == null || !configuredMember.enabled)) {
+        continue
+      }
+      membersById.set(
+        workerId,
+        createWorkflowSubagentMember(
+          node,
+          configuredMember ?? hostAgent,
+          workerId,
+          configuredMember != null || Array.isArray(node.config.mcpServerIds),
+        ),
+      )
     }
     // 原子节点（skill/tool/mcp/plan/review/artifact）走真实执行时，也要有对应的临时 worker
     // 注册进花名册——TeamDispatchService 只放行 allowedWorkerIds（= 花名册 id 集）内的目标，
@@ -5783,10 +6404,11 @@ export class SessionService {
     /** Persistent Codex runtime lease that should own the HTTP bridge bearer/session. */
     codexRuntimeLeaseKey?: string
   }): Promise<SDKMcpServerConfig | null> {
-    // FR-0b：目标消费者是 codex 时用 HTTP 桥接（codex 子进程无法回调主进程 in-process sdk server）；
-    // claude 消费者走 in-process（现状）。两形态共用下方 tool 定义，避免实现漂移。
-    const isCodexConsumer =
-      ctx.consumerAdapter != null && resolveEngineKind(ctx.consumerAdapter) === 'codex'
+    // 独立进程消费者（Codex / Spark）使用 HTTP 桥接；Claude 消费者走 in-process。
+    // 两形态共用下方 tool 定义，避免实现漂移。
+    const isExternalMcpConsumer =
+      ctx.consumerAdapter != null &&
+      ['codex', 'spark'].includes(resolveEngineKind(ctx.consumerAdapter))
     const discussionId = ctx.discussionId
     const discussionRepo = discussionId != null ? this.getTeamDiscussionRepository() : null
     const ledgerAdapter =
@@ -6485,74 +7107,34 @@ export class SessionService {
         ? {
             name: 'workflow_run',
             description:
-              'Execute the managed workflow agent nodes sequentially for the current objective.',
+              'Execute the managed workflow graph for the current objective: nodes run in dependency order, independent agent/subagent nodes in the same wave run in parallel, conditional edges route branches, and node prompts/tool arguments support {{outputKey}} interpolation of upstream results.',
             schema: { objective: z.string().max(8000) },
             handler: async (args: Record<string, unknown>) => {
               const objective = String(args.objective ?? '')
               const runRepo = new WorkflowRunRepository(this.db)
               const graphNodeIds = new Set(ctx.workflowGraph!.nodes.map((n) => n.id))
               // 每个节点实际会用到的派发目标 + 生效模型（节点自己的 config.modelId 优先，
-              // 否则回落到该 agentId 在花名册里的默认值）——供下面的 workflow_progress 事件
-              // 渲染实时进度面板时，展示的模型跟本次实际执行一致，而不是这个 agent 的静态默认值。
-              const membersById = new Map(ctx.members.map((m) => [m.id, m]))
-              const nodeMeta = new Map<
-                string,
-                {
-                  title: string
-                  kind: string
-                  agentId?: string
-                  agentName?: string
-                  modelId?: string
-                }
-              >()
-              const availableWorkerIds = new Set(ctx.members.map((m) => m.id))
-              for (const node of ctx.workflowGraph!.nodes) {
-                const agentId =
-                  getWorkflowNodeEffectiveWorkerId(node, {
-                    fallbackAgentId: ctx.hostAgent.id,
-                    availableWorkerIds,
-                  }) ?? undefined
-                const member = agentId != null ? membersById.get(agentId) : undefined
-                const modelId =
-                  typeof node.config.modelId === 'string' && node.config.modelId.trim().length > 0
-                    ? node.config.modelId.trim()
-                    : (member?.modelId ?? undefined)
-                nodeMeta.set(node.id, {
-                  title: node.title,
-                  kind: node.kind,
-                  ...(agentId != null ? { agentId } : {}),
-                  ...(member?.name != null ? { agentName: member.name } : {}),
-                  ...(modelId != null ? { modelId } : {}),
-                })
-              }
-              const emitWorkflowProgress = (
-                runStatus: 'working' | 'completed' | 'failed' | 'canceled',
-                runningNodeIds: ReadonlySet<string>,
-                completedNodeIds: ReadonlySet<string>,
-                skippedNodeIds: ReadonlySet<string>,
-                failedNodeId?: string,
-              ): void => {
-                const nodes = ctx.workflowGraph!.nodes.map((node) => {
-                  const meta = nodeMeta.get(node.id)
-                  const status: import('@spark/protocol').WorkflowProgressNodeStatus =
-                    node.id === failedNodeId
-                      ? 'failed'
-                      : completedNodeIds.has(node.id)
-                        ? 'completed'
-                        : skippedNodeIds.has(node.id)
-                          ? 'skipped'
-                          : runningNodeIds.has(node.id)
-                            ? 'running'
-                            : 'pending'
-                  return {
-                    nodeId: node.id,
-                    title: meta?.title ?? node.id,
-                    kind: meta?.kind ?? node.kind,
-                    status,
-                    ...(meta?.agentId != null ? { agentId: meta.agentId } : {}),
-                    ...(meta?.agentName != null ? { agentName: meta.agentName } : {}),
-                    ...(meta?.modelId != null ? { modelId: meta.modelId } : {}),
-                  }
+              // 否则回落到该 agentId 在花名册里的默认值）——供下面的 workflow_progress 事件。
+              // 空绑定或失效绑定不回落宿主，须与执行器的 missing_agent_id 语义保持一致。
+              const progressNodeMetas = buildWorkflowProgressNodeMetas(
+                ctx.workflowGraph!.nodes,
+                ctx.members,
+              )
+              const emitWorkflowProgress = (snap: WorkflowRunSnapshot): void => {
+                const nodes = buildWorkflowProgressNodes({
+                  metas: progressNodeMetas,
+                  executions: snap.executions,
+                  atomicExecutions: snap.atomicExecutions,
+                  runningNodeIds: new Set(snap.runningNodeIds),
+                  completedNodeIds: new Set(snap.completedNodeIds),
+                  skippedNodeIds: new Set(snap.skippedNodeIds),
+                  ...(snap.failedNode?.nodeId != null
+                    ? { failedNodeId: snap.failedNode.nodeId }
+                    : {}),
+                  ...(snap.failedNode?.error != null
+                    ? { failedNodeError: snap.failedNode.error }
+                    : {}),
+                  terminal: snap.status !== 'working',
                 })
                 this.emitAndPersist(
                   ctx.sessionId,
@@ -6565,7 +7147,8 @@ export class SessionService {
                     timestamp: new Date().toISOString(),
                     seq: 0,
                     workflowId: ctx.workflowId ?? '',
-                    runStatus,
+                    ...(runId != null ? { runId } : {}),
+                    runStatus: snap.status,
                     nodes,
                   },
                   ctx.eventRepo,
@@ -6630,7 +7213,6 @@ export class SessionService {
                 ...(ctx.workflowAttachments != null && ctx.workflowAttachments.length > 0
                   ? { attachments: ctx.workflowAttachments }
                   : {}),
-                fallbackAgentId: ctx.hostAgent.id,
                 availableWorkerIds: new Set(ctx.members.map((member) => member.id)),
                 ...(initialState != null ? { initialState } : {}),
                 ...(initialCompletedNodeIds != null ? { initialCompletedNodeIds } : {}),
@@ -6648,13 +7230,7 @@ export class SessionService {
                       ...(snap.status !== 'working' ? { endedAt: new Date().toISOString() } : {}),
                     })
                   }
-                  emitWorkflowProgress(
-                    snap.status,
-                    new Set(snap.runningNodeIds),
-                    new Set(snap.completedNodeIds),
-                    new Set(snap.skippedNodeIds),
-                    snap.failedNode?.nodeId,
-                  )
+                  emitWorkflowProgress(snap)
                 },
                 executeAtomicNode: async (request) => {
                   // 原子节点按 kind 显式自执行：
@@ -6667,6 +7243,32 @@ export class SessionService {
                   //   worker 真实派发单轮执行（skill 只挂 skillIds、tool 收窄 toolIds；MCP 使用
                   //   全局已启用集合；input/plan/review 使用只读工具集）；artifact 另外支持 exportPath 写盘。
                   //   配 execution:'static' 或该 kind 不在真实执行集内时，回落静态回显。
+                  // - tool/mcp 节点配了 toolSource/toolName 时走确定性调用：mcp 源经 McpService
+                  //   原生直调（不经 LLM，tool 与 mcp 节点语义等价，mcp 节点仅多一个专属配置入口）；
+                  //   platform 源直调平台自定义工具/工具包工具（不经 LLM，仅 tool 节点可选该源）；
+                  //   builtin 源经锁定单工具 + 预渲染参数的强约束派发（仅 tool 节点可选该源）。
+                  //   与其它 LLM 原子节点一致，execution:'static' 时回落静态回显不走直调。
+                  const executionMode =
+                    typeof request.config.execution === 'string'
+                      ? request.config.execution.trim()
+                      : ''
+                  const toolInvocation =
+                    executionMode === 'static' ||
+                    (request.kind !== 'tool' && request.kind !== 'mcp')
+                      ? null
+                      : getWorkflowToolInvocationSpec(request.config, request.kind)
+                  if (toolInvocation != null) {
+                    return this.runWorkflowToolInvocationNode(
+                      request,
+                      toolInvocation,
+                      runSingleDispatch,
+                      {
+                        sessionId: ctx.sessionId,
+                        ...(ctx.turnId != null ? { turnId: ctx.turnId } : {}),
+                        ...(ctx.workflowId != null ? { workflowId: ctx.workflowId } : {}),
+                      },
+                    )
+                  }
                   switch (request.kind) {
                     case 'verify':
                       return runWorkflowVerifyNode(request, ctx.workspaceRootPath)
@@ -6835,8 +7437,8 @@ export class SessionService {
     ]
     if (defs.length === 0) return null
 
-    if (isCodexConsumer) {
-      // Codex consumers use the HTTP MCP bridge so SDK-backed chat-wire providers keep team tools.
+    if (isExternalMcpConsumer) {
+      // 独立进程消费者使用 HTTP MCP bridge，避免依赖主进程 in-process SDK server。
       const handle = await getTeamMcpHttpBridge().serve(
         defs,
         ctx.signal != null || ctx.codexRuntimeLeaseKey != null
@@ -6920,6 +7522,20 @@ export class SessionService {
     }
     try {
       const answers = await this.onQuestion(sessionId, [decisionQuestion, commentQuestion], {})
+      if (isWorkflowApprovalCancelledImpl(answers)) {
+        log.info('workflow approval: canceled by session interruption', {
+          sessionId,
+          node: request.title,
+        })
+        return {
+          state: 'canceled',
+          content,
+          error: {
+            code: 'cancelled',
+            message: `审批节点「${request.title}」因会话取消或应用退出而中断。`,
+          },
+        }
+      }
       // 决策按既有 onQuestion 答案解析方式判断（参见 claude-sdk-executor 的
       // findRawQuestionAnswer / extractQuestionAnswerText）：answers.answers 可能是
       // 以 question/id/index 定位的对象数组，单条答案的取值候选为 answer/text/optionLabel/optionValue/value。
@@ -7007,6 +7623,137 @@ export class SessionService {
       log.warn('workflow artifact: export failed', { node: request.nodeId, error: message })
       return { content: `${content}\n\n[artifact 导出失败：${message}]` }
     }
+  }
+
+  /**
+   * 工具节点确定性调用（config.toolSource + config.toolName 齐备时）：
+   * - mcp 源：经 McpService 原生直调目标服务器上的工具（不经 LLM，参数即配置+插值结果）；
+   * - platform 源：直调平台自定义工具 / 工具包工具（两个运行时目录的 invoke，不经 LLM；
+   *   名字含 `/` 的按 `packageId/toolName` 查工具包目录，否则按 id 查自定义工具目录）；
+   * - builtin 源：派发给已锁定单工具的临时 worker（metadata.toolIds=[toolName]，其余可限制
+   *   工具全被禁用），指令携带预渲染参数，LLM 自由度被压到「怎么呈现结果」。
+   * 失败（服务器不可用 / 工具报错 / isError / 平台工具不存在）返回 workflow_tool_invoke_failed，
+   * 可按 retryCount 重试。
+   */
+  private async runWorkflowToolInvocationNode(
+    request: {
+      nodeId: string
+      title: string
+      objective: string
+      inputs: Record<string, unknown>
+      config: Record<string, unknown>
+    },
+    spec: import('./session-workflow-helpers.js').WorkflowToolInvocationSpec,
+    runSingleDispatch: (
+      args: Record<string, unknown>,
+      parallel?: boolean,
+    ) => Promise<import('@spark/protocol').TeamA2AReply>,
+    invocationContext: {
+      sessionId: string
+      turnId?: string
+      workflowId?: string
+    },
+  ): Promise<import('./workflow-executor.js').WorkflowAtomicNodeExecutionReply> {
+    if (spec.source === 'platform') {
+      try {
+        const entry = await this.findWorkflowPlatformToolEntry(spec.toolName, invocationContext)
+        if (entry == null) {
+          return {
+            state: 'failed',
+            content: `未找到已启用的平台工具 ${spec.toolName}（工具可能已被禁用或卸载，重新启用后可重试）`,
+            error: {
+              code: 'workflow_tool_invoke_failed',
+              message: `平台工具 ${spec.toolName} 不在已启用目录中（自定义工具需已发布并启用；工具包需已安装并启用）`,
+            },
+          }
+        }
+        const result = await entry.invoke(spec.args)
+        return { content: formatWorkflowPlatformToolResult(result) }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        log.warn('workflow tool: platform invocation failed', {
+          node: request.nodeId,
+          tool: spec.toolName,
+          error: message,
+        })
+        return {
+          state: 'failed',
+          content: message,
+          error: { code: 'workflow_tool_invoke_failed', message: `平台工具调用失败：${message}` },
+        }
+      }
+    }
+    if (spec.source === 'mcp') {
+      try {
+        const result = await this.mcpService.callTool(spec.serverId ?? '', spec.toolName, spec.args)
+        const content = formatWorkflowMcpToolResult(result)
+        if (result.isError === true) {
+          return {
+            state: 'failed',
+            content,
+            error: {
+              code: 'workflow_tool_invoke_failed',
+              message: `MCP 工具 ${spec.toolName} 返回错误：${content}`,
+            },
+          }
+        }
+        return { content }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        log.warn('workflow tool: mcp invocation failed', {
+          node: request.nodeId,
+          serverId: spec.serverId,
+          tool: spec.toolName,
+          error: message,
+        })
+        return {
+          state: 'failed',
+          content: message,
+          error: { code: 'workflow_tool_invoke_failed', message: `MCP 工具调用失败：${message}` },
+        }
+      }
+    }
+    const instruction = buildWorkflowToolInvocationInstruction(request, spec)
+    const reply = await runSingleDispatch({
+      targetAgentId: workflowAtomicMemberId(request.nodeId),
+      instruction,
+      inputs: request.inputs,
+    })
+    if (reply.state !== 'completed') {
+      return {
+        state: reply.state,
+        content: reply.content,
+        error: {
+          ...(reply.error?.code != null ? { code: reply.error.code } : {}),
+          message:
+            reply.error?.message ??
+            `Workflow tool node ${request.nodeId} (${spec.toolName}) did not complete successfully.`,
+        },
+      }
+    }
+    return { content: reply.content }
+  }
+
+  /**
+   * 在平台工具运行时目录中按标识查找已启用的工具，供工作流 platform 源确定性直调。
+   * 标识含 `/` → 按 `packageId/toolName` 查工具包目录；否则按 id 查自定义工具目录
+   * （自定义工具 id 是 slug 正则，不含 `/`，两类标识天然无歧义）。
+   * 每次调用即时读取目录：工作流节点执行频率低，工具启用/禁用状态变化即时生效更安全。
+   */
+  private async findWorkflowPlatformToolEntry(
+    toolName: string,
+    invocationContext: { sessionId: string; turnId?: string; workflowId?: string },
+  ): Promise<{ invoke: (input: Record<string, unknown>) => Promise<unknown> } | null> {
+    const entries = await this.listUnifiedTools({
+      ...invocationContext,
+      invocationSource: 'workflow',
+    })
+    const entry = entries.find(
+      (candidate) =>
+        candidate.sourceKind !== 'builtin' &&
+        (candidate.tool.name === toolName || candidate.qualifiedName === toolName),
+    )
+    return entry ?? null
   }
 
   /**
@@ -7216,6 +7963,7 @@ export class SessionService {
       member.agentAdapter ?? runtimeSelectionSnapshot.agentAdapter,
       runtimeSelectionSnapshot.chatMode,
       provider.provider_type,
+      getProviderUseSparkExecutor(provider.config_json),
     )
     // FR-0a：按 adapter 解析执行器档位 + codex sdkConfig 扩展字段（抽纯函数
     // resolveCodexMemberExecutionProfile 便于单测、防 Host/member 漂移）。
@@ -7253,6 +8001,18 @@ export class SessionService {
     let memberCustomEnv: Record<string, string> | undefined
     let memberEnvPrompt = ''
     let memberSkillSystemPrompt: string | undefined
+    let memberRulesPrompt: string | undefined
+    try {
+      memberRulesPrompt = buildRuntimeRulesPrompt(
+        collectManagedRuleContents(new RulesRepository(this.db), member, null),
+      )
+    } catch (err) {
+      log.warn(
+        `Member rule injection failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
     try {
       // 三轮联合场景审查修复（Skill + Team）：member 也走 composeRuntimeContext 加载
       // 自己的 skillIds 对应的 skill system prompt，否则 member 看不到自己 agent 配置内
@@ -7381,7 +8141,10 @@ export class SessionService {
               : providerProfileId,
             model,
             memberAdapter,
-            buildMemberContinuityKey(buildTeamContinuityScope(discussionId), member.id),
+            scopeRuntimeSessionIdentity(
+              buildMemberContinuityKey(buildTeamContinuityScope(discussionId), member.id),
+              readCodexNativeThreadGeneration(session.metadata_json),
+            ),
           )
         : null
     const memberSdkSessionId =
@@ -7405,9 +8168,13 @@ export class SessionService {
         : null
     // 显式 readonly 原子节点从空能力集开始，避免在判断前加载用户自定义（可能写入型）MCP。
     // 普通 Team/Workflow tool/mcp 成员则与 Host 一致加载已启用的应用 MCP。
+    const workflowMcpSelection =
+      member.metadata?.workflowMcpSelectionConfigured === true
+        ? new Set(member.mcpServerIds)
+        : undefined
     let memberMcpServers = isReadonlyAtomicMember
       ? {}
-      : await this.getMcpTooling().buildMcpServersForSDK()
+      : await this.getMcpTooling().buildMcpServersForSDK(workflowMcpSelection)
     try {
       if (!isReadonlyAtomicMember) {
         const memberWebSearchServer =
@@ -7480,9 +8247,9 @@ export class SessionService {
         memberMcpServers,
       )
     }
-    // 成员同样可以进入 worktree 开发：挂载 worktree 状态上报工具
-    // （Codex/CLI 走 stdio，Claude SDK 走 in-process）。
-    if (isCodexMember) {
+    // 普通成员可以进入 worktree 开发；只读 workflow 原子节点不能获得会改变
+    // 会话/worktree 状态的 spark_session MCP，否则 Plan/Review 的只读语义会失效。
+    if (shouldAttachWorkflowSessionMcp(member) && isCodexMember) {
       try {
         const memberSessionServer = await this.resolveSparkSessionMcpServer(sessionId)
         if (memberSessionServer != null) memberMcpServers.spark_session = memberSessionServer
@@ -7493,7 +8260,7 @@ export class SessionService {
           }`,
         )
       }
-    } else {
+    } else if (shouldAttachWorkflowSessionMcp(member)) {
       await this.attachSparkSessionMcpServer(sessionId, memberMcpServers)
     }
     // 成员的 spark_team 工具面，三个独立触发条件（满足其一即注入 server）：
@@ -7553,12 +8320,14 @@ export class SessionService {
       joinPromptSections(
         APPLICATION_FOUNDATION_SYSTEM_PROMPT,
         buildManagedAgentSystemPrompt(member, null),
+        memberRulesPrompt,
         memberTeamPrompt,
         memberEnvPrompt || undefined,
         memberMcpServers.spark_files != null ? PRESENT_FILES_SYSTEM_PROMPT : undefined,
         memberMcpServers.spark_tool_results != null ? TOOL_RESULT_SYSTEM_PROMPT : undefined,
         memberMcpServers.spark_platform != null ? PLATFORM_MANAGEMENT_SYSTEM_PROMPT : undefined,
         memberMcpServers.spark_platform != null ? SESSION_SCHEDULE_AGENT_SYSTEM_PROMPT : undefined,
+        memberMcpServers.spark_platform != null ? SESSION_HISTORY_SYSTEM_PROMPT : undefined,
         memberMcpServers.spark_debug != null ? DEBUG_MODE_SYSTEM_PROMPT : undefined,
         // 记忆三段后置到段尾（与 host 路径同构，内容不变仅段序）：member 记忆在
         // dispatch 完成后可能被抽取更新，放中段会让 member system 从中部开始前缀
@@ -7905,6 +8674,7 @@ export class SessionService {
     // 触发 hook：检测 agent_status 事件的关键状态变化
     if (event.type === 'agent_status') {
       const status = event.status
+      this.updateQueueErrorPauseFromStatus(sessionId, turnId, event)
       const turnRequests = new TurnRequestRepository(this.db)
       if (status === 'completed' || status === 'idle') {
         turnRequests.markCompleted(turnId)
@@ -7933,6 +8703,23 @@ export class SessionService {
       if (TERMINAL_AGENT_STATUSES.has(status)) {
         this.usageLedger.clearTurnState(sessionId, turnId)
       }
+    }
+  }
+
+  private updateQueueErrorPauseFromStatus(
+    sessionId: string,
+    turnId: string,
+    event: AgentStatusEvent,
+  ): void {
+    if (event.status === 'error' && (this.pendingTurns.get(sessionId)?.length ?? 0) > 0) {
+      this.getQueueErrorPauseGate().pause(sessionId, {
+        reason: 'turn_error',
+        failedTurnId: turnId,
+        ...(event.message != null ? { errorMessage: event.message } : {}),
+        pausedAt: event.timestamp,
+      })
+    } else if (event.status === 'completed' || event.status === 'cancelled') {
+      this.getQueueErrorPauseGate().resolve(sessionId)
     }
   }
 
@@ -7995,6 +8782,7 @@ export class SessionService {
       this.pendingTurns.clear()
       this.pendingPlanApprovals.clear()
       this.pendingUserQuestionGate.clear()
+      this.getQueueErrorPauseGate().clear()
 
       const pending = [
         ...trackedExecutions.map((tracked) => tracked.promise),
@@ -8148,6 +8936,26 @@ export class SessionService {
     return { changed, running: snapshot.running, queuedTurns: snapshot.queuedTurns }
   }
 
+  resumeQueue(params: {
+    sessionId: string
+    runtimePatch?: SessionQueueRuntimeSelection
+  }): SessionResumeQueueResponse {
+    const queue = this.pendingTurns.get(params.sessionId) ?? []
+    if (this.getQueueErrorPauseGate().getPause(params.sessionId, queue.length) == null) {
+      return { resumed: false, queuedTurns: this.toQueuedTurns(queue) }
+    }
+
+    this.rebaseQueuedRuntimeSelection(params.sessionId, params.runtimePatch)
+    this.getQueueErrorPauseGate().resolve(params.sessionId)
+    new SessionRepository(this.db).updateStatus(params.sessionId, 'idle')
+    this.emitQueueChanged(params.sessionId)
+    setTimeout(() => void this.continueGoalOrQueue(params.sessionId), 0)
+    return {
+      resumed: true,
+      queuedTurns: this.queueSnapshot(params.sessionId).queuedTurns,
+    }
+  }
+
   /**
    * 立即执行队列中的某个 turn：中断当前任务，将该 turn 提到最前面执行，其余排队保持原序。
    * 上下文（会话历史事件）天然保留在 DB 中，新 turn 的 startTurn 会正常读取。
@@ -8155,8 +8963,13 @@ export class SessionService {
   async sendQueuedTurnNow(params: {
     sessionId: string
     turnId: string
+    runtimePatch?: SessionQueueRuntimeSelection
   }): Promise<SessionSendQueuedTurnNowResponse> {
     const { sessionId, turnId } = params
+    const wasErrorPaused = this.getQueueErrorPauseGate().isBlocked(
+      sessionId,
+      this.pendingTurns.get(sessionId)?.length ?? 0,
+    )
     this.resetTeamDispatchAutoContinuation(sessionId)
     let queue = this.pendingTurns.get(sessionId) ?? []
     let targetIdx = queue.findIndex((t) => t.turnId === turnId)
@@ -8174,6 +8987,13 @@ export class SessionService {
       }
     }
     const targetTurn = queue.splice(targetIdx, 1)[0]!
+    if (wasErrorPaused) {
+      this.pendingTurns.set(sessionId, queue)
+      this.rebaseQueuedRuntimeSelection(sessionId, params.runtimePatch)
+      queue = this.pendingTurns.get(sessionId) ?? []
+      this.getQueueErrorPauseGate().resolve(sessionId)
+      new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+    }
 
     // 没有正在执行的任务 → 直接启动
     if (!this.turnRegistry.hasActiveSession(sessionId)) {
@@ -8220,9 +9040,37 @@ export class SessionService {
     return { started: true, queuedTurns: this.queueSnapshot(sessionId).queuedTurns }
   }
 
-  private enqueueTurn(sessionId: string, turn: PendingTurn): void {
+  private rebaseQueuedRuntimeSelection(
+    sessionId: string,
+    runtimePatch: SessionRuntimePatch | undefined,
+  ): boolean {
+    const selection = pickQueueRuntimeSelection(runtimePatch)
+    const queue = this.pendingTurns.get(sessionId)
+    if (selection == null || queue == null || queue.length === 0) return false
+    const nextQueue = queue.map((turn) => applyQueueRuntimeSelection(turn, selection))
+    const requestRepo = new TurnRequestRepository(this.db)
+    const persist = () => {
+      for (const turn of nextQueue) {
+        requestRepo.updateAcceptedPayload(turn.turnId, JSON.stringify(turn))
+      }
+    }
+    const database = this.db as unknown as {
+      raw?: { transaction?: (work: () => void) => () => void }
+    }
+    if (typeof database.raw?.transaction === 'function') database.raw.transaction(persist)()
+    else persist()
+    this.pendingTurns.set(sessionId, nextQueue)
+    return true
+  }
+
+  private enqueueTurn(
+    sessionId: string,
+    turn: PendingTurn,
+    placement: 'front' | 'back' = 'back',
+  ): void {
     const queue = this.pendingTurns.get(sessionId) ?? []
-    queue.push(turn)
+    if (placement === 'front') queue.unshift(turn)
+    else queue.push(turn)
     this.pendingTurns.set(sessionId, queue)
     this.emitQueueChanged(sessionId)
   }
@@ -8275,6 +9123,15 @@ export class SessionService {
       return
     }
     if (this.pendingUserQuestionGate.isBlocked(sessionId)) {
+      this.emitQueueChanged(sessionId)
+      return
+    }
+    if (
+      this.getQueueErrorPauseGate().isBlocked(
+        sessionId,
+        this.pendingTurns.get(sessionId)?.length ?? 0,
+      )
+    ) {
       this.emitQueueChanged(sessionId)
       return
     }
@@ -8523,13 +9380,16 @@ export class SessionService {
   }
 
   private queueSnapshot(sessionId: string): SessionGetQueueResponse {
+    const queue = this.pendingTurns.get(sessionId) ?? []
+    const running =
+      this.turnRegistry.hasActiveSession(sessionId) ||
+      this.turnRegistry.isSessionStarting(sessionId) ||
+      this.teamDispatchService?.hasActiveDispatches(sessionId) === true
     return {
       sessionId: sessionId as SessionId,
-      running:
-        this.turnRegistry.hasActiveSession(sessionId) ||
-        this.turnRegistry.isSessionStarting(sessionId) ||
-        this.teamDispatchService?.hasActiveDispatches(sessionId) === true,
-      queuedTurns: this.toQueuedTurns(this.pendingTurns.get(sessionId) ?? []),
+      running,
+      queuedTurns: this.toQueuedTurns(queue),
+      paused: running ? null : this.getQueueErrorPauseGate().getPause(sessionId, queue.length),
     }
   }
 
@@ -8561,6 +9421,9 @@ export class SessionService {
       } else if (sessionRepo.get(sessionId)?.status === 'running') {
         sessionRepo.updateStatus(sessionId, 'idle')
       }
+      // 延迟落定的终态在此收口：把运行结果写入 metadata，供侧栏状态筛选消费。
+      const outcome = toLastRunOutcome(deferredTerminalStatus)
+      if (outcome != null) sessionRepo.patchMetadata(sessionId, { lastRunOutcome: outcome })
     }
     this.onQueueChanged?.(snapshot)
   }
@@ -8577,6 +9440,10 @@ export class SessionService {
     }
     this.deferredHostTerminalStatus.delete(sessionId)
     sessionRepo.updateStatus(sessionId, status === 'error' ? 'error' : 'idle')
+    // 运行结果落定到 metadata（completed/cancelled/error；idle 等瞬态保持原值），
+    // 供侧栏状态筛选「运行中/已完成/中止」真实生效。
+    const outcome = toLastRunOutcome(status)
+    if (outcome != null) sessionRepo.patchMetadata(sessionId, { lastRunOutcome: outcome })
   }
 
   private toQueuedTurns(turns: PendingTurn[]): SessionQueuedTurn[] {
@@ -8595,6 +9462,10 @@ export class SessionService {
             })),
           }
         : {}),
+      ...(() => {
+        const runtime = pickQueueRuntimeSelection(turn.runtimePatch)
+        return runtime == null ? {} : { runtime }
+      })(),
       ...pickUserMessagePresentation(turn),
     }))
   }
@@ -8628,6 +9499,16 @@ export class SessionService {
 
   private async continueGoalOrQueue(sessionId: string): Promise<void> {
     if (this.disposing) return
+    if (
+      this.getQueueErrorPauseGate().isBlocked(
+        sessionId,
+        this.pendingTurns.get(sessionId)?.length ?? 0,
+      )
+    ) {
+      this.emitQueueChanged(sessionId)
+      this.schedulePendingQueuesGlobally()
+      return
+    }
     const goal = new GoalRepository(this.db).getCurrent(sessionId)
     if (goal?.status === 'active') {
       // 仅 spark-loop 由 Spark 泵迭代。codex-native 的目标循环由 codex 侧自驱
@@ -8661,6 +9542,7 @@ export class SessionService {
       const candidates: Array<{ sessionId: string; enqueuedAt: number }> = []
       for (const [sid, queue] of this.pendingTurns.entries()) {
         if (queue.length === 0) continue
+        if (this.getQueueErrorPauseGate().isBlocked(sid, queue.length)) continue
         const first = queue[0]
         if (first == null) continue
         candidates.push({ sessionId: sid, enqueuedAt: Date.parse(first.enqueuedAt) || 0 })
@@ -9377,12 +10259,18 @@ export class SessionService {
             eventRepo,
           )
         }
-        new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+        const startingRepo = new SessionRepository(this.db)
+        startingRepo.updateStatus(sessionId, 'idle')
+        // 尚未起跑的 turn 被取消同样按 cancelled 收口（与补发的 cancelled 事件一致）。
+        startingRepo.patchMetadata(sessionId, { lastRunOutcome: 'cancelled' })
         this.emitQueueChanged(sessionId)
         return { cancelled: true, turnId: startingTurnId }
       }
       if (cancelledTeamDispatches > 0) {
-        new SessionRepository(this.db).updateStatus(sessionId, 'idle')
+        const dispatchRepo = new SessionRepository(this.db)
+        dispatchRepo.updateStatus(sessionId, 'idle')
+        // 团队派发被取消按 cancelled 收口（与补发的 cancelled 事件一致）。
+        dispatchRepo.patchMetadata(sessionId, { lastRunOutcome: 'cancelled' })
         this.emitQueueChanged(sessionId)
         return { cancelled: true }
       }
@@ -9410,6 +10298,9 @@ export class SessionService {
       eventRepo,
     )
     sessionRepo.updateStatus(sessionId, 'idle')
+    // 用户停止按 cancelled 收口（与补发的 cancelled 事件一致），
+    // 否则重启后「中止」筛选读不到该会话的终态。
+    sessionRepo.patchMetadata(sessionId, { lastRunOutcome: 'cancelled' })
     // 终止当前任务后，自动执行队列中的下一个任务
     this.startNextQueuedTurn(sessionId)
     return { cancelled: true, turnId }
@@ -9541,6 +10432,7 @@ export class SessionService {
     this.pendingTurns.delete(sessionId)
     this.pendingPlanApprovals.delete(sessionId)
     this.pendingUserQuestionGate.releaseSession(sessionId)
+    this.getQueueErrorPauseGate().resolve(sessionId)
     this.eventSequencer.clear(sessionId)
     this.iterationOverrides.delete(sessionId)
     this.pendingTitleRefinements.delete(sessionId)
@@ -9567,7 +10459,14 @@ export class SessionService {
     anchorTurnId?: string
     title?: string
   }): Promise<import('@spark/protocol').SessionForkResponse> {
-    return this.getCrudController().forkSession(params)
+    const result = await this.getCrudController().forkSession(params)
+    const sessionRepo = new SessionRepository(this.db)
+    const workspaceId = sessionRepo.getWorkspaceIds(result.sessionId)[0]
+    if (workspaceId != null) {
+      const workspace = new WorkspaceRepository(this.db).get(workspaceId)
+      if (workspace != null) await ensureSessionWorkspaceRootPath(workspace, result.sessionId)
+    }
+    return result
   }
 
   async getSessionLineage(
@@ -9692,6 +10591,10 @@ export class SessionService {
     return this.getCrudController().updateSession(params)
   }
 
+  async extractSessionTitle(sessionId: string): Promise<SessionExtractTitleResponse> {
+    return this.getCrudController().extractSessionTitle(sessionId)
+  }
+
   async getSessionRuntimeState(sessionId: string): Promise<Record<string, unknown>> {
     return this.getCrudController().getSessionRuntimeState(sessionId)
   }
@@ -9794,6 +10697,10 @@ export class SessionService {
 
   async deleteMessage(sessionId: string, eventIds: string[]): Promise<{ deleted: number }> {
     return this.getCheckpointManager().deleteMessage(sessionId, eventIds)
+  }
+
+  async rewindLastTurnForEdit(sessionId: string, turnId: string) {
+    return this.getCheckpointManager().rewindLastTurnForEdit(sessionId, turnId)
   }
 
   listCheckpoints(sessionId: string): CheckpointSnapshot[] {

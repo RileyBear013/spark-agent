@@ -6,11 +6,13 @@ import { parseArgs } from 'node:util'
 
 import {
   inspectConfiguredModels,
+  loadCliPreferences,
   loadConfiguredModel,
   type ConfiguredModelCatalog,
   type ConfiguredModelRuntime,
 } from '../config/model-config.js'
 import { createDefaultEnv, defaultSparkHome } from '../env.js'
+import { JsonlSessionStore, shortSessionId } from '../events/ledger.js'
 import type { AgentEvent } from '../events/schema.js'
 import type { LlmDelta, ReasoningEffort } from '../llm/types.js'
 import { isReasoningEffort } from '../llm/types.js'
@@ -37,6 +39,10 @@ interface CliOptions {
   readonly version: boolean
   readonly plain: boolean
   readonly json: boolean
+  /** Machine-readable output contract for a single task invocation. */
+  readonly outputFormat: CliOutputFormat
+  /** Backward-compatible `--json` event JSONL, which predates output-format. */
+  readonly legacyJson: boolean
   readonly prompt?: string
   readonly model?: string
   readonly bin?: string
@@ -47,9 +53,15 @@ interface CliOptions {
   readonly allowPrerelease: boolean
   readonly package: boolean
   readonly permissionMode: PermissionMode
+  readonly permissionModeExplicit: boolean
   readonly reasoningEffort?: ReasoningEffort
+  readonly continueSession: boolean
+  /** '' = picker sentinel (bare --resume); a concrete session id otherwise. */
+  readonly resume?: string
   readonly positionals: readonly string[]
 }
+
+type CliOutputFormat = 'text' | 'json' | 'stream-json'
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   let options: CliOptions
@@ -112,6 +124,22 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
     return runMaintenanceCommand(maintenance, options)
   }
+  if (maintenance === 'sessions') {
+    if (options.positionals.length > 1 || options.prompt) {
+      process.stderr.write('spark sessions does not accept extra arguments.\n')
+      return 2
+    }
+    return listSessionsCommand(options.json)
+  }
+
+  const storedPreferences = await loadCliPreferences({ cwd: process.cwd() }).catch(() => undefined)
+  const resolvedOptions: CliOptions = {
+    ...options,
+    permissionMode: options.permissionModeExplicit
+      ? options.permissionMode
+      : (storedPreferences?.permissionMode ?? 'manual'),
+    reasoningEffort: options.reasoningEffort ?? storedPreferences?.reasoningEffort ?? 'high',
+  }
 
   const positionalPrompt = options.positionals.join(' ').trim()
   let prompt = options.prompt ?? positionalPrompt
@@ -120,6 +148,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const tuiAvailable =
     !options.plain &&
     !options.json &&
+    options.outputFormat === 'text' &&
     process.stdin.isTTY &&
     process.stdout.isTTY &&
     process.env.CI !== 'true' &&
@@ -145,14 +174,22 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     } catch (error) {
       startupError = terminalSafe(message(error))
     }
+    let resumeSessionId: string | undefined
+    try {
+      resumeSessionId = await resolveResumeTarget(options)
+    } catch (error) {
+      process.stderr.write(`${terminalSafe(message(error))}\n`)
+      return 2
+    }
     await runTui({
       cwd: process.cwd(),
       version: await runningVersion(),
-      permissionMode: options.permissionMode,
       updateRunner: createTuiUpdateRunner(),
-      ...(options.reasoningEffort === undefined
-        ? {}
-        : { reasoningEffort: options.reasoningEffort }),
+      permissionMode: resolvedOptions.permissionMode,
+      permissionModeExplicit: options.permissionModeExplicit,
+      ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
+      ...(options.resume === '' ? { resumePicker: true } : {}),
+      reasoningEffort: resolvedOptions.reasoningEffort,
       ...(runtime ? { llm: runtime.service, model: runtime.modelId } : { startupError }),
     })
     const notice = await Promise.race([
@@ -165,6 +202,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0
   }
 
+  // Usage errors take precedence over model-resolution errors: a bad or
+  // non-TTY --resume must be reported even when no model is configured yet.
+  let resumeSessionId: string | undefined
+  try {
+    resumeSessionId = await resolveResumeTarget(options)
+  } catch (error) {
+    process.stderr.write(`${terminalSafe(message(error))}\n`)
+    return 2
+  }
+  if (resumeSessionId === undefined && options.resume === '') {
+    process.stderr.write(
+      'Bare --resume opens the interactive session picker; pickers need a TUI.\n',
+    )
+    return 2
+  }
   let runtime: ConfiguredModelRuntime
   try {
     runtime = await loadConfiguredModel({
@@ -175,10 +227,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`${terminalSafe(message(error))}\n`)
     return 2
   }
-  if (prompt) return runOnce(prompt, options, runtime)
+  if (prompt) return runOnce(prompt, resolvedOptions, runtime, resumeSessionId)
 
   if (process.stdin.isTTY && process.stdout.isTTY && options.plain) {
-    return runPlainRepl(runtime, options.permissionMode, options.reasoningEffort)
+    return runPlainRepl(runtime, resolvedOptions, resumeSessionId)
   }
   process.stderr.write(
     'No task was provided. Pass a prompt, pipe stdin, or run spark in an interactive TTY.\n',
@@ -326,9 +378,26 @@ async function inspectModels(command: 'models' | 'doctor', json: boolean): Promi
   return 0
 }
 
+/**
+ * node:util parseArgs rejects a valueless `--resume`; users expect
+ * `spark --resume` (no id) to open the in-TUI session picker. Rewrite a bare
+ * flag into an empty-string value before parsing — '' is the picker sentinel.
+ */
+function normalizeResumeArgv(argv: readonly string[]): string[] {
+  const out = [...argv]
+  for (let index = 0; index < out.length; index += 1) {
+    const token = out[index]
+    if (token === '--resume' || token === '-r') {
+      const next = out[index + 1]
+      if (next === undefined || next.startsWith('-')) out.splice(index + 1, 0, '')
+    }
+  }
+  return out
+}
+
 function parseCli(argv: readonly string[]): CliOptions {
   const parsed = parseArgs({
-    args: [...argv],
+    args: normalizeResumeArgv(argv),
     allowPositionals: true,
     strict: true,
     options: {
@@ -349,12 +418,28 @@ function parseCli(argv: readonly string[]): CliOptions {
       'permission-mode': { type: 'string' },
       'dangerously-skip-permissions': { type: 'boolean', default: false },
       'output-format': { type: 'string' },
+      continue: { type: 'boolean', short: 'c', default: false },
+      resume: { type: 'string', short: 'r' },
     },
   })
-  const outputFormat = parsed.values['output-format']
-  if (outputFormat && !['text', 'json', 'stream-json'].includes(outputFormat)) {
-    throw new Error(`Unsupported --output-format: ${outputFormat}`)
+  const requestedOutputFormat = parsed.values['output-format']
+  if (requestedOutputFormat && !['text', 'json', 'stream-json'].includes(requestedOutputFormat)) {
+    throw new Error(`Unsupported --output-format: ${requestedOutputFormat}`)
   }
+  if (
+    parsed.values.json &&
+    requestedOutputFormat !== undefined &&
+    requestedOutputFormat !== 'stream-json'
+  ) {
+    throw new Error('--json conflicts with --output-format text/json; use stream-json explicitly')
+  }
+  const legacyJson = parsed.values.json && requestedOutputFormat === undefined
+  const outputFormat =
+    requestedOutputFormat === undefined
+      ? legacyJson
+        ? 'stream-json'
+        : 'text'
+      : (requestedOutputFormat as CliOutputFormat)
   const configuredPermissionMode = parsed.values['permission-mode']
   if (configuredPermissionMode !== undefined && !isPermissionMode(configuredPermissionMode)) {
     throw new Error(`Unsupported --permission-mode: ${configuredPermissionMode}`)
@@ -367,11 +452,18 @@ function parseCli(argv: readonly string[]): CliOptions {
   if (dangerousBypass && configuredPermissionMode && configuredPermissionMode !== 'bypass') {
     throw new Error('--dangerously-skip-permissions conflicts with --permission-mode')
   }
+  const continueLatest = parsed.values.continue ?? false
+  const resume = parsed.values.resume
+  if (continueLatest && resume !== undefined) {
+    throw new Error('--continue and --resume are mutually exclusive')
+  }
   return {
     help: parsed.values.help ?? false,
     version: parsed.values.version ?? false,
-    plain: parsed.values.plain ?? outputFormat === 'text',
-    json: parsed.values.json ?? (outputFormat === 'json' || outputFormat === 'stream-json'),
+    plain: parsed.values.plain,
+    json: parsed.values.json || outputFormat !== 'text',
+    outputFormat,
+    legacyJson,
     ...(parsed.values.prompt === undefined ? {} : { prompt: parsed.values.prompt }),
     ...(parsed.values.model === undefined ? {} : { model: parsed.values.model }),
     ...(parsed.values.bin === undefined ? {} : { bin: parsed.values.bin }),
@@ -381,27 +473,116 @@ function parseCli(argv: readonly string[]): CliOptions {
     check: parsed.values.check ?? false,
     allowPrerelease: parsed.values['allow-prerelease'] ?? false,
     package: parsed.values.package ?? false,
-    permissionMode: dangerousBypass ? 'bypass' : (configuredPermissionMode ?? 'default'),
+    permissionMode: dangerousBypass ? 'bypass' : (configuredPermissionMode ?? 'manual'),
+    permissionModeExplicit: dangerousBypass || configuredPermissionMode !== undefined,
     ...(configuredEffort === undefined ? {} : { reasoningEffort: configuredEffort }),
+    continueSession: continueLatest,
+    // '' sentinel = bare --resume → in-TUI session picker; otherwise a concrete id.
+    ...(resume === undefined ? {} : { resume }),
     positionals: parsed.positionals,
   }
+}
+
+function openProjectSessionStore(): JsonlSessionStore {
+  return new JsonlSessionStore({ dataRoot: defaultSparkHome(), projectDir: process.cwd() })
+}
+
+/**
+ * `--continue` / `--resume <id>` target resolution against the on-disk ledger
+ * of the current project. Returns undefined for "start a new session" (no
+ * sessions yet, or the bare-`--resume` picker sentinel). Throws when an
+ * explicitly requested session id does not exist.
+ */
+async function resolveResumeTarget(options: CliOptions): Promise<string | undefined> {
+  if (!options.continueSession && options.resume === undefined) return undefined
+  if (options.resume === '') return undefined // picker sentinel; TUI handles it
+  const sessions = await openProjectSessionStore().list(
+    null,
+    options.continueSession ? {} : { includeSubagents: true },
+  )
+  if (options.continueSession) {
+    const latest = sessions[0]
+    if (latest === undefined) {
+      process.stderr.write('No sessions recorded here yet; starting a new session.\n')
+      return undefined
+    }
+    return latest.sessionId
+  }
+  const requested = options.resume ?? ''
+  const found = sessions.find((session) => session.sessionId === requested)
+  if (found === undefined) {
+    const recent = sessions
+      .slice(0, 5)
+      .map((session) =>
+        `  ${shortSessionId(session.sessionId)}  ${session.preview ?? ''}`.trimEnd(),
+      )
+      .join('\n')
+    throw new Error(
+      `Session not found: ${requested}${recent === '' ? '' : `\nRecent sessions:\n${recent}`}`,
+    )
+  }
+  return requested
+}
+
+/**
+ * Resume semantics shared by the TUI, print, and plain-REPL paths: an explicit
+ * `--permission-mode` overrides the mode restored from the ledger; without the
+ * flag the session keeps whatever mode it ran under before.
+ */
+async function openOrCreateSession(
+  agent: Agent,
+  config: Readonly<Record<string, unknown>>,
+  resumeSessionId: string | undefined,
+  explicitPermissionMode: PermissionMode | undefined,
+): Promise<AgentSession> {
+  if (resumeSessionId === undefined) return agent.newSession(config)
+  const session = await agent.openSession(resumeSessionId)
+  if (explicitPermissionMode !== undefined) session.setPermissionMode(explicitPermissionMode)
+  return session
+}
+
+async function listSessionsCommand(json: boolean): Promise<number> {
+  const sessions = await openProjectSessionStore().list(null)
+  if (json) {
+    for (const session of sessions) process.stdout.write(`${JSON.stringify(session)}\n`)
+    return 0
+  }
+  if (sessions.length === 0) {
+    process.stdout.write('No sessions recorded for this directory yet.\n')
+    return 0
+  }
+  for (const session of sessions) {
+    const updated = new Date(session.updatedAt).toISOString()
+    process.stdout.write(
+      `${updated}  #${session.latestSeq}  ${shortSessionId(session.sessionId)}  ${session.preview ?? ''}\n`,
+    )
+  }
+  return 0
 }
 
 async function runOnce(
   prompt: string,
   options: CliOptions,
   runtime: ConfiguredModelRuntime,
+  resumeSessionId?: string,
 ): Promise<number> {
   const agent = createConfiguredAgent(runtime)
   warnPermissionBypass(options.permissionMode)
-  const session = await agent.newSession({
-    output: options.json ? 'json' : 'text',
-    model: runtime.modelId,
-    route: runtime.route,
-    config: runtime.configSnapshot,
-    permissionMode: options.permissionMode,
-  })
-  if (options.json) {
+  const session = await openOrCreateSession(
+    agent,
+    {
+      output: options.outputFormat,
+      model: runtime.modelId,
+      route: runtime.route,
+      config: runtime.configSnapshot,
+      permissionMode: options.permissionMode,
+    },
+    resumeSessionId,
+    options.permissionModeExplicit ? options.permissionMode : undefined,
+  )
+  const eventJson = options.legacyJson || options.outputFormat === 'stream-json'
+  const finalJson = options.outputFormat === 'json' && !options.legacyJson
+  if (eventJson) {
     for await (const event of session.events()) {
       process.stdout.write(`${JSON.stringify(event)}\n`)
     }
@@ -412,29 +593,57 @@ async function runOnce(
   }
   process.once('SIGINT', onSigint)
   let wroteText = false
+  let finalText = ''
   try {
     const result = await session.turn(prompt, {
       signal: controller.signal,
       ...(options.reasoningEffort === undefined
         ? {}
         : { reasoningEffort: options.reasoningEffort }),
-      onEvent: options.json
+      onEvent: eventJson
         ? (event) => {
             process.stdout.write(`${JSON.stringify(event)}\n`)
           }
         : (event) => {
+            if (event.type === 'assistant.completed' && event.message.text) {
+              finalText = event.message.text
+            }
             renderPlainEvent(event)
           },
-      onDelta: options.json
-        ? undefined
-        : (delta) => {
-            if (delta.type === 'text') {
-              wroteText = true
-              process.stdout.write(delta.text)
+      onDelta:
+        eventJson && options.outputFormat === 'stream-json' && !options.legacyJson
+          ? (delta) => {
+              process.stdout.write(`${JSON.stringify({ type: 'delta', delta })}\n`)
             }
-          },
+          : eventJson || finalJson
+            ? undefined
+            : (delta) => {
+                if (delta.type === 'text') {
+                  wroteText = true
+                  process.stdout.write(delta.text)
+                } else if (delta.type === 'retry') {
+                  renderRetryDelta(delta)
+                }
+              },
     })
-    if (!options.json && wroteText) process.stdout.write('\n')
+    if (!eventJson && !finalJson && !wroteText && finalText !== '') {
+      process.stdout.write(finalText)
+      wroteText = true
+    }
+    if (finalJson) {
+      process.stdout.write(
+        `${JSON.stringify({
+          type: 'result',
+          sessionId: session.sessionId,
+          turnId: result.turnId,
+          status: terminalStatus(result.terminal),
+          message: finalText || null,
+          terminal: result.terminal,
+        })}\n`,
+      )
+    } else if (!eventJson && wroteText) {
+      process.stdout.write('\n')
+    }
     if (result.terminal.type === 'turn.completed') return 0
     if (result.terminal.type === 'turn.cancelled') return 130
     return 1
@@ -443,21 +652,44 @@ async function runOnce(
   }
 }
 
+function terminalStatus(terminal: AgentEvent): 'completed' | 'cancelled' | 'failed' {
+  switch (terminal.type) {
+    case 'turn.completed':
+      return 'completed'
+    case 'turn.cancelled':
+      return 'cancelled'
+    case 'turn.failed':
+      return 'failed'
+    default:
+      throw new Error(`Expected terminal event, got ${terminal.type}`)
+  }
+}
+
 async function runPlainRepl(
   runtime: ConfiguredModelRuntime,
-  permissionMode: PermissionMode,
-  reasoningEffort: ReasoningEffort | undefined,
+  options: CliOptions,
+  resumeSessionId?: string,
 ): Promise<number> {
   const agent = createConfiguredAgent(runtime)
-  warnPermissionBypass(permissionMode)
-  const session = await agent.newSession({
-    output: 'plain-repl',
-    model: runtime.modelId,
-    route: runtime.route,
-    config: runtime.configSnapshot,
-    permissionMode,
+  warnPermissionBypass(options.permissionMode)
+  const session = await openOrCreateSession(
+    agent,
+    {
+      output: 'plain-repl',
+      model: runtime.modelId,
+      route: runtime.route,
+      config: runtime.configSnapshot,
+      permissionMode: options.permissionMode,
+    },
+    resumeSessionId,
+    options.permissionModeExplicit ? options.permissionMode : undefined,
+  )
+  const reasoningEffort = options.reasoningEffort
+  const terminal = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
   })
-  const terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: true })
   process.stdout.write('spark plain REPL · /exit 退出\n> ')
   try {
     for await (const line of terminal) {
@@ -477,27 +709,119 @@ async function runPlainTurn(
   reasoningEffort: ReasoningEffort | undefined,
 ): Promise<void> {
   let wroteText = false
+  let finalText = ''
   await session.turn(prompt, {
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     onDelta: (delta: LlmDelta) => {
       if (delta.type === 'text') {
         wroteText = true
         process.stdout.write(delta.text)
+      } else if (delta.type === 'retry') {
+        renderRetryDelta(delta)
       }
     },
-    onEvent: renderPlainEvent,
+    onEvent: (event) => {
+      if (event.type === 'assistant.completed' && event.message.text) {
+        finalText = event.message.text
+      }
+      renderPlainEvent(event)
+    },
   })
+  if (!wroteText && finalText !== '') {
+    process.stdout.write(finalText)
+    wroteText = true
+  }
   if (wroteText) process.stdout.write('\n')
 }
 
 function renderPlainEvent(event: AgentEvent): void {
-  if (event.type === 'tool.result') {
-    process.stderr.write(`[tool ${event.callId}] ${event.ok ? 'ok' : 'failed'}: ${event.content}\n`)
-  } else if (event.type === 'turn.failed') {
-    process.stderr.write(`${event.error.code}: ${event.error.message}\n`)
-  } else if (event.type === 'turn.cancelled') {
-    process.stderr.write('Turn cancelled.\n')
+  switch (event.type) {
+    case 'tool.call':
+      process.stderr.write(
+        `[tool ${terminalSafe(event.tool)}] requested ${previewCliValue(event.args)}\n`,
+      )
+      break
+    case 'tool.intent':
+      process.stderr.write(`[tool ${event.callId}] running\n`)
+      break
+    case 'tool.result':
+      process.stderr.write(
+        `[tool ${event.callId}] ${event.ok ? 'ok' : 'failed'} (${event.durationMs}ms): ${terminalSafe(event.content)}\n`,
+      )
+      break
+    case 'permission.requested':
+      process.stderr.write(
+        `[permission ${event.risk.tool}] approval required: ${terminalSafe(event.risk.argsPreview)}\n`,
+      )
+      break
+    case 'permission.decided':
+      process.stderr.write(
+        `[permission ${event.requestId}] ${event.decision}${event.grantScope ? ` (${event.grantScope})` : ''}\n`,
+      )
+      break
+    case 'turn.failed':
+      process.stderr.write(
+        `${terminalDiagnostic(event.error.code, 256)}: ${terminalDiagnostic(event.error.message)}${errorCauseSuffix(event.error.detail)}\n`,
+      )
+      break
+    case 'turn.cancelled':
+      process.stderr.write('Turn cancelled.\n')
+      break
+    case 'turn.completed':
+      if (event.reason === 'budget') {
+        process.stderr.write(
+          `Turn stopped at budget: ${event.stats.steps} steps, ${event.stats.toolCalls} tool calls.\n`,
+        )
+      }
+      break
+    default:
+      break
   }
+}
+
+function errorCauseSuffix(detail: unknown): string {
+  if (typeof detail !== 'object' || detail === null) return ''
+  const cause = (detail as Record<string, unknown>).cause
+  if (typeof cause !== 'object' || cause === null) return ''
+  const causeRecord = cause as Record<string, unknown>
+  const code = causeRecord.code
+  const causeMessage = causeRecord.message
+  const causeDetail =
+    typeof causeRecord.detail === 'object' && causeRecord.detail !== null
+      ? (causeRecord.detail as Record<string, unknown>)
+      : undefined
+  const requestId = causeDetail?.requestId
+  const responseModel = causeDetail?.responseModel
+  if (
+    typeof code !== 'string' &&
+    typeof causeMessage !== 'string' &&
+    typeof requestId !== 'string' &&
+    typeof responseModel !== 'string'
+  ) {
+    return ''
+  }
+  const root = `cause: ${terminalDiagnostic(typeof code === 'string' ? code : 'stream_error', 256)}: ${terminalDiagnostic(typeof causeMessage === 'string' ? causeMessage : 'unknown error', 1_024)}`
+  const request =
+    typeof requestId === 'string' ? `; request-id: ${terminalDiagnostic(requestId, 256)}` : ''
+  const model =
+    typeof responseModel === 'string' ? `; model: ${terminalDiagnostic(responseModel, 256)}` : ''
+  return ` (${root}${model}${request})`
+}
+
+function renderRetryDelta(delta: Extract<LlmDelta, { type: 'retry' }>): void {
+  process.stderr.write(
+    `[model] retrying ${delta.attempt}/${delta.maxRetries} in ${(delta.delayMs / 1_000).toFixed(1)}s${delta.resetOutput ? '; discarding the failed attempt output' : ''}: ${terminalSafe(delta.error.code ?? delta.error.message)}\n`,
+  )
+}
+
+function previewCliValue(value: unknown): string {
+  let serialized: string
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    serialized = '[unserializable]'
+  }
+  return terminalSafe(serialized.length > 240 ? `${serialized.slice(0, 237)}...` : serialized)
 }
 
 async function readStdin(): Promise<string> {
@@ -509,8 +833,60 @@ async function readStdin(): Promise<string> {
 }
 
 function helpText(version?: string): string {
-  return `spark ${version === undefined ? '' : `${version} `}— deterministic coding agent\n\nUsage:\n  spark                     Interactive TUI\n  spark "task"              Run one task\n  spark -p "task"           Run one task\n  spark --plain             Plain interactive REPL\n  spark --json "task"       NDJSON fact events\n  spark models              List local and SparkWork-synced models\n  spark doctor              Diagnose install, discovery, and model selection\n  spark install [--bin dir] Link the spark launcher onto PATH\n  spark uninstall [--bin dir]\n                            Remove the spark launcher only\n  spark uninstall --package\n                            Remove the npm package, its shims, and the launcher;\n                            ~/.spark config/sessions/caches are kept\n  spark update [--check]    Check for or install a release upgrade\n  spark upgrade             Alias for spark update\n  spark init                Write a starter ~/.spark/config.toml\n\nUpdate exit codes:\n  0 update available / update applied        1 up to date, older remote, or prerelease gated\n  2 usage error                               3 check or upgrade failed\n  4 another update is in progress\n\nOptions:\n  -p, --prompt <text>       Task prompt\n  -m, --model <id>          Select a local id, SparkWork route id, or unique model name\n      --bin <dir>           Launcher directory for install/uninstall (default ~/.spark/bin)\n      --base <url>          Release base for update (default SPARK_RELEASE_BASE, SPARK_INSTALL_BASE,\n                            [update] base_url in config.toml, then the built-in release host)\n      --target <semver>     Pin an exact version for update (checksum via the .sha256 sidecar)\n      --check               Only report the update status; apply nothing\n      --allow-prerelease    Consider prerelease releases for update\n      --package             With uninstall: remove the installed npm package too\n      --force               Replace a foreign launcher during install\n      --plain               Disable color and terminal redraw\n      --json                Emit persisted events as NDJSON; structured update results\n      --output-format <fmt> text | json | stream-json\n      --permission-mode <m> default | acceptEdits | plan | bypass
-      --effort <level>      Reasoning effort: off | low | medium | high | max (default: provider default)\n      --dangerously-skip-permissions\n                             Alias for --permission-mode bypass\n  -h, --help                Show help\n  -V, --version             Show version\n`
+  return `spark ${version === undefined ? '' : `${version} `}— deterministic coding agent
+
+Usage:
+  spark                     Interactive TUI
+  spark "task"              Run one task
+  spark -p "task"           Run one task
+  spark --plain             Plain interactive REPL
+  spark --json "task"       NDJSON fact events
+  spark --output-format json "task"
+                            One final JSON result object
+  spark --output-format stream-json "task"
+                            Event and streaming-delta JSONL
+  spark models              List local and SparkWork-synced models
+  spark doctor              Diagnose install, discovery, and model selection
+  spark sessions            List sessions recorded for the current directory
+  spark install [--bin dir] Link the spark launcher onto PATH
+  spark uninstall [--bin dir]
+                            Remove the spark launcher only
+  spark uninstall --package
+                            Remove the npm package, its shims, and the launcher;
+                            ~/.spark config/sessions/caches are kept
+  spark update [--check]    Check for or install a release upgrade
+  spark upgrade             Alias for spark update
+  spark init                Write a starter ~/.spark/config.toml
+
+Update exit codes:
+  0 update available / update applied        1 up to date, older remote, or prerelease gated
+  2 usage error                               3 check or upgrade failed
+  4 another update is in progress
+
+Options:
+  -p, --prompt <text>       Task prompt
+  -m, --model <id>          Select a local id, SparkWork route id, or unique model name
+  -c, --continue            Continue the most recent session in this directory
+  -r, --resume [<id>]       Resume a session; without an id pick one in the TUI
+      --bin <dir>           Launcher directory for install/uninstall (default ~/.spark/bin)
+      --base <url>          Release base for update (default SPARK_RELEASE_BASE, SPARK_INSTALL_BASE,
+                            [update] base_url in config.toml, then the built-in release host)
+      --target <semver>     Pin an exact version for update (checksum via the .sha256 sidecar)
+      --check               Only report the update status; apply nothing
+      --allow-prerelease    Consider prerelease releases for update
+      --package             With uninstall: remove the installed npm package too
+      --force               Replace a foreign launcher during install
+      --plain               Disable color and terminal redraw
+      --json                Backward-compatible persisted-event NDJSON output
+      --output-format <fmt> text | json | stream-json
+                            json emits one final result; stream-json emits events and deltas
+      --permission-mode <m> manual | auto | bypass (default: manual)
+      --effort <level>      Reasoning effort: off | low | medium | high | max (default: high)
+      --dangerously-skip-permissions
+                             Alias for --permission-mode bypass
+  -h, --help                Show help
+  -V, --version             Show version
+`
 }
 
 async function runningVersion(): Promise<string> {
@@ -563,6 +939,11 @@ function terminalSafe(value: string): string {
     safe.push(codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) ? '�' : character)
   }
   return safe.join('')
+}
+
+function terminalDiagnostic(value: string, maxLength = 2_048): string {
+  const safe = terminalSafe(value)
+  return safe.length <= maxLength ? safe : `${safe.slice(0, Math.max(0, maxLength - 1))}…`
 }
 
 function createConfiguredAgent(runtime: ConfiguredModelRuntime): Agent {

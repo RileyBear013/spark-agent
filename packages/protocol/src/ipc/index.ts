@@ -16,7 +16,14 @@
  * 注：P0-07 中旭阳-高级开发将基于此类型实现 typesafe invoke/handle 封装
  */
 
-import type { AgentEvent, SessionId, TurnId, TeamA2ATask, TeamA2AReply } from '../events/index.js'
+import type {
+  AgentEvent,
+  SessionId,
+  TurnId,
+  TeamA2ATask,
+  TeamA2AReply,
+  WorkflowProgressNode,
+} from '../events/index.js'
 import type { UserMessagePresentation } from '../turn-message-presentation.js'
 import type {
   ImageProcessProgress,
@@ -107,10 +114,12 @@ import type {
   ComputerUseIpcChannelMap,
 } from '../computer-use/ipc.js'
 import type { SubAppIpcChannelMap } from '../sub-app.js'
+import type { SubAppJob, SubAppV2IpcChannelMap } from '../sub-app-v2.js'
 import type { CustomToolsIpcChannelMap } from '../custom-tools.js'
-import type { ToolPackagesIpcChannelMap } from '../tool-package.js'
+import type { ToolPackageRuntimeEvent, ToolPackagesIpcChannelMap } from '../tool-package.js'
 import type { NotificationsIpcChannelMap } from '../notifications.js'
 import type { AccountSyncIpcChannelMap } from '../account-sync.js'
+import type { WorkflowBundleIpcChannelMap } from '../workflow-bundle-ipc.js'
 import type { NotificationChangedEvent } from '../notifications.js'
 import type { ComputerUseEvent } from '../computer-use/events.js'
 import type { AppControlCommandRequest } from '../computer-use/action.js'
@@ -156,7 +165,7 @@ import type {
 
 export type SessionChatMode = 'agent' | 'ask' | 'edit' | 'review'
 export type SessionReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-export type SessionAgentAdapter = 'claude' | 'claude-sdk' | 'codex'
+export type SessionAgentAdapter = 'claude' | 'claude-sdk' | 'codex' | 'spark'
 export type SessionPermissionMode =
   | 'claude-ask'
   | 'claude-auto-edits'
@@ -166,6 +175,11 @@ export type SessionPermissionMode =
   | 'codex-default'
   | 'codex-auto-review'
   | 'codex-full-access'
+  | 'spark-default'
+  | 'spark-accept-edits'
+  | 'spark-plan'
+  | 'spark-bypass'
+  | 'spark-auto'
 
 export interface SessionAttachment {
   type: 'image' | 'file' | 'directory'
@@ -348,6 +362,11 @@ export interface SessionSendTurnRequest {
    * 时显式中断并立即起跑新 turn，而不是入队等待。用于 Plan Approval Modal 的"批准并执行"。
    */
   interruptActive?: boolean
+  /**
+   * 仅用于错误暂停条的「重试」：确认该 turn 应解除错误暂停并排到剩余队列最前。
+   * 服务端只会在当前队列确实因 turn error 暂停时采用该提示，普通发送路径不受影响。
+   */
+  resumePausedQueue?: boolean
 }
 
 export interface SessionSendTurnResponse {
@@ -372,6 +391,22 @@ export interface SessionQueuedTurn extends UserMessagePresentation {
     sourceSessionId: SessionId
     snapshotSeq?: number
   }>
+  /** 该排队 turn 真正起跑时将使用的 provider/model 快照。 */
+  runtime?: SessionQueueRuntimeSelection
+}
+
+export interface SessionQueueRuntimeSelection {
+  providerProfileId?: string
+  modelId?: string | null
+  /** 本地 CLI 通过 Spark Provider 执行时，实际生效的二级 provider/model 选择。 */
+  cliSparkOverride?: CliSparkOverride | null
+}
+
+export interface SessionQueuePauseState {
+  reason: 'turn_error'
+  failedTurnId?: string
+  errorMessage?: string
+  pausedAt: string
 }
 
 export interface SessionGetQueueRequest {
@@ -382,6 +417,8 @@ export interface SessionGetQueueResponse {
   sessionId: SessionId
   running: boolean
   queuedTurns: SessionQueuedTurn[]
+  /** 可选字段保证旧主进程/渲染端仍可互通；新主进程会显式返回 null。 */
+  paused?: SessionQueuePauseState | null
 }
 
 export interface SessionCancelQueuedTurnRequest {
@@ -418,10 +455,23 @@ export interface SessionReorderQueuedTurnsResponse {
 export interface SessionSendQueuedTurnNowRequest {
   sessionId: SessionId
   turnId: string
+  /** 仅在队列正因错误暂停时，用当前模型路由选择重快照其余排队 turn。 */
+  runtimePatch?: SessionQueueRuntimeSelection
 }
 
 export interface SessionSendQueuedTurnNowResponse {
   started: boolean
+  queuedTurns: SessionQueuedTurn[]
+}
+
+export interface SessionResumeQueueRequest {
+  sessionId: SessionId
+  /** 恢复时用当前模型路由选择重快照剩余排队 turn。 */
+  runtimePatch?: SessionQueueRuntimeSelection
+}
+
+export interface SessionResumeQueueResponse {
+  resumed: boolean
   queuedTurns: SessionQueuedTurn[]
 }
 
@@ -501,6 +551,24 @@ export interface SessionUpdateResponse {
   session: SessionListResponse['sessions'][number]
 }
 
+/** 重命名弹窗「提取标题」：按会话模型（缺省回退 Provider 默认模型）从会话内容提取标题。 */
+export interface SessionExtractTitleRequest {
+  sessionId: SessionId
+}
+
+/** 失败原因稳定码：渲染端按码本地化提示，不把内部英文串直接抛给用户。 */
+export type SessionExtractTitleFailureCode =
+  | 'session_not_found'
+  | 'provider_missing'
+  | 'provider_no_api_key'
+  | 'model_missing'
+  | 'dialogue_empty'
+  | 'title_empty'
+
+export type SessionExtractTitleResponse =
+  | { ok: true; title: string }
+  | { ok: false; code: SessionExtractTitleFailureCode }
+
 export interface SessionDeleteRequest {
   sessionId: SessionId
 }
@@ -566,6 +634,22 @@ export interface SessionDeleteMessageRequest {
 
 export interface SessionDeleteMessageResponse {
   deleted: number
+}
+
+/**
+ * Rewind the latest persisted, user-visible turn before submitting an edited replacement.
+ * The replacement itself still goes through `session:submit-turn` so every adapter shares the
+ * normal attachment, runtime-selection, queue, and optimistic-message path.
+ */
+export interface SessionRewindLastTurnRequest {
+  sessionId: SessionId
+  turnId: TurnId
+}
+
+export interface SessionRewindLastTurnResponse {
+  retractedEventIds: string[]
+  turnCount: number
+  logicalMessageCount: number
 }
 
 export type UserQuestionKind = 'single_choice' | 'multi_choice' | 'text'
@@ -691,6 +775,8 @@ export interface SessionListResponse {
     /** Session-level preference; only compatible OpenAI-protocol runtimes send it upstream. */
     fastMode?: boolean
     status: 'idle' | 'running' | 'error'
+    /** 最近一次运行的结果（存 session metadata）：completed=正常完成，cancelled=被中止，error=出错；null=尚无已落定的运行 */
+    lastRunOutcome?: 'completed' | 'cancelled' | 'error' | null
     pinnedAt: string | null
     archivedAt: string | null
     createdAt: string
@@ -740,6 +826,13 @@ export interface ProviderProfile {
   mediaApiEndpoint?: string
   /** OpenAI/Codex provider API style. */
   codexApiKind?: 'chat' | 'responses' | 'embedding'
+  /**
+   * 使用 Spark 执行器（自研 spark-engine，进程内 SDK）作为该渠道会话的默认引擎。
+   * 渠道协议仍是 openai/anthropic 二选一，执行时按协议映射 spark 引擎的上游
+   * wire 协议（anthropic → anthropic-messages；openai+responses → openai-responses；
+   * openai+chat 暂不支持，UI 置灰）。会话内仍可手动切回 claude/codex 适配器。
+   */
+  useSparkExecutor?: boolean
   /** Whether this provider should use a 1M-token context window fallback. */
   supportsMillionContext?: boolean
   /** 自定义上下文窗口（tokens）。优先级高于 supportsMillionContext；<=0 / undefined 视为未配置。 */
@@ -937,6 +1030,8 @@ export interface ProviderCreateRequest {
   model?: string
   apiEndpoint?: string
   codexApiKind?: 'chat' | 'responses' | 'embedding'
+  /** 使用 Spark 执行器作为该渠道会话默认引擎；协议无法映射的渠道由表单层置灰不下发。 */
+  useSparkExecutor?: boolean
   supportsMillionContext?: boolean
   /** 自定义上下文窗口（tokens）。<=0 / undefined 视为未配置；优先级高于 supportsMillionContext。 */
   contextWindow?: number
@@ -989,6 +1084,8 @@ export interface ProviderUpdateRequest {
   /** 传入 null 可清除自定义 Endpoint */
   apiEndpoint?: string | null
   codexApiKind?: 'chat' | 'responses' | 'embedding'
+  /** 使用 Spark 执行器；显式传 false 清除（协议无法映射的渠道由表单层强制下发 false）。 */
+  useSparkExecutor?: boolean
   supportsMillionContext?: boolean
   /** 自定义上下文窗口（tokens）。传 0 清除自定义；undefined 不修改；优先级高于 supportsMillionContext。 */
   contextWindow?: number
@@ -1209,6 +1306,8 @@ export interface WorkspaceDeleteResponse {
 
 export interface WorkspaceOpenFolderRequest {
   workspaceId: string
+  /** Resolve a no-project workspace to this session's isolated child directory. */
+  sessionId?: SessionId
 }
 
 export interface WorkspaceOpenFolderResponse {
@@ -1234,6 +1333,8 @@ export interface WorkspaceTreeEntry {
 
 export interface WorkspaceListDirectoryRequest {
   workspaceId: string
+  /** Resolve a no-project workspace to this session's isolated child directory. */
+  sessionId?: SessionId
   path?: string
   maxDepth?: number
   /** Include commonly excluded dependency/build directories. `.git` remains hidden. */
@@ -1425,6 +1526,8 @@ export interface WorkspaceGitFileDiffRequest {
   workspaceId: string
   path: string
   untracked?: boolean
+  /** 指定提交时读取该提交相对于父提交的文件 diff；缺省读取工作区当前 diff。 */
+  commitHash?: string
 }
 
 export interface WorkspaceGitFileDiffResponse {
@@ -1444,11 +1547,27 @@ export interface WorkspaceGitCommitEntry {
   /** 尚未推送到上游（无上游分支时恒为 false） */
   unpushed: boolean
   /** 提交信息正文（subject 之后的部分，无正文时缺省） */
-  body?: string
+  body?: string | undefined
   /** 作者邮箱（缺失时缺省） */
-  authorEmail?: string
+  authorEmail?: string | undefined
   /** git 装饰引用（%D，如 `HEAD -> master, origin/master, tag: v1.0`，无装饰时缺省） */
-  refs?: string
+  refs?: string | undefined
+}
+
+/** 提交详情中的一个文件变更。rename/copy 时 previousPath 为变更前路径。 */
+export interface WorkspaceGitCommitFile {
+  path: string
+  status: string
+  previousPath?: string | undefined
+}
+
+export interface WorkspaceGitCommitFilesRequest {
+  workspaceId: string
+  hash: string
+}
+
+export interface WorkspaceGitCommitFilesResponse {
+  files: WorkspaceGitCommitFile[]
 }
 
 export interface WorkspaceGitLogRequest {
@@ -1459,6 +1578,22 @@ export interface WorkspaceGitLogRequest {
 
 export interface WorkspaceGitLogResponse {
   commits: WorkspaceGitCommitEntry[]
+}
+
+export interface WorkspaceGitFileHistoryRequest {
+  workspaceId: string
+  path: string
+  /** 返回最近 N 条，缺省 100，上限 500。 */
+  limit?: number
+}
+
+export interface WorkspaceGitFileHistoryEntry extends WorkspaceGitCommitEntry {
+  /** 该提交中该文件实际使用的路径；重命名前的提交可能与当前路径不同。 */
+  path: string
+}
+
+export interface WorkspaceGitFileHistoryResponse {
+  commits: WorkspaceGitFileHistoryEntry[]
 }
 
 export interface WorkspaceGitStageRequest {
@@ -2054,7 +2189,95 @@ export interface McpServerToolsResponse {
   tools: Array<{
     name: string
     description: string
+    /** 工具入参 JSON Schema（已连接服务器才有）；工作流工具节点据此渲染参数表单。 */
+    inputSchema?: {
+      type: 'object'
+      properties: Record<string, unknown>
+      required?: string[]
+    }
   }>
+}
+
+export interface WorkflowPlatformToolsRequest {}
+
+export interface WorkflowPlatformToolsResponse {
+  tools: Array<{
+    /** 运行时标识：工具包工具为 `packageId/toolName`，自定义工具为其 id。 */
+    name: string
+    title: string
+    description: string
+    source: 'package' | 'custom'
+    /** package 源：所属工具包显示名（前端下拉分组展示用）。 */
+    packageName?: string
+    /** 工具入参 JSON Schema；工作流工具节点据此渲染参数表单。 */
+    inputSchema?: {
+      type: 'object'
+      properties: Record<string, unknown>
+      required?: string[]
+    }
+  }>
+}
+
+// ─── Workflow Run History（历史运行回看） ────────────────────────────────────
+
+export interface WorkflowRunsRequest {
+  workflowId: string
+  limit?: number
+}
+
+/** 运行列表摘要项：不含 graph/执行记录等重负载，计数由 IPC 层解析后给出。 */
+export interface WorkflowRunSummaryItem {
+  id: string
+  sessionId: string
+  status: 'working' | 'completed' | 'failed' | 'canceled'
+  objective: string
+  startedAt: string
+  endedAt: string | null
+  updatedAt: string
+  completedCount: number
+  skippedCount: number
+  failedNodeId: string | null
+}
+
+export interface WorkflowRunsResponse {
+  runs: WorkflowRunSummaryItem[]
+}
+
+export interface WorkflowRunDetailRequest {
+  runId: string
+}
+
+/** 单次运行详情：节点明细复用 workflow_progress 的 WorkflowProgressNode，历史回看与实时进度渲染一致。 */
+export interface WorkflowRunDetail {
+  id: string
+  sessionId: string
+  workflowId: string
+  status: 'working' | 'completed' | 'failed' | 'canceled'
+  objective: string
+  startedAt: string
+  endedAt: string | null
+  nodes: WorkflowProgressNode[]
+}
+
+export interface WorkflowRunDetailResponse {
+  run: WorkflowRunDetail | null
+}
+
+// ─── Workflow Test Run（编辑器内试跑） ──────────────────────────────────────
+
+export interface WorkflowTestRunRequest {
+  workflowId: string
+  /** 试跑目标，会作为触发 turn 的用户消息（workflow_run 模式下即工具的 objective）。 */
+  objective?: string
+}
+
+export interface WorkflowTestRunResponse {
+  sessionId: string
+  /** 本次试跑实际使用的 agent（已绑定该工作流则复用，否则为试跑新建）。 */
+  agentId: string
+  agentName: string
+  /** 是否为本次试跑新建的临时 agent（复用已有绑定时为 false）。 */
+  createdAgent: boolean
 }
 
 // ─── Skill Channels ─────────────────────────────────────────────────────────
@@ -3090,6 +3313,22 @@ export interface WorkflowNodeConfig {
   providerProfileId?: string | null
   skillIds?: string[]
   toolIds?: string[]
+  /**
+   * 工具/MCP 节点确定性调用：'mcp' = 直接调用指定 MCP 服务器上的工具（原生直调，不经 LLM）；
+   * 'builtin' = 锁定单个 SDK 内置工具 + 预渲染参数的强约束派发（仅 tool 节点）；
+   * 'platform' = 直接调用平台自定义工具 / 工具包工具（原生直调，不经 LLM，仅 tool 节点）。
+   * 缺省/null 时不启用确定性调用，走旧的受限临时 worker 模式（toolIds 白名单 + LLM 自主决定）。
+   */
+  toolSource?: 'mcp' | 'builtin' | 'platform' | null
+  /** 确定性调用（toolSource='mcp'）：目标 MCP 服务器 id。 */
+  toolServerId?: string | null
+  /**
+   * 确定性调用：目标工具名（mcp 源为该服务器上的工具名；builtin 源须为 SDK 内置工具名；
+   * platform 源为平台工具运行时标识——工具包工具为 `packageId/toolName`，自定义工具为其 id）。
+   */
+  toolName?: string | null
+  /** 确定性调用：结构化参数；字符串值支持 {{key}} 插值（key = 上游 outputKey / state 键）。 */
+  toolArgs?: Record<string, unknown>
   mcpServerIds?: string[]
   ruleIds?: string[]
   retryCount?: number
@@ -3097,7 +3336,7 @@ export interface WorkflowNodeConfig {
   agentId?: string | null
   parallelism?: number
   verifyCommands?: string[]
-  /** 原子节点执行模式：'static' 走静态回显（兼容/降本），缺省/'auto' 走真实执行。仅 input 永远透传。 */
+  /** 原子节点执行模式：'static' 走静态回显（兼容/降本），缺省/'auto' 走真实执行；input 在 static 时才原样透传。 */
   execution?: 'auto' | 'static'
   /** artifact 节点导出目标：工作区相对路径，配置后把最终内容写入该文件（防穿越，须在工作区内）。 */
   exportPath?: string
@@ -3164,6 +3403,8 @@ export interface WorkflowItem {
   tags: string[]
   enabled: boolean
   graph: WorkflowGraph
+  /** 所属工作流包 id;未导入包的用户工作流为空。 */
+  bundleId?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -3488,7 +3729,11 @@ export interface LogReadRequest {
   /** 仅返回这些级别的行；为空/缺省表示不过滤。 */
   levels?: LogLevel[]
   /** 日志范围；canvas 会聚合画布生命周期、媒体 adapter 与轮询诊断。 */
-  scope?: 'all' | 'canvas'
+  scope?: 'all' | 'canvas' | 'tools'
+  /** Optional namespace prefix, applied after the selected scope. */
+  namespace?: string
+  /** Optional case-insensitive text filter. */
+  keyword?: string
 }
 
 export interface LogReadResponse {
@@ -3976,6 +4221,8 @@ export interface UpdateSettingsResponse {
 
 export interface WorkspaceWatchStartRequest {
   workspaceId: string
+  /** Resolve a no-project workspace to this session's isolated child directory. */
+  sessionId?: SessionId
   /** 需要忽略的 glob 模式（默认包含 node_modules, .git 等） */
   ignorePatterns?: string[]
 }
@@ -3986,6 +4233,7 @@ export interface WorkspaceWatchStartResponse {
 
 export interface WorkspaceWatchStopRequest {
   workspaceId: string
+  sessionId?: SessionId
 }
 
 export interface WorkspaceWatchStopResponse {
@@ -4165,6 +4413,14 @@ export interface TerminalGetBufferRequest {
 export interface TerminalGetBufferResponse {
   /** Cached output since the last renderer attach; may be empty if the PTY just started. */
   output: string
+}
+
+export interface TerminalClearRequest {
+  terminalId: TerminalId
+}
+
+export interface TerminalClearResponse {
+  cleared: boolean
 }
 
 /**
@@ -5080,12 +5336,14 @@ export interface FileOperationResult {
 
 export interface FileTrashRequest {
   workspaceId: string
+  sessionId?: SessionId
   /** 相对 workspace root 的 posix 路径 */
   path: string
 }
 
 export interface FileCreateFileRequest {
   workspaceId: string
+  sessionId?: SessionId
   /** 相对 workspace root 的 posix 路径；父目录不存在时自动 mkdir -p */
   path: string
   /** 初始内容（可选，默认创建空文件） */
@@ -5094,12 +5352,14 @@ export interface FileCreateFileRequest {
 
 export interface FileCreateDirectoryRequest {
   workspaceId: string
+  sessionId?: SessionId
   /** 相对 workspace root 的 posix 路径；支持递归创建多层 */
   path: string
 }
 
 export interface FileMoveRequest {
   workspaceId: string
+  sessionId?: SessionId
   fromPath: string
   toPath: string
   /** 目标已存在时的处理策略（默认 error） */
@@ -5108,6 +5368,7 @@ export interface FileMoveRequest {
 
 export interface FileCopyRequest {
   workspaceId: string
+  sessionId?: SessionId
   fromPath: string
   toPath: string
   /** 目标已存在时的处理策略（默认 error） */
@@ -5990,11 +6251,22 @@ export interface CanvasDepthModelStatusResponse {
 }
 export interface CanvasDepthModelInstallRequest {}
 export type CanvasDepthModelInstallResponse = CanvasDepthModelStatusResponse
+export interface CanvasDepthVideoRenderOptions {
+  /** 反相：255-v，得到「近暗远亮」的经典 depth map 观感（默认 false） */
+  invert?: boolean
+  /** 伪彩色映射；非 none 时输出 RGB 视频（默认 'none' 灰度） */
+  colormap?: 'none' | 'turbo' | 'viridis'
+  /** 时序平滑强度 0-1，0=逐帧原始深度，越大越平滑（默认 0.25） */
+  smoothStrength?: number
+  /** 对比度增强 0-10（归一化分位裁剪百分比），越大明暗对比越强（默认 2） */
+  contrast?: number
+}
 export interface CanvasDepthVideoTaskCreateRequest {
   projectId: string
   clientTaskId: string
   inputPath: string
   preserveAudio?: boolean
+  renderOptions?: CanvasDepthVideoRenderOptions
 }
 export interface CanvasDepthVideoTaskCancelRequest {
   runtimeTaskId: string
@@ -6418,10 +6690,12 @@ export interface IpcChannelMap
     EvidenceCostIpcChannelMap,
     ReplayPlaybookIpcChannelMap,
     SubAppIpcChannelMap,
+    SubAppV2IpcChannelMap,
     CustomToolsIpcChannelMap,
     ToolPackagesIpcChannelMap,
     NotificationsIpcChannelMap,
-    AccountSyncIpcChannelMap {
+    AccountSyncIpcChannelMap,
+    WorkflowBundleIpcChannelMap {
   // Session
   'session:create': [SessionCreateRequest, SessionCreateResponse]
   'session:send-turn': [SessionSendTurnRequest, SessionSendTurnResponse]
@@ -6437,12 +6711,14 @@ export interface IpcChannelMap
     SessionSendQueuedTurnNowRequest,
     SessionSendQueuedTurnNowResponse,
   ]
+  'session:resume-queue': [SessionResumeQueueRequest, SessionResumeQueueResponse]
   'session:cancel': [SessionCancelRequest, SessionCancelResponse]
   'session:reject-plan': [SessionRejectPlanRequest, SessionRejectPlanResponse]
   'session:get-history': [SessionGetHistoryRequest, SessionGetHistoryResponse]
   'session:list': [SessionListRequest, SessionListResponse]
   'session:search': [SessionSearchRequest, SessionSearchResponse]
   'session:update': [SessionUpdateRequest, SessionUpdateResponse]
+  'session:extract-title': [SessionExtractTitleRequest, SessionExtractTitleResponse]
   'session:delete': [SessionDeleteRequest, SessionDeleteResponse]
   'session:set-max-iterations': [SessionSetMaxIterationsRequest, SessionSetMaxIterationsResponse]
   'session:set-goal': [SessionSetGoalRequest, SessionGoalResponse]
@@ -6459,6 +6735,7 @@ export interface IpcChannelMap
     SessionSetCheckpointConfigResponse,
   ]
   'session:delete-message': [SessionDeleteMessageRequest, SessionDeleteMessageResponse]
+  'session:rewind-last-turn': [SessionRewindLastTurnRequest, SessionRewindLastTurnResponse]
   'session:answer-question': [SessionAnswerQuestionRequest, SessionAnswerQuestionResponse]
   'session:list-pending-questions': [
     SessionListPendingQuestionsRequest,
@@ -6532,6 +6809,8 @@ export interface IpcChannelMap
   'workspace:fetch-branches': [WorkspaceFetchBranchesRequest, WorkspaceFetchBranchesResponse]
   'workspace:git-status': [WorkspaceGitStatusRequest, WorkspaceGitStatusResponse]
   'workspace:git-file-diff': [WorkspaceGitFileDiffRequest, WorkspaceGitFileDiffResponse]
+  'workspace:git-commit-files': [WorkspaceGitCommitFilesRequest, WorkspaceGitCommitFilesResponse]
+  'workspace:git-file-history': [WorkspaceGitFileHistoryRequest, WorkspaceGitFileHistoryResponse]
   'workspace:git-check-ignore': [WorkspaceGitCheckIgnoreRequest, WorkspaceGitCheckIgnoreResponse]
   'workspace:git-commit': [WorkspaceGitCommitRequest, WorkspaceGitCommitResponse]
   'workspace:git-push': [WorkspaceGitPushRequest, WorkspaceGitPushResponse]
@@ -6671,6 +6950,14 @@ export interface IpcChannelMap
   'workflow:create': [WorkflowCreateRequest, WorkflowCreateResponse]
   'workflow:update': [WorkflowUpdateRequest, WorkflowUpdateResponse]
   'workflow:delete': [WorkflowDeleteRequest, WorkflowDeleteResponse]
+  /** 工作流工具节点「平台工具直调」候选清单（已启用的工具包工具 + 自定义工具，含 inputSchema）。 */
+  'workflow:platform-tools': [WorkflowPlatformToolsRequest, WorkflowPlatformToolsResponse]
+  /** 工作流历史运行列表（按 workflowId 查询，轻量摘要，不含执行明细）。 */
+  'workflow:runs': [WorkflowRunsRequest, WorkflowRunsResponse]
+  /** 单次历史运行详情：含逐节点状态/错误/输出预览/耗时，从持久化快照还原。 */
+  'workflow:run-detail': [WorkflowRunDetailRequest, WorkflowRunDetailResponse]
+  /** 编辑器内试跑：复用/新建绑定该工作流的 agent，创建试跑会话并提交触发 turn（真实运行时，会话留档）。 */
+  'workflow:test-run': [WorkflowTestRunRequest, WorkflowTestRunResponse]
 
   // Skill Registry (Skill Store)
   'skill-registry:list': [SkillRegistryListRequest, SkillRegistryListResponse]
@@ -6736,6 +7023,7 @@ export interface IpcChannelMap
   'terminal:kill': [TerminalKillRequest, TerminalKillResponse]
   'terminal:rename': [TerminalRenameRequest, TerminalRenameResponse]
   'terminal:get-buffer': [TerminalGetBufferRequest, TerminalGetBufferResponse]
+  'terminal:clear': [TerminalClearRequest, TerminalClearResponse]
 
   // Command
   'command:execute': [CommandExecuteRequest, CommandExecuteResponse]
@@ -7261,6 +7549,17 @@ export interface IpcStreamChannelMap {
    * 任何入口（管理页 UI、Agent MCP 工具、IPC）造成的创建/发布/启停/归档/
    * 删除/草稿更新都会触发，保证会话内创建的应用即时出现在菜单与胶囊。 */
   'stream:subapp:directory-changed': Record<string, never>
+  /** V2 子应用后台服务事件（renderer 按 appId/event 过滤）。 */
+  'stream:subapp:service-event': {
+    appId: string
+    event: string
+    payload: unknown
+  }
+  /** V2 持久任务状态/进度变化。 */
+  'stream:subapp:job-changed': {
+    appId: string
+    job: SubAppJob
+  }
   /** 工作区内容搜索分批结果（主进程推送；渲染端按自己发起的 requestId 过滤） */
   'stream:workspace-search:content': WorkspaceSearchContentStreamPayload
   /** 自定义工具变更（创建/更新/删除/启停/导入）：渲染进程工具列表据此刷新。 */
@@ -7270,10 +7569,20 @@ export interface IpcStreamChannelMap {
   }
   /** Tool Package 安装、配置、权限、启停或安全输入请求变化。 */
   'stream:tool-packages:changed': {
-    change: 'installed' | 'configured' | 'permission' | 'enabled' | 'disabled' | 'secret-requested'
+    change:
+      | 'installed'
+      | 'configured'
+      | 'permission'
+      | 'enabled'
+      | 'disabled'
+      | 'secret-requested'
+      | 'uninstalled'
+      | 'version-removed'
     packageId: string
     runtimeChanged: boolean
   }
+  /** Tool Process invocation logs and throttled progress updates. */
+  'stream:tool-packages:runtime': ToolPackageRuntimeEvent
   /** 消息通知变化（主进程轮询 edu-server 后广播）：渲染层据此更新铃铛角标、
    * 快捷面板缓存；newNotifications/newAnnouncements 非空时弹即时 toast。 */
   'stream:notification:changed': NotificationChangedEvent
@@ -7401,6 +7710,9 @@ export interface IpcStreamChannelMap {
   'stream:tray:new-session': Record<string, never>
   /** 用户从系统托盘菜单点击某个最近会话（主进程展示主窗口后推送，渲染端切换到该会话）*/
   'stream:tray:open-session': { sessionId: string }
+  /** 应用菜单编辑命令（macOS ⌘C/⌘A 走菜单 accelerator，主进程执行原生复制后
+   *  推送给渲染端；内置终端若持有选区/焦点则用 xterm 选区接管剪贴板）*/
+  'stream:app-menu:action': { action: 'app-copy' | 'app-select-all' }
   /** Built-in terminal panel events: data / exit / removed / etc. */
   'stream:terminal:event': TerminalStreamEvent
   /** 内置浏览器面板恢复为右侧面板（主进程 → 主窗口渲染端，携带需打开的 URL）*/

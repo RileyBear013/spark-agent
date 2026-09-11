@@ -26,12 +26,15 @@ public enum NativeComputerAction: Equatable, Sendable {
   case invokeElement(elementID: String, action: String?)
   case setValue(elementID: String, value: String, sensitive: Bool?)
   case selectText(elementID: String, text: String, prefix: String?, suffix: String?)
-  case click(point: NativeNormalizedPoint, button: String?, count: Int?)
+  case click(
+    point: NativeNormalizedPoint, button: String?, count: Int?, modifiers: [String]
+  )
   case move(point: NativeNormalizedPoint)
   case drag(from: NativeNormalizedPoint, to: NativeNormalizedPoint, durationMs: Int?)
   case scroll(elementID: String?, point: NativeNormalizedPoint?, deltaX: Double, deltaY: Double)
   case keypress(keys: [String])
   case typeText(text: String, sensitive: Bool?)
+  case pasteText(text: String, sensitive: Bool?)
   case waitFor(condition: NativeWaitCondition, timeoutMs: Int)
   case focusWindow(windowID: String)
 
@@ -47,6 +50,7 @@ public enum NativeComputerAction: Equatable, Sendable {
     case .scroll: "scroll"
     case .keypress: "keypress"
     case .typeText: "type_text"
+    case .pasteText: "paste_text"
     case .waitFor: "wait_for"
     case .focusWindow: "focus_window"
     }
@@ -87,6 +91,11 @@ public struct NativeComputerActionEnvelope: Equatable, Sendable {
   public let policyContext: NativePolicyContext
   public let intent: String
   public let hasExpectedPostcondition: Bool
+  /// When true the Host appends a skyshot to the action response: the settled
+  /// post-action observation (fresh tree + screenshot) in the SAME round
+  /// trip, so the caller skips its separate re-observe. Optional wire field —
+  /// older brokers omit it and keep the two-step behaviour.
+  public let includeSkyshot: Bool
 }
 
 func decodeComputerActionEnvelope(_ value: Any?) throws -> NativeComputerActionEnvelope {
@@ -95,7 +104,7 @@ func decodeComputerActionEnvelope(_ value: Any?) throws -> NativeComputerActionE
     "computerSessionId", "actionId", "actuatorLeaseId", "observedFrameId",
     "observedTreeVersion", "targetAppId", "targetWindowId", "action", "policyContext", "intent",
   ]
-  let optional: Set<String> = ["expectedPostcondition", "executionLane"]
+  let optional: Set<String> = ["expectedPostcondition", "executionLane", "includeSkyshot"]
   guard required.isSubset(of: Set(object.keys)), Set(object.keys).isSubset(of: required.union(optional))
   else { throw invalidFields }
   let intent = try string(object["intent"], min: 1, max: 4_000, trimmed: true)
@@ -113,6 +122,14 @@ func decodeComputerActionEnvelope(_ value: Any?) throws -> NativeComputerActionE
   } else {
     lane = expectedLane
   }
+  let includeSkyshot: Bool
+  if object["includeSkyshot"] == nil {
+    includeSkyshot = false
+  } else if let parsed = strictBool(object["includeSkyshot"]) {
+    includeSkyshot = parsed
+  } else {
+    throw invalidFields
+  }
   return NativeComputerActionEnvelope(
     computerSessionID: try identifier(object["computerSessionId"]),
     actionID: try identifier(object["actionId"]),
@@ -125,8 +142,26 @@ func decodeComputerActionEnvelope(_ value: Any?) throws -> NativeComputerActionE
     executionLane: lane,
     policyContext: try decodePolicyContext(object["policyContext"]),
     intent: intent,
-    hasExpectedPostcondition: object["expectedPostcondition"] != nil
+    hasExpectedPostcondition: object["expectedPostcondition"] != nil,
+    includeSkyshot: includeSkyshot
   )
+}
+
+/// Decodes the click modifier chord; names must come from the shared keypress
+/// vocabulary and may not repeat. Absent or empty means a plain click.
+private func modifierNames(_ value: Any?) throws -> [String] {
+  guard let raw = value else { return [] }
+  guard let list = raw as? [Any] else { throw invalidFields }
+  var names: [String] = []
+  for item in list {
+    guard let name = item as? String,
+      NativeMouseChord.allowedNames.contains(name),
+      !names.contains(name)
+    else { throw invalidFields }
+    names.append(name)
+  }
+  guard names.count <= 3 else { throw invalidFields }
+  return names
 }
 
 private func executionLane(for action: NativeComputerAction) -> NativeExecutionLane {
@@ -169,13 +204,14 @@ private func decodeAction(_ value: Any?) throws -> NativeComputerAction {
       suffix: try optionalString(object, "suffix", min: 0, max: 2_000)
     )
   case "click":
-    try keys(object, required: ["type", "point"], optional: ["button", "count"])
+    try keys(object, required: ["type", "point"], optional: ["button", "count", "modifiers"])
     let count = try optionalInteger(object, "count")
     guard count.map({ (1...3).contains($0) }) ?? true else { throw invalidFields }
     return .click(
       point: try point(object["point"]),
       button: try optionalEnum(object, "button", allowed: ["left", "right", "middle"]),
-      count: count
+      count: count,
+      modifiers: try modifierNames(object["modifiers"])
     )
   case "move":
     try keys(object, required: ["type", "point"])
@@ -205,6 +241,12 @@ private func decodeAction(_ value: Any?) throws -> NativeComputerAction {
   case "type_text":
     try keys(object, required: ["type", "text"], optional: ["sensitive"])
     return .typeText(
+      text: try string(object["text"], min: 1, max: maxNativeTextUTF16Units),
+      sensitive: try optionalBoolean(object, "sensitive")
+    )
+  case "paste_text":
+    try keys(object, required: ["type", "text"], optional: ["sensitive"])
+    return .pasteText(
       text: try string(object["text"], min: 1, max: maxNativeTextUTF16Units),
       sensitive: try optionalBoolean(object, "sensitive")
     )

@@ -15,6 +15,12 @@ import { getComputerUseServices, type ComputerUseServices } from './ComputerUseS
 import { getComputerUseV2FlagStore } from './computerUseV2Flags.js'
 import { ComputerApplicationTargetResolver } from './ComputerApplicationTargetResolver.js'
 import { ComputerDesktopStateService } from './ComputerDesktopStateService.js'
+import { ComputerAtomicActionService } from './ComputerAtomicActionService.js'
+import {
+  ATOMIC_TOOL_NAMES,
+  ComputerAtomicToolHandlers,
+  type AtomicToolName,
+} from './ComputerAtomicToolHandlers.js'
 
 const log = createLogger('computer-use-agent-controller')
 
@@ -104,6 +110,26 @@ export class ComputerUseAgentController {
       ((backend) => new ComputerDesktopStateService(backend, this.appTargetResolver))
   }
 
+  private readonly atomicBundles = new Map<
+    ComputerUseServices,
+    { service: ComputerAtomicActionService; handlers: ComputerAtomicToolHandlers }
+  >()
+
+  /** One atomic bundle (service + tool handlers) per services instance. */
+  private atomicBundleFor(services: ComputerUseServices) {
+    const cached = this.atomicBundles.get(services)
+    if (cached != null) return cached
+    const service = new ComputerAtomicActionService(services, {
+      resolveModel: async (sessionId) => {
+        const model = await this.resolveDecisionModel(sessionId)
+        return { providerProfileId: model.providerProfileId, model: model.model }
+      },
+    })
+    const bundle = { service, handlers: new ComputerAtomicToolHandlers(service, services) }
+    this.atomicBundles.set(services, bundle)
+    return bundle
+  }
+
   bindSessionContext(sessionId: string, context: BoundAgentRuntime): void {
     this.sessionContexts.set(sessionId, { ...context })
   }
@@ -124,6 +150,9 @@ export class ComputerUseAgentController {
       }),
     )
     this.sessionContexts.delete(sessionId)
+    // Implicit atomic-control sessions of this agent session go too.
+    const bundle = this.atomicBundles.get(this.getServices())
+    void bundle?.service.releaseAgentSession(sessionId)
     const failures = results.filter((result) => result.status === 'rejected')
     if (failures.length > 0) {
       log.warn('Failed to stop one or more Computer Use sessions while revoking Agent control', {
@@ -158,6 +187,9 @@ export class ComputerUseAgentController {
 
   async invoke(sessionId: string, toolName: string, args: unknown): Promise<unknown> {
     const services = this.getServices()
+    if ((ATOMIC_TOOL_NAMES as readonly string[]).includes(toolName)) {
+      return this.invokeAtomicTool(services, toolName as AtomicToolName, sessionId, args)
+    }
     switch (toolName) {
       case 'get_capabilities': {
         const capabilities = await services.backend.getCapabilities()
@@ -185,6 +217,7 @@ export class ComputerUseAgentController {
             'takeover',
             'bind_target',
           ],
+          atomicTools: [...ATOMIC_TOOL_NAMES],
         }
       }
       case 'diagnose_native_host':
@@ -227,18 +260,15 @@ export class ComputerUseAgentController {
           }
         }
         try {
+          // Targeted capture: the snapshot follows the requested application,
+          // not the user's focus — get_app_state observes background apps the
+          // same way Codex does, without stealing focus from the user.
           const snapshot = await services.snapshots.captureFrontmost({
             sessionId,
             turnId: context.turnId,
             accessibleTextMode: 'visible_only',
+            targetAppId: result.target.app.id,
           })
-          if (snapshot.app.id !== result.target.app.id) {
-            return {
-              ...result,
-              snapshot: null,
-              snapshotUnavailableReason: 'target_not_frontmost',
-            }
-          }
           return {
             ...result,
             snapshot,
@@ -323,7 +353,7 @@ export class ComputerUseAgentController {
         const adapter = this.createAdapter(model)
         this.invalidateRun(services, computerSession.id)
         try {
-          await services.coordinator.claim(computerSession.id)
+          await services.coordinator.claim(computerSession.id, sessionId)
           const resumed = services.broker.resume(computerSession.id)
           this.launchOperator(services, resumed, operator, adapter)
           return { computerSession: resumed, operatorStatus: 'running' }
@@ -343,10 +373,22 @@ export class ComputerUseAgentController {
           throw unavailable('Trusted application snapshot capture is unavailable')
         }
         const request = parseSnapshotCapture(args)
+        let targetAppId: string | undefined
+        if (request.app != null) {
+          // Resolve the named application (id, bundle id, or display name) the
+          // same way get_app_state does, then capture ITS window — works for
+          // background apps without stealing the user's focus.
+          const resolved = await this.createDesktopState(services.backend).getAppState({
+            app: request.app,
+            launchIfNeeded: false,
+          })
+          targetAppId = resolved.target.app.id
+        }
         const snapshot = await services.snapshots.captureFrontmost({
           sessionId,
           turnId: context.turnId,
           accessibleTextMode: request.accessibleTextMode,
+          ...(targetAppId == null ? {} : { targetAppId }),
         })
         if (snapshot.previewUrl == null) {
           throw unavailable('The application snapshot did not receive a preview capability')
@@ -414,7 +456,7 @@ export class ComputerUseAgentController {
           })
         }
         try {
-          await services.coordinator.claim(computerSession.id)
+          await services.coordinator.claim(computerSession.id, sessionId)
           const activeSession = services.sessions.activate(computerSession.id)
           const operator = this.createOperator(services)
           const adapter = this.createAdapter(model)
@@ -436,6 +478,26 @@ export class ComputerUseAgentController {
       default:
         throw new ComputerUseBrokerError('action_not_allowed', 'Unknown Computer Use task tool')
     }
+  }
+
+  /**
+   * Atomic agent-directed control: one governed action per call, each response
+   * carrying the fresh Markdown tree + full-resolution screenshot (skyshot).
+   */
+  private async invokeAtomicTool(
+    services: ComputerUseServices,
+    toolName: AtomicToolName,
+    sessionId: string,
+    args: unknown,
+  ): Promise<unknown> {
+    const capabilities = await services.backend.getCapabilities()
+    if (!supportsExecution(capabilities)) {
+      throw executionUnavailable(capabilities)
+    }
+    const context = this.sessionContexts.get(sessionId)
+    if (context == null) throw unavailable('Agent turn context is unavailable')
+    const bundle = this.atomicBundleFor(services)
+    return bundle.handlers.handle(toolName, sessionId, context.turnId, args)
   }
 
   private launchOperator(
@@ -638,6 +700,7 @@ const OpenAppSchema = z.object({ app: z.string().trim().min(1).max(300) }).stric
 const SnapshotCaptureSchema = z
   .object({
     accessibleTextMode: z.enum(['visible_only', 'app_exposed']).default('visible_only'),
+    app: z.string().trim().min(1).max(300).optional(),
   })
   .strict()
 

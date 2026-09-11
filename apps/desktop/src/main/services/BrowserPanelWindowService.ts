@@ -13,6 +13,7 @@ import electron from 'electron'
 import type { BrowserWindowConstructorOptions } from 'electron'
 import { join } from 'node:path'
 import { createLogger } from '@spark/shared'
+import { registerAppShutdownCleanup } from '../app-shutdown.js'
 import { getMainWindow, registerAppWindow } from '../windows/index.js'
 
 const log = createLogger('browser-panel-window')
@@ -92,6 +93,12 @@ export class BrowserPanelWindowService {
 
     const win = this.deps.createWindow()
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    // 渲染端 index.html 固定 <title>SparkWork</title>，页面加载后会把构造时
+    // 设置的 "SparkWork 浏览器" 覆盖回 "SparkWork"。拦截 page-title-updated，
+    // 锁定窗口标题（同 CanvasWindowService）。
+    win.on('page-title-updated', (event: unknown) => {
+      if (hasPreventDefault(event)) event.preventDefault()
+    })
     win.on('closed', () => {
       if (this.win === win) this.win = null
     })
@@ -184,7 +191,7 @@ export function getBrowserPanelWindowService(): BrowserPanelWindowService {
         return win != null && !win.isDestroyed() ? win.webContents : null
       },
     })
-    app.on('before-quit', () => {
+    registerAppShutdownCleanup('browser panel window', () => {
       singleton?.close()
     })
   }
@@ -236,4 +243,13 @@ export function installWebviewPopupRouter(): void {
       return { action: 'deny' }
     })
   })
+}
+
+function hasPreventDefault(event: unknown): event is { preventDefault: () => void } {
+  return (
+    typeof event === 'object' &&
+    event != null &&
+    'preventDefault' in event &&
+    typeof (event as { preventDefault?: unknown }).preventDefault === 'function'
+  )
 }

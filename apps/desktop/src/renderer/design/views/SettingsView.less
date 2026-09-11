@@ -943,6 +943,33 @@
 .update-actions .ant-btn.update-action-btn {
   min-width: 144px;
 }
+.update-release-notes-card {
+  margin-bottom: 20px;
+}
+.update-release-notes-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--primary);
+}
+.update-release-notes-meta {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.update-release-notes-body {
+  max-height: 260px;
+  margin-top: 14px;
+  overflow: auto;
+  color: var(--text);
+}
+.update-release-notes-body.is-expanded {
+  max-height: 520px;
+}
+.update-release-notes-toggle {
+  margin-top: 12px;
+}
 .ant-btn.update-action-btn .ant-btn-icon {
   display: inline-flex;
   align-items: center;
@@ -983,10 +1010,11 @@
 }
 .rule-textarea {
   min-height: 150px;
+}
+.rule-textarea textarea {
+  min-height: 150px;
   resize: vertical;
 }
-
-
 
 /* Settings-only utility classes. Keep these out of the global view layer. */
 .range-value {
@@ -1338,7 +1366,7 @@
 .keymap .km-action {
   flex-direction: column;
   align-items: flex-start;
-  .km-action-desc{
+  .km-action-desc {
     font-size: var(--font-xs);
     color: var(--text-muted);
   }

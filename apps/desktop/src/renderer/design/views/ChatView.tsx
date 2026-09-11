@@ -129,6 +129,17 @@ import { SessionSwitchingOverlay } from './chat/SessionSwitchingOverlay'
 import { buildChatTurnNavItems, type ChatTurnNavItem } from './chat/chat-turn-navigation'
 import { SessionForkDialog } from './chat/SessionForkDialog'
 import { MessageHoverBar } from './chat/MessageHoverBar'
+import { LastUserMessageEditor } from './chat/LastUserMessageEditor'
+import { getLastEditableUserMessageId } from './chat/last-user-message-edit'
+import {
+  buildUserMessagePrefillPayload,
+  buildUserMessageRevisionPayload,
+} from './chat/user-message-actions'
+import {
+  deriveChatHistoryState,
+  retractAgentEvents,
+  toContextLedgerState,
+} from './chat/chat-history-revision'
 import {
   UserMessageSessionReferences,
   type UserMessageSessionReferenceDisplay,
@@ -164,6 +175,8 @@ export { MarkdownText } from './chat/ChatMarkdown'
 import {
   appIdOfSubAppPanelKind,
   defaultUnifiedSidePanelWidth,
+  filePathOfPreviewPanelKind,
+  filePreviewPanelKind,
   maxSideChatWidthForViewport,
   SideChatPanel,
   type SideChatSessionOption,
@@ -223,6 +236,7 @@ import { isCodeLikeFile } from '../components/code-viewer/codeLanguage'
 import { insertToComposer } from '../components/code-viewer/composerInsert'
 import { buildComposerAttachmentsFromPaths } from '../services/composer-attachments'
 import {
+  canOpenInEditor,
   shouldOpenInEditorByDefault,
   shouldPreviewFirst,
   type FileOpenModeOpts,
@@ -230,16 +244,12 @@ import {
 } from '../components/fileOpenRouting'
 import type { HtmlOpenMode } from '../services/render-html'
 import {
-  buildUsageDataFromEvents,
   clamp,
   computeCacheHitRate,
   createEmptySessionUsageData,
-  eventsAfterLastHistoryReset,
   formatRelativeTime,
   formatTokenCount,
   getBasename,
-  getLatestInputTokens,
-  getLatestRuntimeContextSnapshot,
   getProviderContextInputUpdate,
   getRuntimeContextSnapshotUpdate,
   type RuntimeContextSnapshotState,
@@ -256,6 +266,7 @@ import type {
   AgentAdapter,
   BranchState,
   ComposerPrefillPayload,
+  ComposerRevisionPayload,
   ContextMenuItem,
   MessageAttachment,
   PermissionModeChoice,
@@ -430,6 +441,11 @@ import {
 } from '@spark/protocol'
 import { normalizeEduAssetUrl, resolveModelContextWindowForProvider } from '@spark/shared'
 import { ProviderLogo } from '../components/ProviderLogo'
+import {
+  resolvePathAgainstWorkspaceRoot,
+  resolveSessionWorkspaceForDisplay,
+  resolveSessionWorkspaceRootPathForDisplay,
+} from '../session-workspace-root'
 
 const LOCAL_CLI_MODEL_DISPLAY = 'claude cli'
 const LOCAL_CODEX_CLI_MODEL_DISPLAY = 'codex cli'
@@ -669,7 +685,6 @@ export function ChatView({
     showGitReviewPanel: boolean
     showSideChatPanel: boolean
     showInspector: boolean
-    filePreview: { filePath: string; fileType: PreviewFileType } | null
     sideChatSessionId: SessionId | null
     activeHtmlPanelBlockId: string | null
     codeFiles: OpenCodeFile[]
@@ -686,7 +701,6 @@ export function ChatView({
     showGitReviewPanel: false,
     showSideChatPanel: false,
     showInspector: false,
-    filePreview: null,
     sideChatSessionId: null,
     activeHtmlPanelBlockId: null,
     codeFiles: [],
@@ -708,10 +722,11 @@ export function ChatView({
 
   const openUnifiedSidePanel = useCallback(
     (kind: UnifiedSidePanelKind) => {
-      // 互斥：会话检查器 / 配置面板 / 统一面板 / 文件预览 同一时刻只显示一个
+      // 互斥：会话检查器 / 配置面板 / 统一面板 同一时刻只显示一个。
+      // 文件预览是统一面板的动态 tab（preview:<path>），打开时不关闭其他 tab，
+      // 编辑器等既有 tab 原样保留，切回即可继续。
       setShowInspector(false)
       setShowConfigPanel(false)
-      setFilePreview(null)
       setUnifiedPanelOpen(true)
       if (kind !== 'html') clearHtmlPresentation()
       setUnifiedSideTabs((tabs) => (tabs.includes(kind) ? tabs : [...tabs, kind]))
@@ -764,7 +779,7 @@ export function ChatView({
   }, [directoryLoaded, panelApps, unifiedSideTabs, closeUnifiedSidePanel])
 
   // 头部「配置面板」按钮：打开独立的 ChatConfigPanel 侧栏（不再嵌入统一面板容器）。
-  // 与 inspector / 统一面板 / 文件预览互斥。
+  // 与 inspector / 统一面板互斥。
   const toggleConfigPanel = useCallback(() => {
     setShowConfigPanel((prev) => {
       const next = !prev
@@ -772,13 +787,13 @@ export function ChatView({
         setShowInspector(false)
         setUnifiedPanelOpen(false)
         clearHtmlPresentation()
-        setFilePreview(null)
       }
       return next
     })
   }, [clearHtmlPresentation])
 
   // 头部「统一侧边面板」按钮：toggle 整个统一面板（terminal/side-chat/review/plan 容器）。
+  // 仅隐藏容器，不动 unifiedSideTabs —— 重新展开后 tab（含文件预览）原样恢复。
   const toggleUnifiedPanel = useCallback(() => {
     if (unifiedPanelOpen) clearHtmlPresentation()
     setUnifiedPanelOpen((prev) => {
@@ -786,7 +801,6 @@ export function ChatView({
       if (next) {
         setShowInspector(false)
         setShowConfigPanel(false)
-        setFilePreview(null)
       }
       return next
     })
@@ -1067,7 +1081,6 @@ export function ChatView({
       setUnifiedPanelOpen(false)
       setUnifiedSideTabs([])
       setActiveUnifiedSideTab(null)
-      setFilePreview(null)
       setSideChatSessionId(null)
       setActiveHtmlPanelBlockId(null)
       setActiveHtmlRemotePresentation(null)
@@ -1088,7 +1101,6 @@ export function ChatView({
       setUnifiedPanelOpen(false)
       setUnifiedSideTabs([])
       setActiveUnifiedSideTab(null)
-      setFilePreview(null)
       setSideChatSessionId(null)
       setActiveHtmlPanelBlockId(null)
       setActiveHtmlRemotePresentation(null)
@@ -1107,7 +1119,6 @@ export function ChatView({
     setUnifiedPanelOpen(snap.unifiedPanelOpen)
     setUnifiedSideTabs(snap.unifiedSideTabs)
     setActiveUnifiedSideTab(snap.activeUnifiedSideTab)
-    setFilePreview(snap.filePreview)
     setSideChatSessionId(snap.sideChatSessionId)
     setActiveHtmlPanelBlockId(snap.activeHtmlPanelBlockId)
     setActiveHtmlRemotePresentation(null)
@@ -1143,6 +1154,11 @@ export function ChatView({
   // ComposerV2 的 consumedResendIdRef 去重，使"同一会话内连续重发第二条"失效。
   // 用独立计数器保证 requestId 在 ChatView 生命周期内严格单调递增。
   const resendRequestIdRef = useRef(0)
+  const [revisionRequest, setRevisionRequest] = useState<{
+    requestId: number
+    payload: ComposerRevisionPayload
+  } | null>(null)
+  const revisionRequestIdRef = useRef(0)
   const chatLayoutRef = useRef<HTMLDivElement | null>(null)
   const chatAreaRef = useRef<HTMLDivElement | null>(null)
   const [activeMessages, setActiveMessages] = useState<UIMessage[]>([])
@@ -1362,11 +1378,6 @@ export function ChatView({
   }, [activeVisibleMessages, toast])
 
   // ── 文件预览状态 ──
-  const [filePreview, setFilePreview] = useState<{
-    filePath: string
-    fileType: PreviewFileType
-  } | null>(null)
-
   // ── 「代码」tab：应用内代码查看/编辑器（Monaco）──
   // 受控于 ChatView 以便切会话快照存盘；内容运行时态（读取/脏标/外部变更）在
   // CodeViewerPanel 内部的 useCodeViewerFiles 管理，与 tabs 增删解耦。
@@ -1396,7 +1407,6 @@ export function ChatView({
     showGitReviewPanel,
     showSideChatPanel,
     showInspector,
-    filePreview,
     sideChatSessionId,
     activeHtmlPanelBlockId,
     codeFiles,
@@ -1477,6 +1487,7 @@ export function ChatView({
       sessionCtx.bumpSessionMessageCount(sessionId)
       setScrollToBottomTrigger((n) => n + 1)
       setResendRequest(null)
+      setRevisionRequest(null)
     },
     [setSessionStatus, sessionCtx],
   )
@@ -1522,7 +1533,9 @@ export function ChatView({
     return `${root.replace(/[\\/]+$/, '')}${sep}${norm}`
   }, [])
 
-  // 在「代码」tab 打开一个文件（已存在则更新 diff/行号/变更类型并激活）
+  // 在「代码」tab 打开一个文件（已存在则更新 diff/行号/变更类型并激活）。
+  // 打开即重置视图模式：默认源码面板，仅 Git 面板/审查面板等明确「看改动」的入口传 'diff'，
+  // 避免上一次的 diff 模式粘住，让后续从文件树/聊天卡片等入口打开文件也停在 git 改动视图。
   const openInCodeTab = useCallback(
     (
       filePath: string,
@@ -1530,6 +1543,8 @@ export function ChatView({
         lineNumber?: number
         diff?: string
         changeType?: OpenCodeFile['changeType']
+        viewMode?: CodeViewMode
+        gitCommitHash?: string
       },
     ) => {
       const absPath = resolveAbsCodePath(filePath)
@@ -1550,6 +1565,7 @@ export function ChatView({
                     diff: opts?.diff ?? f.diff,
                     lineNumber: opts?.lineNumber ?? f.lineNumber,
                     changeType: opts?.changeType ?? f.changeType,
+                    gitCommitHash: opts?.gitCommitHash,
                   }
                 : f,
             )
@@ -1562,17 +1578,18 @@ export function ChatView({
                 diff: opts?.diff,
                 lineNumber: opts?.lineNumber,
                 changeType: opts?.changeType,
+                gitCommitHash: opts?.gitCommitHash,
               },
             ],
       )
       setActiveCodePath(absPath)
-      // 收起其他面板 + 打开统一面板的 code tab
+      setCodeViewMode(opts?.viewMode ?? 'source')
+      // 收起独立面板 + 打开统一面板的 code tab；其余统一面板 tab（含文件预览）原样保留
       setShowInspector(false)
       setShowConfigPanel(false)
       setShowGitReviewPanel(false)
       setShowSideChatPanel(false)
       setShowTerminalPanel(false)
-      setFilePreview(null)
       clearHtmlPresentation()
       setShowCheckpointTimeline(false)
       setUnifiedSideTabs((tabs) => (tabs.includes('code') ? tabs : [...tabs, 'code']))
@@ -1624,27 +1641,24 @@ export function ChatView({
         openInCodeTab(filePath)
         return
       }
-      // 预览类型以扩展名判定为准（调用方传入的 fileType 可能是 'text' 兜底值）
-      setShowInspector(false)
-      setShowConfigPanel(false)
-      setShowGitReviewPanel(false)
-      setShowSideChatPanel(false)
-      setShowTerminalPanel(false)
-      setUnifiedPanelOpen(false)
-      clearHtmlPresentation()
+      // 预览是统一面板的动态 tab（每个文件一个 tab，可多层并存）：打开时不再收起统一面板，
+      // 编辑器/终端等既有 tab 原样保留；关闭预览 tab 会自动回落到上一个 tab。
+      // 预览类型以扩展名判定为准（调用方传入的 fileType 可能是 'text' 兜底值），tab 自描述
+      // 只编码路径，渲染时再按扩展名推导 fileType。
       setShowCheckpointTimeline(false)
-      setFilePreview({ filePath, fileType: getPreviewFileType(filePath) ?? fileType })
+      // tab 去重键统一为绝对路径：资源管理器传相对路径、工具栏/侧聊传绝对路径、聊天卡片
+      // 传工具输出的原始路径——同一文件从不同入口打开时聚焦同一个 tab，而非开出两个同名 tab。
+      openUnifiedSidePanel(filePreviewPanelKind(resolveAbsCodePath(filePath)))
     },
-    [clearHtmlPresentation, openInCodeTab],
+    [openInCodeTab, openUnifiedSidePanel, resolveAbsCodePath],
   )
 
-  // 打开会话检查器：与配置面板、统一面板、文件预览互斥（同一时刻只显示一个）
+  // 打开会话检查器：与配置面板、统一面板互斥（同一时刻只显示一个）
   const openInspector = useCallback(() => {
     setShowInspector(true)
     setShowConfigPanel(false)
     setUnifiedPanelOpen(false)
     clearHtmlPresentation()
-    setFilePreview(null)
   }, [clearHtmlPresentation])
 
   const pickProjectFolder = useCallback(async () => {
@@ -1788,8 +1802,21 @@ export function ChatView({
     return workspaces.find((item) => item.id === sessionWorkspaceId) ?? activeWorkspace
   })()
   const activeSessionWorkspaceId = activeSessionWorkspace?.id ?? null
+  const activeSessionWorkspaceRootPath = useMemo(
+    () => resolveSessionWorkspaceRootPathForDisplay(activeSessionWorkspace, activeSession?.id),
+    [activeSession?.id, activeSessionWorkspace],
+  )
+  const activeSessionWorkspaceForDisplay = useMemo(
+    () => resolveSessionWorkspaceForDisplay(activeSessionWorkspace, activeSession?.id),
+    [activeSession?.id, activeSessionWorkspace],
+  )
+  const activeFilePreviewRootPath =
+    activeSessionWorkspaceRootPath ?? activeWorkspace?.rootPath ?? null
+  // 当前激活 tab 若是文件预览（preview:<path>），解析出文件路径供渲染分支使用
+  const previewTabPath =
+    activeUnifiedSideTab != null ? filePathOfPreviewPanelKind(activeUnifiedSideTab) : null
   // 同步 workspace root 到 ref，供「代码」tab 的 resolveAbsCodePath/openInCodeTab 使用
-  workspaceRootRef.current = activeSessionWorkspace?.rootPath ?? activeWorkspace?.rootPath ?? null
+  workspaceRootRef.current = activeSessionWorkspaceRootPath ?? activeWorkspace?.rootPath ?? null
   const activeProvider = providers.find((item) => item.id === activeSession?.providerProfileId)
   const activeProviderContextWindow = resolveModelContextWindowForProvider(
     activeSession?.modelId ?? activeProvider?.defaultModel,
@@ -2298,7 +2325,6 @@ export function ChatView({
     showConfigPanel,
     showInspector,
     showTerminalPanel,
-    filePreview,
   ])
 
   const handleUpdateActiveSession = async (patch: SessionRuntimePatch) => {
@@ -2578,6 +2604,7 @@ export function ChatView({
    * ComposerV2 通过 useEffect 监听 requestId 变化把内容写入当前会话草稿并自动 focus。
    */
   const handleResendMessage = useCallback((payload: ComposerPrefillPayload) => {
+    setRevisionRequest(null)
     resendRequestIdRef.current += 1
     setResendRequest({
       requestId: resendRequestIdRef.current,
@@ -2594,6 +2621,29 @@ export function ChatView({
   const handleResendConsumed = useCallback(() => {
     setResendRequest(null)
   }, [])
+
+  const handleEditMessage = useCallback((payload: ComposerRevisionPayload) => {
+    setResendRequest(null)
+    revisionRequestIdRef.current += 1
+    setRevisionRequest({ requestId: revisionRequestIdRef.current, payload })
+  }, [])
+
+  const handleRevisionConsumed = useCallback(() => {
+    setRevisionRequest(null)
+  }, [])
+
+  const handleRevisionApplied = useCallback(
+    (result: { sessionId: string; turnCount: number; logicalMessageCount: number }) => {
+      sessionCtx.updateSessionInList(result.sessionId as SessionId, {
+        turnCount: result.turnCount,
+        logicalMessageCount: result.logicalMessageCount,
+        messageCount: result.logicalMessageCount,
+        status: 'idle',
+        lastRunOutcome: null,
+      })
+    },
+    [sessionCtx],
+  )
 
   const handleHeroPromptSelect = useCallback((text: string) => {
     resendRequestIdRef.current += 1
@@ -2653,6 +2703,23 @@ export function ChatView({
     sideChatSessionWorkspaceId,
     workspaces,
   ])
+  const sideChatWorkspaceRootPath = useMemo(
+    () => resolveSessionWorkspaceRootPathForDisplay(sideChatWorkspace, sideChatSession?.id),
+    [sideChatSession?.id, sideChatWorkspace],
+  )
+  const sideChatWorkspaceForDisplay = useMemo(
+    () => resolveSessionWorkspaceForDisplay(sideChatWorkspace, sideChatSession?.id),
+    [sideChatSession?.id, sideChatWorkspace],
+  )
+  const handleSideChatFilePreview = useCallback<FileOpenHandler>(
+    (filePath, fileType, options) =>
+      handleFilePreview(
+        resolvePathAgainstWorkspaceRoot(filePath, sideChatWorkspaceRootPath),
+        fileType,
+        options,
+      ),
+    [handleFilePreview, sideChatWorkspaceRootPath],
+  )
 
   // 侧边聊天头部下拉候选：当前 workspace 下的全部会话。
   // 复用 sideChatMatchesActiveWorkspace 的同款 workspace 判定，保证切过去一定 matches、
@@ -2762,7 +2829,6 @@ export function ChatView({
     async (options: { replace?: boolean } = {}) => {
       setShowInspector(false)
       setShowConfigPanel(false)
-      setFilePreview(null)
       setUnifiedPanelOpen(true)
       setUnifiedSideTabs((tabs) => (tabs.includes('side-chat') ? tabs : [...tabs, 'side-chat']))
       setActiveUnifiedSideTab('side-chat')
@@ -2880,6 +2946,9 @@ export function ChatView({
         focusTrigger={composerFocusTrigger}
         resendRequest={resendRequest}
         onResendConsumed={handleResendConsumed}
+        revisionRequest={revisionRequest}
+        onRevisionConsumed={handleRevisionConsumed}
+        onRevisionApplied={handleRevisionApplied}
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
         onPickProject={pickProjectFolder}
@@ -2942,6 +3011,9 @@ export function ChatView({
         focusTrigger={composerFocusTrigger}
         resendRequest={resendRequest}
         onResendConsumed={handleResendConsumed}
+        revisionRequest={revisionRequest}
+        onRevisionConsumed={handleRevisionConsumed}
+        onRevisionApplied={handleRevisionApplied}
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
         onPickProject={pickProjectFolder}
@@ -3011,7 +3083,6 @@ export function ChatView({
                 setUnifiedPanelOpen(false)
                 clearHtmlPresentation()
                 setShowConfigPanel(false)
-                setFilePreview(null)
               }
             }}
             onToggleConfig={toggleConfigPanel}
@@ -3071,7 +3142,7 @@ export function ChatView({
               <ChatTabbar
                 key="chat-tabbar"
                 session={activeSession}
-                workspace={activeWorkspace}
+                workspace={activeSessionWorkspaceForDisplay ?? activeWorkspace}
                 onOpenInEditor={() => openUnifiedSidePanel('code')}
                 onOpenInTerminal={() => openUnifiedSidePanel('terminal')}
                 agentStatus={agentStatus}
@@ -3103,7 +3174,6 @@ export function ChatView({
                     setUnifiedPanelOpen(false)
                     clearHtmlPresentation()
                     setShowConfigPanel(false)
-                    setFilePreview(null)
                   }
                   if (v) setShowGitReviewPanel(false)
                 }}
@@ -3142,7 +3212,7 @@ export function ChatView({
                 optimisticMessages={optimisticUserMessages}
                 onDeleteOptimisticMessages={handleDeleteOptimisticUserMessages}
                 workspaceId={activeSessionWorkspaceId}
-                workspaceRootPath={activeSessionWorkspace?.rootPath ?? null}
+                workspaceRootPath={activeSessionWorkspaceRootPath}
                 onStatusChange={setAgentStatus}
                 onUsageChange={setContextInputTokens}
                 onRuntimeContextChange={setRuntimeContext}
@@ -3171,6 +3241,7 @@ export function ChatView({
                 onReplyTo={handleReplyTo}
                 onReplyToMember={handleReplyToMember}
                 onResendMessage={handleResendMessage}
+                onEditMessage={handleEditMessage}
                 onLoadingChange={setActiveSessionLoading}
                 emptyStateVariant="loading"
                 modelSwitchMarkers={modelSwitchMarkers}
@@ -3269,7 +3340,7 @@ export function ChatView({
       {showInspector && (
         <ChatInspector
           session={activeSession}
-          workspace={activeSessionWorkspace ?? activeWorkspace}
+          workspace={activeSessionWorkspaceForDisplay ?? activeWorkspace}
           messages={active == null ? [] : activeVisibleMessages}
           usageData={sessionUsageData}
           projectContext={projectContext}
@@ -3290,8 +3361,11 @@ export function ChatView({
           agents={agents}
           onChangeTeamConfig={handleInspectorChangeConfig}
           onOpenProjectFolder={() => {
-            const workspaceToOpen = activeSessionWorkspace ?? activeWorkspace
-            if (workspaceToOpen) void sessionCtx.handleOpenProjectFolder(workspaceToOpen)
+            if (activeSession != null) {
+              void sessionCtx.handleOpenSessionFolder(activeSession)
+              return
+            }
+            if (activeWorkspace != null) void sessionCtx.handleOpenProjectFolder(activeWorkspace)
           }}
           checkpointAvailable={checkpointAvailable}
           checkpointEnabled={checkpointEnabled}
@@ -3381,10 +3455,11 @@ export function ChatView({
                 onCloseFiles={closeCodeFiles}
                 onViewModeChange={setCodeViewMode}
                 workspaceId={gitWorkspaceId ?? null}
+                sessionId={activeSession?.id ?? null}
                 explorerVisible={codeExplorerVisible}
                 explorerWidth={codeExplorerWidth}
                 explorerExpandedDirs={codeExplorerExpandedDirs}
-                workspaceRootPath={gitWorkspace?.rootPath ?? null}
+                workspaceRootPath={activeSessionWorkspaceRootPath ?? gitWorkspace?.rootPath ?? null}
                 onExplorerVisibleChange={setCodeExplorerVisible}
                 onExplorerWidthChange={setCodeExplorerWidth}
                 onExplorerExpandedChange={setCodeExplorerExpandedDirs}
@@ -3401,13 +3476,19 @@ export function ChatView({
                 gitStatus={gitStatus}
                 onGitStatusApplied={applyGitStatus}
                 onRefreshGitStatus={() => void refreshGitStatus()}
-                onOpenFileFromGit={(rel) => {
-                  setCodeViewMode('diff')
-                  openInCodeTab(rel)
-                }}
+                onOpenFileFromGit={(rel, commitHash, changeType) =>
+                  openInCodeTab(
+                    rel,
+                    commitHash == null
+                      ? { viewMode: 'diff' }
+                      : { viewMode: 'diff', gitCommitHash: commitHash, changeType },
+                  )
+                }
+                onPreviewFileFromToolbar={(path, type) =>
+                  handleFilePreview(path, type, { mode: 'preview' })
+                }
                 onOpenFileFromSearch={(rel, line) => {
-                  // 搜索结果命中必为文本文件：编辑器打开并定位到匹配行
-                  setCodeViewMode('source')
+                  // 搜索结果命中必为文本文件：编辑器打开并定位到匹配行（视图模式由 openInCodeTab 回落为源码）
                   openInCodeTab(rel, line != null ? { lineNumber: line } : undefined)
                 }}
               />
@@ -3422,8 +3503,7 @@ export function ChatView({
                 onClose={() => closeUnifiedSidePanel('review')}
                 onOpenInEditor={(path) => {
                   // 三连跳：切代码面板 → 展示 Git 面板 → 打开该文件 diff 视图可直接编辑
-                  setCodeViewMode('diff')
-                  openInCodeTab(path)
+                  openInCodeTab(path, { viewMode: 'diff' })
                   openGitPanel()
                 }}
               />
@@ -3452,7 +3532,7 @@ export function ChatView({
                 return (
                   <BuiltInTerminalPanel
                     sessionId={terminalSessionId}
-                    workspace={activeSessionWorkspace ?? activeWorkspace}
+                    workspace={activeSessionWorkspaceForDisplay ?? activeWorkspace}
                     onClose={() => closeUnifiedSidePanel('terminal')}
                   />
                 )
@@ -3487,7 +3567,7 @@ export function ChatView({
                         optimisticMessages={optimisticUserMessages}
                         onDeleteOptimisticMessages={handleDeleteOptimisticUserMessages}
                         workspaceId={sideChatWorkspace?.id ?? null}
-                        workspaceRootPath={sideChatWorkspace?.rootPath ?? null}
+                        workspaceRootPath={sideChatWorkspaceRootPath}
                         onStatusChange={setSideChatAgentStatus}
                         onUsageChange={setSideChatContextInputTokens}
                         onRuntimeContextChange={setSideChatRuntimeContext}
@@ -3506,7 +3586,7 @@ export function ChatView({
                         stopTrigger={sessionStopTriggers[sideChatSessionId] ?? 0}
                         scrollToBottomTrigger={sideChatScrollToBottomTrigger}
                         teamConfig={teamConfig}
-                        onFilePreview={handleFilePreview}
+                        onFilePreview={handleSideChatFilePreview}
                         onLoadingChange={() => {}}
                         onReplyTo={handleReplyTo}
                         onReplyToMember={handleReplyToMember}
@@ -3514,7 +3594,7 @@ export function ChatView({
                     </HtmlRenderProvider>
                     <ComposerV2
                       session={sideChatSession}
-                      workspace={sideChatWorkspace}
+                      workspace={sideChatWorkspaceForDisplay}
                       providers={providers}
                       agents={agents}
                       selectedProviderId={selectedProviderId}
@@ -3571,6 +3651,24 @@ export function ChatView({
                   </div>
                 )}
               </SideChatPanel>
+            ) : previewTabPath != null ? (
+              // 文件预览 tab：每个文件一个独立 tab（可多层并存），关闭后自动回落上一个 tab。
+              // key 取路径：切换不同预览文件时重建组件，避免上一个文件的内容/加载态串扰。
+              <FilePreviewPanel
+                key={previewTabPath}
+                variant="tab"
+                filePath={previewTabPath}
+                fileType={getPreviewFileType(previewTabPath) ?? 'text'}
+                {...(activeFilePreviewRootPath != null
+                  ? { workspaceRootPath: activeFilePreviewRootPath }
+                  : {})}
+                onEdit={
+                  canOpenInEditor(previewTabPath) ? () => openInCodeTab(previewTabPath) : undefined
+                }
+                onClose={() => {
+                  if (activeUnifiedSideTab != null) closeUnifiedSidePanel(activeUnifiedSideTab)
+                }}
+              />
             ) : activeUnifiedSideTab != null &&
               activeUnifiedSideTab.startsWith('subapp:') &&
               appIdOfSubAppPanelKind(activeUnifiedSideTab) != null ? (
@@ -3580,17 +3678,6 @@ export function ChatView({
             )}
           </UnifiedSessionSidePanel>
         )}
-
-      {filePreview != null && (
-        <FilePreviewPanel
-          filePath={filePreview.filePath}
-          fileType={filePreview.fileType}
-          {...((activeSessionWorkspace ?? activeWorkspace)?.rootPath != null
-            ? { workspaceRootPath: (activeSessionWorkspace ?? activeWorkspace)!.rootPath }
-            : {})}
-          onClose={() => setFilePreview(null)}
-        />
-      )}
 
       <CheckpointTimelinePanel
         sessionId={active}
@@ -3644,6 +3731,7 @@ function ChatStream({
   onReplyToMember,
   onFilePreview,
   onResendMessage,
+  onEditMessage,
   onLoadingChange,
   emptyStateVariant = 'hint',
   modelSwitchMarkers = [],
@@ -3700,6 +3788,8 @@ function ChatStream({
   onFilePreview?: FileOpenHandler
   /** 重发：用户消息上"重发"按钮触发，把 blocks+attachments 重新塞回输入区 */
   onResendMessage?: (payload: ComposerPrefillPayload) => void
+  /** 编辑并替换当前会话最后一轮用户消息。 */
+  onEditMessage?: (payload: ComposerRevisionPayload) => void
   /**
    * 消息为空且非历史加载时的占位形态：
    *  - 'hint'（默认）：静态「开始对话」提示，用于侧边 ChatStream 这类真正可能长期为空的场景；
@@ -3738,6 +3828,14 @@ function ChatStream({
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [multiSelectMode, setMultiSelectMode] = useState(false)
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(() => new Set())
+  const lastEditableUserMessageId = useMemo(
+    () =>
+      getLastEditableUserMessageId(
+        displayMessages,
+        agentIsRunning || persistedSessionStatus === 'running' || multiSelectMode,
+      ),
+    [agentIsRunning, displayMessages, multiSelectMode, persistedSessionStatus],
+  )
   // 窗口化加载：是否还有更早历史 + 是否正在加载更早一页（顶部 loading 指示）
   const [hasMoreHistory, setHasMoreHistory] = useState(false)
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
@@ -3903,6 +4001,34 @@ function ChatStream({
         callbacks.onProjectContextChange(null)
         callbacks.onTurnPromptSnapshotsChange([])
         callbacks.onStatusChange('')
+        setAgentIsRunning(false)
+        isStreamingRef.current = false
+        return false
+      }
+      if (event.type === 'transcript_retraction' && event.reason === 'user_edit') {
+        const revised = retractAgentEvents(loadedEventsRef.current, event.eventIds)
+        const retainedEvents = revised.events
+        loadedEventsRef.current = retainedEvents
+        loadedEventIdsRef.current = createAgentEventIdSet(retainedEvents)
+        builderRef.current = revised.builder
+        const nextMessages = revised.messages
+        setMessages(nextMessages)
+        callbacks.onMessagesChange(nextMessages)
+
+        const derived = deriveChatHistoryState(retainedEvents)
+        callbacks.onUsageChange(derived.inputTokens)
+        callbacks.onRuntimeContextChange(derived.runtimeContext)
+        usageRef.current = derived.usage
+        callbacks.onUsageDataChange(derived.usage)
+        callbacks.onContextUsageChange(derived.contextUsage)
+        callbacks.onContextLedgerChange(derived.contextLedger)
+        callbacks.onProjectContextChange(derived.projectContext)
+        callbacks.onTurnPromptSnapshotsChange(revised.builder.getTurnPromptSnapshots())
+        callbacks.onPlanProposed(revised.builder.getPendingPlan())
+        callbacks.onGoalChange?.(revised.builder.getActiveGoal())
+        callbacks.onOrchestrationChange?.(revised.builder.getOrchestrationStatus())
+        callbacks.onStatusChange('')
+        callbacks.onSessionStatusChange('idle')
         setAgentIsRunning(false)
         isStreamingRef.current = false
         return false
@@ -4140,13 +4266,11 @@ function ChatStream({
 
       // 上下文/用量派生与消息回放使用同一窗口：session_history_reset 标记之后的事件。
       // 否则清空后未发新轮次的会话重进时，最新 ledger/usage 会取到标记之前的旧值。
-      const eventsSinceReset = eventsAfterLastHistoryReset(events)
-
-      callbacks.onUsageChange(getLatestInputTokens(eventsSinceReset))
-      callbacks.onRuntimeContextChange(getLatestRuntimeContextSnapshot(eventsSinceReset))
-      const historyUsage = buildUsageDataFromEvents(eventsSinceReset)
-      usageRef.current = historyUsage
-      callbacks.onUsageDataChange(historyUsage)
+      const derived = deriveChatHistoryState(events)
+      callbacks.onUsageChange(derived.inputTokens)
+      callbacks.onRuntimeContextChange(derived.runtimeContext)
+      usageRef.current = derived.usage
+      callbacks.onUsageDataChange(derived.usage)
       const latestStatus = getLatestAgentStatus(
         events,
         persistedSessionStatusRef.current ?? undefined,
@@ -4161,22 +4285,9 @@ function ChatStream({
           hasRunningTeamMemberActivity(nextMessages, getBlockTeamMemberContext),
         )
       }
-      const latestContext = getLatestContextUsageEvent(eventsSinceReset)
-      callbacks.onContextUsageChange(
-        latestContext != null
-          ? {
-              estimatedTokens: latestContext.estimatedTokens,
-              softLimitTokens: latestContext.softLimitTokens,
-              contextWindowTokens: latestContext.contextWindowTokens,
-              compactedThisTurn: latestContext.compacted,
-            }
-          : null,
-      )
-      const latestLedger = getLatestContextLedgerEvent(eventsSinceReset)
-      callbacks.onContextLedgerChange(
-        latestLedger != null ? toContextLedgerState(latestLedger) : null,
-      )
-      callbacks.onProjectContextChange(getLatestProjectContextEvent(eventsSinceReset))
+      callbacks.onContextUsageChange(derived.contextUsage)
+      callbacks.onContextLedgerChange(derived.contextLedger)
+      callbacks.onProjectContextChange(derived.projectContext)
       callbacks.onTurnPromptSnapshotsChange(builder.getTurnPromptSnapshots())
       // 历史里若存在未被后续 user_message / agent_status 解决的 plan_proposed
       // （例如 APP_RESTARTED 期间用户没有审批），重新弹出审批弹窗。
@@ -4642,6 +4753,12 @@ function ChatStream({
     }
     return { id: assistantAgentId, name: assistantName, avatarSrc: assistantAvatarSrc }
   }, [displayMessages, agents, assistantAgentId, assistantName, assistantAvatarSrc])
+  const waitingAgentTargetRef = useRef({ enabled: false, agentId: '', messageIndex: -1 })
+  waitingAgentTargetRef.current = {
+    enabled: showWaitingAgent,
+    agentId: placeholderIdentity.id,
+    messageIndex: displayMessages.length - 1,
+  }
 
   const selectedMessages = useMemo(
     () => displayMessages.filter((msg) => selectedMessageIds.has(msg.id)),
@@ -4878,6 +4995,23 @@ function ChatStream({
         target.scrollIntoView({ behavior: 'smooth', block: 'center' })
         return
       }
+      const waitingTarget = waitingAgentTargetRef.current
+      if (
+        waitingTarget.enabled &&
+        waitingTarget.agentId === agentId &&
+        waitingTarget.messageIndex >= 0
+      ) {
+        virtualMessageListRef.current?.scrollToIndex(waitingTarget.messageIndex, 'end')
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const match = root.querySelector<HTMLElement>(
+              `[data-running-agent-id="${escapedAgentId}"][data-running="true"]`,
+            )
+            match?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          })
+        })
+        return
+      }
       const messageIndex = findLastAgentMessageIndex(messagesRef.current, agentId)
       if (messageIndex < 0) return
       virtualMessageListRef.current?.scrollToIndex(messageIndex, 'center')
@@ -4891,6 +5025,27 @@ function ChatStream({
       window.removeEventListener('spark:team-running-agent:scroll', handleScrollToRunningAgent)
     }
   }, [])
+
+  const waitingAgentMessage = showWaitingAgent ? (
+    <AgentMsg
+      key="agent-running-placeholder"
+      sessionId={sessionId}
+      workspaceRootPath={workspaceRootPath}
+      status="running"
+      blocks={[]}
+      messageStatus="streaming"
+      isLatest
+      assistantId={placeholderIdentity.id}
+      assistantName={placeholderIdentity.name}
+      assistantAvatarSrc={placeholderIdentity.avatarSrc}
+      showIdentity={shouldShowAssistantIdentity(
+        teamConfig.enabled,
+        placeholderIdentity.id,
+        assistantAgentId,
+      )}
+      {...(onFilePreview != null ? { onFilePreview } : {})}
+    />
+  ) : null
 
   return (
     <div className="chat-stream-viewport">
@@ -4948,16 +5103,22 @@ function ChatStream({
                   scrollElementRef={streamRef}
                   getItemKey={(msg) => msg.id}
                   estimateSize={(msg) => (msg.role === 'user' ? 120 : 220)}
-                  renderAfterItem={(msg) => {
+                  renderAfterItem={(msg, index) => {
                     const marker = modelSwitchMarkers.find((item) => item.afterMessageId === msg.id)
                     const segments = segmentsFor(msg.id)
-                    if (marker == null && segments.length === 0) return null
+                    const waitingAfterLastMessage =
+                      index === displayMessages.length - 1 ? waitingAgentMessage : null
+                    if (marker == null && segments.length === 0 && waitingAfterLastMessage == null)
+                      return null
                     return (
                       <>
                         {marker != null && <ModelSwitchNotice marker={marker} />}
                         {segments.map((view) => (
                           <ComputerActivitySegmentCard key={view.key} view={view} />
                         ))}
+                        {waitingAfterLastMessage != null && (
+                          <div style={{ marginTop: 16 }}>{waitingAfterLastMessage}</div>
+                        )}
                       </>
                     )
                   }}
@@ -5022,30 +5183,28 @@ function ChatStream({
                         {...(onResendMessage != null
                           ? {
                               onResend: () =>
-                                onResendMessage({
-                                  text: extractTextFromBlocks(msg.blocks),
-                                  attachments: msg.attachments ?? [],
-                                  ...(msg.sessionReferences != null &&
-                                  msg.sessionReferences.length > 0
-                                    ? {
-                                        sessionReferences: msg.sessionReferences.map(
-                                          (reference) => ({
-                                            sourceSessionId: reference.sourceSessionId,
-                                            title:
-                                              reference.title ??
-                                              sessions.find(
-                                                (item) => item.id === reference.sourceSessionId,
-                                              )?.title ??
-                                              '未命名会话',
-                                            ...(reference.snapshotSeq !== undefined
-                                              ? { snapshotSeq: reference.snapshotSeq }
-                                              : {}),
-                                            status: 'active',
-                                          }),
-                                        ),
-                                      }
-                                    : {}),
-                                }),
+                                onResendMessage(
+                                  buildUserMessagePrefillPayload(
+                                    msg,
+                                    extractTextFromBlocks(msg.blocks),
+                                    sessions,
+                                  ),
+                                ),
+                            }
+                          : {})}
+                        {...(onEditMessage != null &&
+                        msg.id === lastEditableUserMessageId &&
+                        msg.turnId != null
+                          ? {
+                              onEdit: (text: string) =>
+                                onEditMessage(
+                                  buildUserMessageRevisionPayload(
+                                    sessionId,
+                                    msg as UIMessage & { turnId: string },
+                                    text,
+                                    sessions,
+                                  ),
+                                ),
                             }
                           : {})}
                       >
@@ -5124,26 +5283,7 @@ function ChatStream({
               )}
             </ComputerActivitySegmentsBridge>
           </ComputerActivityProvider>
-          {showWaitingAgent && (
-            <AgentMsg
-              key="agent-running-placeholder"
-              sessionId={sessionId}
-              workspaceRootPath={workspaceRootPath}
-              status="running"
-              blocks={[]}
-              messageStatus="streaming"
-              isLatest
-              assistantId={placeholderIdentity.id}
-              assistantName={placeholderIdentity.name}
-              assistantAvatarSrc={placeholderIdentity.avatarSrc}
-              showIdentity={shouldShowAssistantIdentity(
-                teamConfig.enabled,
-                placeholderIdentity.id,
-                assistantAgentId,
-              )}
-              {...(onFilePreview != null ? { onFilePreview } : {})}
-            />
-          )}
+          {displayMessages.length === 0 && waitingAgentMessage}
           {displayMessages.length === 0 && !showWaitingAgent && (
             <div className="chat-stream-empty-state">
               <div className="empty-state">
@@ -5251,46 +5391,6 @@ function yieldToBrowser(): Promise<void> {
     }
     window.setTimeout(resolve, 0)
   })
-}
-
-function getLatestContextUsageEvent(
-  events: AgentEvent[],
-): Extract<AgentEvent, { type: 'context_usage' }> | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event?.type === 'context_usage') return event
-  }
-  return null
-}
-
-function getLatestContextLedgerEvent(
-  events: AgentEvent[],
-): Extract<AgentEvent, { type: 'context_ledger' }> | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event?.type === 'context_ledger') return event
-  }
-  return null
-}
-
-function toContextLedgerState(
-  event: Extract<AgentEvent, { type: 'context_ledger' }>,
-): ContextLedgerState {
-  return {
-    sections: event.sections,
-    totalEstimatedTokens: event.totalEstimatedTokens,
-    softLimitTokens: event.softLimitTokens,
-    contextWindowTokens: event.contextWindowTokens,
-    usagePercent: event.usagePercent,
-  }
-}
-
-function getLatestProjectContextEvent(events: AgentEvent[]): ProjectContextState | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event?.type === 'project_context_loaded') return event
-  }
-  return null
 }
 
 function applyAgentStatus(
@@ -5830,15 +5930,40 @@ function WorkflowProgressBlockView({
 }: {
   block: Extract<UIBlock, { kind: 'workflow_progress' }>
 }) {
+  const [expandedNodeIds, setExpandedNodeIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  )
   const completed = block.nodes.filter((node) => node.status === 'completed').length
   const skipped = block.nodes.filter((node) => node.status === 'skipped').length
   const total = block.nodes.length
   const failed = block.nodes.some((node) => node.status === 'failed')
+  const terminal = block.runStatus !== 'working'
+  const totalTimeMs = terminal ? workflowTotalDurationMs(block.nodes) : null
+  const stateLabel =
+    block.runStatus === 'working'
+      ? '运行中'
+      : block.runStatus === 'completed'
+        ? '已完成'
+        : block.runStatus === 'failed'
+          ? '失败'
+          : '已取消'
+  const toggleExpanded = (nodeId: string): void => {
+    setExpandedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
+    })
+  }
   return (
     <div className="workflow-progress-card">
       <div className="workflow-progress-head">
         <Icons.Workflow size={13} />
         <span>工作流进度</span>
+        <span className={`workflow-progress-state ${block.runStatus}`}>{stateLabel}</span>
+        {totalTimeMs != null && (
+          <span className="workflow-progress-total">{formatWorkflowDuration(totalTimeMs)}</span>
+        )}
         <span
           className={`workflow-progress-count ${failed ? 'has-failure' : ''}`}
           title={skipped > 0 ? `已完成 ${completed} 个，条件跳过 ${skipped} 个` : undefined}
@@ -5848,14 +5973,59 @@ function WorkflowProgressBlockView({
       </div>
       <div className="workflow-progress-list">
         {block.nodes.map((node) => (
-          <WorkflowProgressItem key={node.nodeId} node={node} />
+          <WorkflowProgressItem
+            key={node.nodeId}
+            node={node}
+            expanded={expandedNodeIds.has(node.nodeId)}
+            {...(node.outputPreview != null ? { onToggle: () => toggleExpanded(node.nodeId) } : {})}
+          />
         ))}
       </div>
     </div>
   )
 }
 
-function WorkflowProgressItem({ node }: { node: WorkflowProgressNode }) {
+/** 汇总耗时：所有已执行节点里最早 startedAt 到最晚 endedAt 的跨度。 */
+function workflowTotalDurationMs(nodes: WorkflowProgressNode[]): number | null {
+  let start: number | null = null
+  let end: number | null = null
+  for (const node of nodes) {
+    if (node.startedAt == null) continue
+    const startedAt = Date.parse(node.startedAt)
+    if (!Number.isFinite(startedAt)) continue
+    if (start == null || startedAt < start) start = startedAt
+    const endedAt = node.endedAt != null ? Date.parse(node.endedAt) : Number.NaN
+    if (Number.isFinite(endedAt) && (end == null || endedAt > end)) end = endedAt
+  }
+  if (start == null || end == null || end < start) return null
+  return end - start
+}
+
+function formatWorkflowDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const seconds = ms / 1000
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m${String(Math.round(seconds % 60)).padStart(2, '0')}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h${String(minutes % 60).padStart(2, '0')}m`
+}
+
+function WorkflowProgressItem({
+  node,
+  expanded,
+  onToggle,
+}: {
+  node: WorkflowProgressNode
+  expanded: boolean
+  onToggle?: () => void
+}) {
+  const durationMs =
+    node.startedAt != null && node.endedAt != null
+      ? Date.parse(node.endedAt) - Date.parse(node.startedAt)
+      : Number.NaN
+  const duration = Number.isFinite(durationMs) ? formatWorkflowDuration(durationMs) : ''
   const icon =
     node.status === 'completed' ? (
       <Icons.Check size={13} style={{ color: 'var(--c-ok, #22c55e)' }} />
@@ -5869,14 +6039,45 @@ function WorkflowProgressItem({ node }: { node: WorkflowProgressNode }) {
       <span className="workflow-progress-dot" />
     )
   return (
-    <div className={`workflow-progress-item ${node.status}`}>
-      <span className="workflow-progress-icon">{icon}</span>
-      <span className="workflow-progress-text">{node.title}</span>
-      {(node.agentName != null || node.modelId != null) && (
-        <span className="workflow-progress-agent">
-          {node.agentName}
-          {node.modelId != null ? ` · ${node.modelId}` : ''}
-        </span>
+    <div className={`workflow-progress-item-wrap ${node.status}`}>
+      <div
+        className={`workflow-progress-item ${node.status} ${onToggle != null ? 'expandable' : ''}`}
+        role={onToggle != null ? 'button' : undefined}
+        tabIndex={onToggle != null ? 0 : undefined}
+        aria-expanded={onToggle != null ? expanded : undefined}
+        onClick={onToggle}
+        onKeyDown={
+          onToggle != null
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  onToggle()
+                }
+              }
+            : undefined
+        }
+      >
+        <span className="workflow-progress-icon">{icon}</span>
+        <span className="workflow-progress-text">{node.title}</span>
+        {duration.length > 0 && <span className="workflow-progress-duration">{duration}</span>}
+        {(node.agentName != null || node.modelId != null) && (
+          <span className="workflow-progress-agent">
+            {node.agentName}
+            {node.modelId != null ? ` · ${node.modelId}` : ''}
+          </span>
+        )}
+        {onToggle != null && (
+          <Icons.ChevronRight size={11} className={`chev ${expanded ? 'chev-open' : ''}`} />
+        )}
+      </div>
+      {node.error != null && (
+        <div className="workflow-progress-error">
+          {node.error.code != null && node.error.code.length > 0 ? `[${node.error.code}] ` : ''}
+          {node.error.message}
+        </div>
+      )}
+      {expanded && node.outputPreview != null && (
+        <pre className="workflow-progress-output">{node.outputPreview}</pre>
       )}
     </div>
   )
@@ -7020,6 +7221,7 @@ const UserMsg = React.memo(
     mentionAgentName,
     onReply,
     onResend,
+    onEdit,
     selectionMode = false,
     selected = false,
     onToggleSelected,
@@ -7038,12 +7240,18 @@ const UserMsg = React.memo(
     onReply?: (selectedText?: string) => void
     /** 重发：把这条消息的文本+附件重新塞回输入区 */
     onResend?: () => void
+    /** 仅最后一轮已完成消息：提交编辑后的正文并替换整轮。 */
+    onEdit?: (text: string) => void
     selectionMode?: boolean
     selected?: boolean
     onToggleSelected?: () => void
     onStartMultiSelect?: () => void
   }) {
     const textContent = extractTextFromBlocks(blocks)
+    const [editing, setEditing] = useState(false)
+    useEffect(() => {
+      if (onEdit == null) setEditing(false)
+    }, [onEdit])
     const [contextMenu, setContextMenu] = useState<{
       x: number
       y: number
@@ -7150,11 +7358,23 @@ const UserMsg = React.memo(
         )}
         {attachments.length > 0 && <UserMessageAttachments attachments={attachments} />}
         <div className="msg-user-line">
-          <CollapsibleContent>
-            <div className="msg-bubble msg-bubble-user" onContextMenu={handleContextMenu}>
-              <div className="msg-content">{children}</div>
-            </div>
-          </CollapsibleContent>
+          {editing ? (
+            <LastUserMessageEditor
+              initialValue={textContent}
+              allowEmpty={attachments.length > 0 || sessionReferences.length > 0}
+              onCancel={() => setEditing(false)}
+              onSubmit={(text) => {
+                setEditing(false)
+                onEdit?.(text)
+              }}
+            />
+          ) : (
+            <CollapsibleContent>
+              <div className="msg-bubble msg-bubble-user" onContextMenu={handleContextMenu}>
+                <div className="msg-content">{children}</div>
+              </div>
+            </CollapsibleContent>
+          )}
         </div>
         {deliveryState != null && deliveryState !== 'accepted' && (
           <div className={`msg-user-delivery msg-user-delivery-${deliveryState}`}>
@@ -7185,13 +7405,16 @@ const UserMsg = React.memo(
             <strong>@{mentionAgentName}</strong> 处理
           </div>
         )}
-        <MessageHoverBar
-          timestamp={timestamp}
-          textContent={textContent}
-          position="right"
-          {...(onDelete ? { onDelete } : {})}
-          {...(onResend ? { onResend } : {})}
-        />
+        {!editing && (
+          <MessageHoverBar
+            timestamp={timestamp}
+            textContent={textContent}
+            position="right"
+            {...(onDelete ? { onDelete } : {})}
+            {...(onResend ? { onResend } : {})}
+            {...(onEdit ? { onEdit: () => setEditing(true) } : {})}
+          />
+        )}
         {contextMenu != null && contextMenuItems.length > 0 && (
           <InlineContextMenu
             x={contextMenu.x}
@@ -7213,6 +7436,7 @@ const UserMsg = React.memo(
       prev.mentionAgentName === next.mentionAgentName &&
       prev.deliveryState === next.deliveryState &&
       prev.deliveryError === next.deliveryError &&
+      (prev.onEdit != null) === (next.onEdit != null) &&
       prev.timestamp === next.timestamp &&
       prev.selectionMode === next.selectionMode &&
       prev.selected === next.selected

@@ -1,11 +1,11 @@
 {
   "name": "@spark/agent",
-  "version": "0.4.0",
+  "version": "0.6.3",
   "description": "Deterministic, event-sourced coding agent SDK, CLI, and TUI",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
-    "node": ">=22.14.0 <23"
+    "node": ">=22.14.0"
   },
   "bin": {
     "spark": "./dist/cli/main.js"
@@ -34,6 +34,7 @@
   "scripts": {
     "boundary": "node scripts/boundary-check.mjs",
     "build": "npm run boundary && tsup",
+    "dev-cli": "tsup --watch --onSuccess \"node dist/cli/main.js\"",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
     "test": "npm run build:test && vitest run",
@@ -48,6 +49,7 @@
   },
   "dependencies": {
     "ajv": "8.20.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "fast-glob": "3.3.3",
     "ignore": "7.0.6",
     "ink": "7.1.1",

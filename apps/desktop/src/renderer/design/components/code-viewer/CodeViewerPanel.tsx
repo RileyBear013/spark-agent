@@ -13,11 +13,12 @@
 import { Dropdown } from '@lobehub/ui'
 import { useCallback, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { WorkspaceGitStatusResponse } from '@spark/protocol'
+import type { SessionId, WorkspaceGitStatusResponse } from '@spark/protocol'
 import { Icons } from '../../Icons'
 import { OPEN_CODE_SEARCH_EVENT } from '../../hooks/useKeyboard'
 import { useResolvedTheme } from '../../hooks/useResolvedTheme'
 import { FileTypeIcon } from '../FileDisplay'
+import type { PreviewFileType } from '../FileDisplay'
 import { useToast } from '../Toast'
 import { CodeViewerEditor } from './CodeViewerEditor'
 import { CodeViewerDiff } from './CodeViewerDiff'
@@ -68,6 +69,7 @@ export interface CodeViewerPanelProps {
   onCloseFiles: (absPaths: string[]) => void
   onViewModeChange: (mode: CodeViewMode) => void
   workspaceId?: string | null
+  sessionId?: SessionId | null
   // 文件树（受控：visible/width 走全局 store，expandedDirs 走 per-session 快照）
   explorerVisible: boolean
   explorerWidth: number
@@ -86,7 +88,11 @@ export interface CodeViewerPanelProps {
   gitStatus?: WorkspaceGitStatusResponse | null
   onGitStatusApplied?: ((status: WorkspaceGitStatusResponse | null) => void) | undefined
   onRefreshGitStatus?: (() => void) | undefined
-  onOpenFileFromGit?: ((relativePath: string) => void) | undefined
+  onOpenFileFromGit?:
+    | ((relativePath: string, commitHash?: string, changeType?: OpenCodeFile['changeType']) => void)
+    | undefined
+  // 工具栏「打开方式」的应用内预览入口（可选：不传则主按钮回落为用默认应用打开）
+  onPreviewFileFromToolbar?: ((filePath: string, fileType: PreviewFileType) => void) | undefined
   // 工作区搜索面板（与文件树 / Git 面板互斥共用同一左侧栏槽位）
   onOpenFileFromSearch: (relativePath: string, lineNumber?: number) => void
 }
@@ -106,6 +112,7 @@ export function CodeViewerPanel({
   onCloseFiles,
   onViewModeChange,
   workspaceId,
+  sessionId,
   explorerVisible,
   explorerWidth,
   explorerExpandedDirs,
@@ -121,6 +128,7 @@ export function CodeViewerPanel({
   onGitStatusApplied,
   onRefreshGitStatus,
   onOpenFileFromGit,
+  onPreviewFileFromToolbar,
   onOpenFileFromSearch,
 }: CodeViewerPanelProps) {
   const resolvedTheme = useResolvedTheme()
@@ -161,6 +169,7 @@ export function CodeViewerPanel({
     active?.displayPath,
     active?.changeType === 'create',
     viewMode === 'diff' && active != null,
+    active?.gitCommitHash,
   )
 
   const handleSave = useCallback(async () => {
@@ -411,7 +420,9 @@ export function CodeViewerPanel({
               <div className="cv-explorer-body">
                 {explorerVisible ? (
                   <FileExplorerPanel
+                    key={`${workspaceId}:${sessionId ?? ''}`}
                     workspaceId={workspaceId}
+                    sessionId={sessionId ?? null}
                     workspaceRootPath={workspaceRootPath ?? null}
                     expandedDirs={explorerExpandedDirs}
                     onExpandedChange={onExplorerExpandedChange}
@@ -423,8 +434,9 @@ export function CodeViewerPanel({
                   />
                 ) : searchPanelVisible ? (
                   <SearchPanel
-                    key={workspaceId}
+                    key={`${workspaceId}:${sessionId ?? ''}`}
                     workspaceId={workspaceId}
+                    sessionId={sessionId ?? null}
                     onOpenFile={onOpenFileFromSearch}
                   />
                 ) : (
@@ -434,6 +446,7 @@ export function CodeViewerPanel({
                     onRefresh={onRefreshGitStatus ?? (() => {})}
                     onStatusApplied={onGitStatusApplied ?? (() => {})}
                     onOpenFile={onOpenFileFromGit ?? (() => {})}
+                    onOpenHistoricalFile={onOpenFileFromGit}
                   />
                 )}
               </div>
@@ -477,10 +490,11 @@ export function CodeViewerPanel({
         externalChanged={externalChanged}
         saving={saving}
         readOnly={readOnly}
-        hasDiff={active.changeType !== 'delete'}
+        hasDiff={active.gitCommitHash != null || active.changeType !== 'delete'}
         minimapEnabled={minimapEnabled}
         onToggleMinimap={() => setMinimapEnabled((v) => !v)}
         onSave={() => void handleSave()}
+        onPreview={onPreviewFileFromToolbar}
       />
 
       {externalChanged && (
@@ -504,43 +518,46 @@ export function CodeViewerPanel({
       )}
 
       <div className="cv-body">
-        {(activeRuntime == null ||
-          activeRuntime.state === 'idle' ||
-          activeRuntime.state === 'loading') && (
-          <div className="code-viewer-loading">
-            <Icons.Spinner size={18} className="cv-spin" /> 读取文件…
-          </div>
+        {viewMode === 'diff' ? (
+          <CodeViewerDiff
+            diff={diffInfo.diff}
+            isBinary={diffInfo.isBinary}
+            loading={diffInfo.loading}
+            error={diffInfo.error}
+            changeType={active.changeType}
+            fontSize={diffFontSize}
+          />
+        ) : (
+          <>
+            {(activeRuntime == null ||
+              activeRuntime.state === 'idle' ||
+              activeRuntime.state === 'loading') && (
+              <div className="code-viewer-loading">
+                <Icons.Spinner size={18} className="cv-spin" /> 读取文件…
+              </div>
+            )}
+            {activeRuntime?.state === 'error' && (
+              <div className="code-viewer-error">
+                <div className="code-viewer-error-title">无法读取该文件</div>
+                <div className="code-viewer-error-detail">{activeRuntime.error}</div>
+              </div>
+            )}
+            {activeRuntime?.state === 'ready' && (
+              <CodeViewerEditor
+                filePath={active.absPath}
+                content={activeRuntime.content}
+                readOnly={readOnly}
+                theme={theme}
+                lineNumber={active.lineNumber}
+                minimapEnabled={minimapEnabled}
+                fontSize={editorFontSize}
+                lineHeight={editorLineHeight}
+                onContentChange={editActive}
+                onSave={() => void handleSave()}
+              />
+            )}
+          </>
         )}
-        {activeRuntime?.state === 'error' && (
-          <div className="code-viewer-error">
-            <div className="code-viewer-error-title">无法读取该文件</div>
-            <div className="code-viewer-error-detail">{activeRuntime.error}</div>
-          </div>
-        )}
-        {activeRuntime?.state === 'ready' &&
-          (viewMode === 'diff' ? (
-            <CodeViewerDiff
-              diff={diffInfo.diff}
-              isBinary={diffInfo.isBinary}
-              loading={diffInfo.loading}
-              error={diffInfo.error}
-              changeType={active.changeType}
-              fontSize={diffFontSize}
-            />
-          ) : (
-            <CodeViewerEditor
-              filePath={active.absPath}
-              content={activeRuntime.content}
-              readOnly={readOnly}
-              theme={theme}
-              lineNumber={active.lineNumber}
-              minimapEnabled={minimapEnabled}
-              fontSize={editorFontSize}
-              lineHeight={editorLineHeight}
-              onContentChange={editActive}
-              onSave={() => void handleSave()}
-            />
-          ))}
       </div>
 
       <div className="cv-statusbar">

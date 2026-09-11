@@ -1,14 +1,10 @@
 /**
- * HistoryImportModal — 检测并导入宿主机 Claude Code / Codex / ZCode 对话历史。
+ * HistoryImportModal — 检测并导入宿主机 Claude Code / Codex 对话历史。
  *
  * 交互阶段：
- *   1. 扫描中    —— 并行扫描各来源，展示来源状态与实时发现数量
+ *   1. 扫描中    —— 并行扫描各来源（codex / claude-code / zcode），展示来源状态与实时发现数量
  *   2. 选择      —— 虚拟列表 + 搜索/项目/时间筛选 + 完整对话预览
  *   3. 导入/完成 —— 进度反馈 + 完成汇总
- *
- * ZCode 来源的会话存于中央 SQLite；含 rewind 回退记录的会话会额外列出
- * 「回退分支」独立条目（可单独预览/导入，默认不勾选）。
- * 选择键使用 sourceSessionId（zcode 所有条目共享同一 db 文件路径，filePath 不唯一）。
  */
 
 import { useCallback, useMemo, useRef, useState, useEffect } from 'react'
@@ -30,6 +26,7 @@ import type {
   HistoryImportPreviewMessage,
   HistoryImportProgress,
   HistoryImportResponse,
+  HistoryImportScanResponse,
   HistoryImportSelection,
   HistoryImportSource,
 } from '@spark/protocol'
@@ -57,6 +54,13 @@ const SOURCE_LABEL: Record<HistoryImportSource, string> = {
   zcode: 'ZCode',
 }
 
+/**
+ * 条目唯一键：source + sourceSessionId。
+ * 不能用 filePath——zcode CLI 多个会话共享同一个 sqlite 库文件路径。
+ */
+const itemKey = (item: { source: HistoryImportSource; sourceSessionId: string }): string =>
+  `${item.source}:${item.sourceSessionId}`
+
 const TIME_FILTER_OPTIONS = [
   { label: '全部时间', value: 'all' },
   { label: '最近 7 天', value: '7' },
@@ -64,10 +68,16 @@ const TIME_FILTER_OPTIONS = [
   { label: '最近 90 天', value: '90' },
 ]
 
+/**
+ * 上一次完整扫描的结果缓存（模块级，跨弹窗打开保留；renderer 重载后失效）。
+ * 再次打开弹窗时直接展示缓存结果，由「重新检索」按钮手动触发全量扫描刷新。
+ */
+let scanCache: HistoryImportScanResponse | null = null
+
 const EMPTY_SCAN_STATE: Record<HistoryImportSource, ScanSourceState> = {
   'claude-code': { status: 'scanning', count: 0, rootPath: '~/.claude/projects' },
   codex: { status: 'scanning', count: 0, rootPath: '~/.codex/sessions' },
-  zcode: { status: 'scanning', count: 0, rootPath: '~/.zcode/cli/db/db.sqlite' },
+  zcode: { status: 'scanning', count: 0, rootPath: '~/.zcode' },
 }
 
 function freshScanState(): Record<HistoryImportSource, ScanSourceState> {
@@ -135,6 +145,13 @@ function classNames(...values: Array<string | false | null | undefined>): string
   return values.filter(Boolean).join(' ')
 }
 
+/** 默认落在有条目的来源上（与 Tab 顺序一致：codex > claude-code > zcode） */
+function defaultSourceTab(items: HistoryImportItem[]): HistoryImportSource {
+  const codexCount = items.filter((item) => item.source === 'codex').length
+  const claudeCount = items.filter((item) => item.source === 'claude-code').length
+  return codexCount > 0 ? 'codex' : claudeCount > 0 ? 'claude-code' : 'zcode'
+}
+
 export function HistoryImportModal() {
   const ctx = useSessionSidebar()
   const open = ctx.historyImportOpen
@@ -156,6 +173,7 @@ export function HistoryImportModal() {
   const [summary, setSummary] = useState<HistoryImportResponse | null>(null)
   const [scanSources, setScanSources] =
     useState<Record<HistoryImportSource, ScanSourceState>>(freshScanState)
+  const [scannedAt, setScannedAt] = useState<string | null>(null)
   const [previewItem, setPreviewItem] = useState<HistoryImportItem | null>(null)
   const [previewMsgs, setPreviewMsgs] = useState<HistoryImportPreviewMessage[]>([])
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -178,12 +196,25 @@ export function HistoryImportModal() {
     setProgress(null)
     setSummary(null)
     setScanSources(freshScanState())
+    setScannedAt(null)
     setPreviewItem(null)
     setPreviewMsgs([])
     setPreviewTruncated(false)
     setUserOnly(false)
     setPreviewExpanded(false)
   }, [])
+
+  /** 直接用缓存结果进入选择页（重置筛选/选择，但不再触发扫描动画） */
+  const applyCache = useCallback(
+    (cache: HistoryImportScanResponse) => {
+      reset()
+      setItems(cache.items)
+      setSourceTab(defaultSourceTab(cache.items))
+      setScannedAt(cache.scannedAt)
+      setPhase('select')
+    },
+    [reset],
+  )
 
   const doScan = useCallback(async () => {
     const requestId = ++scanRequestRef.current
@@ -244,8 +275,14 @@ export function HistoryImportModal() {
       const remaining = minimumDuration - (Date.now() - startedAt)
       if (remaining > 0) await wait(remaining)
       if (requestId !== scanRequestRef.current) return
+      scanCache = {
+        items: nextItems,
+        scannedAt: new Date().toISOString(),
+        sources: responses.flatMap((response) => response.sources),
+      }
       setItems(nextItems)
-      setSourceTab('codex')
+      setSourceTab(defaultSourceTab(nextItems))
+      setScannedAt(scanCache.scannedAt)
       setPhase('select')
     } catch (error) {
       if (requestId !== scanRequestRef.current) return
@@ -256,8 +293,13 @@ export function HistoryImportModal() {
 
   useEffect(() => {
     if (open) {
-      reset()
-      void doScan()
+      // 有缓存直接进入选择页（条目过多时全量扫描可达数秒），重新检索走按钮
+      const cache = scanCache
+      if (cache != null) applyCache(cache)
+      else {
+        reset()
+        void doScan()
+      }
     } else {
       scanRequestRef.current++
       previewRequestRef.current++
@@ -295,9 +337,9 @@ export function HistoryImportModal() {
 
   const sourceOptions = useMemo(
     () => [
-      { label: `ZCode ${counts.zcode.toLocaleString()}`, value: 'zcode' },
       { label: `Codex ${counts.codex.toLocaleString()}`, value: 'codex' },
       { label: `Claude Code ${counts['claude-code'].toLocaleString()}`, value: 'claude-code' },
+      { label: `ZCode ${counts.zcode.toLocaleString()}`, value: 'zcode' },
     ],
     [counts],
   )
@@ -338,16 +380,14 @@ export function HistoryImportModal() {
     [filtered],
   )
   const allSelected =
-    selectableVisible.length > 0 &&
-    selectableVisible.every((item) => selected.has(item.sourceSessionId))
-  const someSelected =
-    selectableVisible.some((item) => selected.has(item.sourceSessionId)) && !allSelected
+    selectableVisible.length > 0 && selectableVisible.every((item) => selected.has(itemKey(item)))
+  const someSelected = selectableVisible.some((item) => selected.has(itemKey(item))) && !allSelected
 
   const selectedStats = useMemo(
     () =>
       items.reduce(
         (result, item) =>
-          selected.has(item.sourceSessionId)
+          selected.has(itemKey(item))
             ? {
                 messages: result.messages + item.messageCount,
                 bytes: result.bytes + item.sizeBytes,
@@ -388,8 +428,8 @@ export function HistoryImportModal() {
       setSelected((current) => {
         const next = new Set(current)
         for (const item of selectableVisible) {
-          if (checked) next.add(item.sourceSessionId)
-          else next.delete(item.sourceSessionId)
+          if (checked) next.add(itemKey(item))
+          else next.delete(itemKey(item))
         }
         return next
       })
@@ -411,9 +451,9 @@ export function HistoryImportModal() {
         const response = await preview({
           source: item.source,
           filePath: item.filePath,
-          limit: previewLimit,
-          // zcode 所有条目共享同一 db 路径，必须带 sourceSessionId 定位会话
           sourceSessionId: item.sourceSessionId,
+          ...(item.origin != null ? { origin: item.origin } : {}),
+          limit: previewLimit,
         })
         if (requestId !== previewRequestRef.current) return
         setPreviewMsgs(response.messages)
@@ -430,14 +470,14 @@ export function HistoryImportModal() {
 
   const doImport = useCallback(async () => {
     const selections: HistoryImportSelection[] = items
-      .filter((item) => selected.has(item.sourceSessionId) && !item.alreadyImported)
+      .filter((item) => selected.has(itemKey(item)) && !item.alreadyImported)
       .map((item) => ({
         source: item.source,
         filePath: item.filePath,
         sourceSessionId: item.sourceSessionId,
+        ...(item.origin != null ? { origin: item.origin } : {}),
         cwd: item.cwd,
         title: item.title,
-        ...(item.branchOf != null ? { branchOf: item.branchOf } : {}),
       }))
     if (selections.length === 0) return
     setPhase('importing')
@@ -446,6 +486,22 @@ export function HistoryImportModal() {
       const response = await runImport({ selections })
       setSummary(response)
       setPhase('done')
+      // 同步缓存：已导入条目标记 alreadyImported，「继续导入」回到选择页时无需重新扫描
+      if (response.imported > 0 && scanCache != null) {
+        const importedIds = new Set(
+          response.results
+            .filter((entry) => entry.status === 'imported')
+            .map((entry) => entry.sourceSessionId),
+        )
+        if (importedIds.size > 0) {
+          scanCache = {
+            ...scanCache,
+            items: scanCache.items.map((item) =>
+              importedIds.has(item.sourceSessionId) ? { ...item, alreadyImported: true } : item,
+            ),
+          }
+        }
+      }
       await ctx.refreshData()
       if (response.imported > 0) toast.success(`成功导入 ${response.imported} 个会话`)
     } catch (error) {
@@ -454,30 +510,41 @@ export function HistoryImportModal() {
     }
   }, [ctx, items, runImport, selected, toast])
 
+  /** 完成页「继续导入」：缓存（已同步导入状态）可用则直接回选择页，否则重新扫描 */
+  const resumeImport = useCallback(() => {
+    const cache = scanCache
+    if (cache != null) applyCache(cache)
+    else void doScan()
+  }, [applyCache, doScan])
+
   const close = useCallback(() => ctx.setHistoryImportOpen(false), [ctx])
   const selectedCount = selected.size
   const discoveredCount =
     scanSources['claude-code'].count + scanSources.codex.count + scanSources.zcode.count
+  const scanningSource = (['codex', 'zcode', 'claude-code'] as HistoryImportSource[]).find(
+    (key) => scanSources[key].status === 'scanning',
+  )
+  const scanPathText =
+    scanningSource != null
+      ? `正在读取 ${scanSources[scanningSource].rootPath}/…`
+      : `正在整理 ${scanSources['claude-code'].rootPath}/…`
   const importingPercent =
     progress != null && progress.total > 0
       ? Math.round((progress.current / progress.total) * 100)
       : 0
   const modalTitle = useMemo(
-    () => (
-      <div className="hi-modal-title">
-        <span className="hi-modal-title-icon">
-          <Icons.ListFilter size={19} />
-        </span>
-        <span>
-          <strong>{t('app.sidebar.importHistory')}</strong>
-          <small>
-            {phase === 'scanning'
-              ? '正在读取本地索引，不会上传任何会话内容'
-              : '选择需要导入的本地会话，可在右侧完整预览'}
-          </small>
-        </span>
-      </div>
-    ),
+    () =>
+      phase === 'scanning' ? null : (
+        <div className="hi-modal-title">
+          <span className="hi-modal-title-icon">
+            <Icons.ListFilter size={19} />
+          </span>
+          <span>
+            <strong>{t('app.sidebar.importHistory')}</strong>
+            <small>选择需要导入的本地会话，可在右侧完整预览</small>
+          </span>
+        </div>
+      ),
     [phase, t],
   )
 
@@ -501,13 +568,18 @@ export function HistoryImportModal() {
         <div className="hi-scan-state" aria-live="polite">
           <div className="hi-scan-heading">
             <h2>正在检索本机会话</h2>
-            <p>并行扫描 Claude Code、Codex 与 ZCode，本地解析后生成可预览列表</p>
+            <p>并行扫描 Codex、Claude Code 与 ZCode，本地解析后生成可预览列表</p>
           </div>
           <div className="hi-scan-flow" aria-hidden="true">
-            <ScanSourceCard source="claude-code" state={scanSources['claude-code']} />
             <ScanSourceCard source="codex" state={scanSources.codex} />
+            <ScanSourceCard source="claude-code" state={scanSources['claude-code']} />
             <ScanSourceCard source="zcode" state={scanSources.zcode} />
             <div className="hi-scan-lines hi-scan-lines-top">
+              <i />
+              <i />
+              <i />
+            </div>
+            <div className="hi-scan-lines hi-scan-lines-middle">
               <i />
               <i />
               <i />
@@ -533,21 +605,16 @@ export function HistoryImportModal() {
             <strong>{discoveredCount.toLocaleString()}</strong>
             <span>个会话已发现</span>
           </div>
-          <div className="hi-scan-path">
-            {scanSources.codex.status === 'scanning'
-              ? `正在读取 ${scanSources.codex.rootPath}/…`
-              : `正在整理 ${scanSources['claude-code'].rootPath}/…`}
-          </div>
+          <div className="hi-scan-path">{scanPathText}</div>
           <div className="hi-scan-progress">
             <span />
           </div>
           <div className="hi-scan-statuses">
-            <ScanStatusLabel source="claude-code" state={scanSources['claude-code']} />
             <ScanStatusLabel source="codex" state={scanSources.codex} />
+            <ScanStatusLabel source="claude-code" state={scanSources['claude-code']} />
             <ScanStatusLabel source="zcode" state={scanSources.zcode} />
             <span>完成后自动进入选择页面</span>
           </div>
-          <p className="hi-scan-hint">可随时关闭，已扫描结果不会自动导入</p>
         </div>
       )}
 
@@ -559,10 +626,6 @@ export function HistoryImportModal() {
                 <strong>{items.length.toLocaleString()}</strong>
               </div>
               <i />
-              <div className="hi-overview-detail">
-                <strong>{importableCount.toLocaleString()} 个可导入</strong>
-                <span>{importedCount.toLocaleString()} 个已存在 · 默认隐藏</span>
-              </div>
             </div>
             <div className="hi-toolbar">
               <Segmented
@@ -586,7 +649,7 @@ export function HistoryImportModal() {
               <Select
                 aria-label="项目筛选"
                 className="hi-filter-select hi-project-filter"
-                size="small"
+                size="middle"
                 value={projectFilter}
                 onChange={(value) => setProjectFilter(value as string)}
                 options={projectOptions}
@@ -594,7 +657,7 @@ export function HistoryImportModal() {
               <Select
                 aria-label="时间筛选"
                 className="hi-filter-select hi-time-filter"
-                size="small"
+                size="middle"
                 value={timeFilter}
                 onChange={(value) => setTimeFilter(value as TimeFilter)}
                 options={TIME_FILTER_OPTIONS}
@@ -606,6 +669,18 @@ export function HistoryImportModal() {
                 />
                 <span>显示已导入</span>
               </label>
+              <div className="hi-rescan">
+                {scannedAt != null && <span>扫描于 {formatRowTime(scannedAt)}</span>}
+                <button
+                  type="button"
+                  className="hi-rescan-btn"
+                  title="重新检索本机会话"
+                  aria-label="重新检索本机会话"
+                  onClick={() => void doScan()}
+                >
+                  <Icons.Refresh size={13} />
+                </button>
+              </div>
             </div>
           </div>
 
@@ -632,11 +707,11 @@ export function HistoryImportModal() {
                     {listVirtualizer.getVirtualItems().map((virtualRow) => {
                       const item = filtered[virtualRow.index]
                       if (item == null) return null
-                      const checked = selected.has(item.sourceSessionId)
-                      const isActive = previewItem?.sourceSessionId === item.sourceSessionId
+                      const checked = selected.has(itemKey(item))
+                      const isActive = previewItem != null && itemKey(previewItem) === itemKey(item)
                       return (
                         <div
-                          key={item.sourceSessionId}
+                          key={itemKey(item)}
                           ref={listVirtualizer.measureElement}
                           data-index={virtualRow.index}
                           className="hi-row-shell"
@@ -647,14 +722,13 @@ export function HistoryImportModal() {
                               'hi-row',
                               isActive && 'is-active',
                               item.alreadyImported && 'is-imported',
-                              item.branchOf != null && 'is-branch',
                             )}
                           >
                             <div className="hi-row-check">
                               <Checkbox
                                 checked={checked}
                                 disabled={item.alreadyImported}
-                                onChange={(value) => toggle(item.sourceSessionId, Boolean(value))}
+                                onChange={(value) => toggle(itemKey(item), Boolean(value))}
                               />
                             </div>
                             <button
@@ -666,9 +740,6 @@ export function HistoryImportModal() {
                               <div className="hi-row-main">
                                 <div className="hi-row-title">
                                   <span>{item.title || '未命名会话'}</span>
-                                  {item.branchOf != null && (
-                                    <Tag className="hi-tag-branch">回退分支</Tag>
-                                  )}
                                   {item.alreadyImported && (
                                     <Tag className="hi-tag-imported">已导入</Tag>
                                   )}
@@ -874,7 +945,7 @@ export function HistoryImportModal() {
             )}
           </Block>
           <div className="hi-state-actions">
-            <Button onClick={() => void doScan()}>继续导入</Button>
+            <Button onClick={resumeImport}>继续导入</Button>
             <Button type="primary" onClick={close}>
               完成
             </Button>

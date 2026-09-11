@@ -22,8 +22,16 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
   private let userInput = MacUserInputMonitor()
   private var observation: ObservationBinding?
   private var canceledSessions: Set<String> = []
+  /// Insertion order for the cancel set so it can be bounded (see cancelSession).
+  private var canceledSessionOrder: [String] = []
   private var persistentCapture: MacPersistentWindowCapture?
   private var persistentCaptureBindingKey: String?
+  /// Parks the persistent stream when no observation has requested frames for
+  /// a while (client finished its task without cancelling, or crashed). A live
+  /// SCStream keeps the macOS "screen sharing" indicator on the captured
+  /// window; parking closes it, and the next observe restarts the stream.
+  private var persistentCaptureIdleWatchTask: Task<Void, Never>?
+  private static let persistentCaptureIdleTimeout: TimeInterval = 90
 
   func capabilityManifest() -> NativeCapabilityManifest {
     let permission: String
@@ -146,7 +154,10 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     let configuration = SCStreamConfiguration()
     configuration.width = width
     configuration.height = height
-    configuration.showsCursor = true
+    // Exclude the physical cursor: it is decision noise for the model (actions
+    // are driven by element ids / coordinates) and its movement alone would
+    // change screenshot bytes, breaking frameID dedup of a static UI.
+    configuration.showsCursor = false
     configuration.ignoreShadowsSingleWindow = false
     let filter = SCContentFilter(desktopIndependentWindow: window)
     do {
@@ -177,7 +188,15 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     persistentCapture: Bool
   ) async throws -> NativeObservedWindow {
     observation = nil
-    let before = try await focusedTarget(appID: appID, windowID: windowID)
+    // A locked display renders nothing and swallows all input — fail fast with
+    // the dedicated code so the model reports it instead of retrying blind.
+    guard !NativeLockScreen.isLocked() else {
+      throw NativeHostPlatformError.screenLocked
+    }
+    // Follow-enabled: a dead requested window rebinds to the app's live window
+    // instead of erroring, so Electron window churn never wedges the session.
+    let before = try await resolvingFocusedTarget(
+      appID: appID, windowID: windowID, allowWindowFollow: true)
     let captureBindingKey = [
       before.identity.appID,
       before.identity.windowID,
@@ -186,7 +205,7 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
       before.identity.signingIdentity ?? "",
     ].joined(separator: "|")
     let captured = try await captureObservedWindow(
-      id: windowID,
+      id: before.identity.windowID,
       bindingKey: captureBindingKey,
       persistent: persistentCapture
     )
@@ -199,7 +218,8 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     )
     let after: FocusedTarget
     do {
-      after = try await focusedTarget(appID: appID, windowID: windowID)
+      after = try await resolvingFocusedTarget(
+        appID: appID, windowID: before.identity.windowID, allowWindowFollow: true)
       try NativeInputPolicy.validateApplicationIdentity(
         expected: before.identity, current: after.identity)
     } catch {
@@ -211,7 +231,10 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     var frameHasher = SHA256()
     frameHasher.update(data: captured.bytes)
     frameHasher.update(data: Data(tree.treeVersion.utf8))
-    frameHasher.update(data: Data(capturedAt.utf8))
+    // Deliberately hash only content (pixels + tree version): a frame with
+    // identical pixels and an identical tree IS the same frame for caching and
+    // dedup purposes. Mixing a timestamp in made every frameID unique even for
+    // a completely static screen, defeating any downstream dedup.
     let frameID =
       "frame-"
       + frameHasher.finalize().prefix(16).map {
@@ -244,6 +267,34 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     guard !canceledSessions.contains(envelope.computerSessionID) else {
       throw NativeHostPlatformError.sessionCanceled
     }
+    // Locked display: no transport can deliver input; fail with the dedicated
+    // code (same guard as observe) instead of a confusing focus error.
+    guard !NativeLockScreen.isLocked() else {
+      throw NativeHostPlatformError.screenLocked
+    }
+    // Arm the global Esc-cancel bus for THIS action (drops stale requests from
+    // previous actions); injection loops poll it between synthesized events.
+    NativeInterruptionToken.shared.begin()
+    let result = try await executeActionCore(envelope)
+    guard envelope.includeSkyshot, result.execution.executionChannel != nil else {
+      return result.execution
+    }
+    // Settle + fresh capture + fresh tree in the same round trip (Codex's
+    // "skyshot"). Failure here never fails the action itself — the caller
+    // falls back to its own re-observe.
+    guard
+      let skyshot = try? await buildSkyshot(
+        envelope: envelope, before: result.before)
+    else { return result.execution }
+    return NativeActionExecution(
+      status: result.execution.status,
+      executionChannel: result.execution.executionChannel,
+      skyshot: skyshot)
+  }
+
+  private func executeActionCore(
+    _ envelope: NativeComputerActionEnvelope
+  ) async throws -> (execution: NativeActionExecution, before: FocusedTarget) {
     let binding = try resolveActionBinding(envelope)
     defer {
       accessibility.markDirty()
@@ -254,6 +305,13 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
       sessionID: envelope.computerSessionID, processID: before.processID,
       bounds: before.identity.windowBounds)
     try guardSecureInput(envelope: envelope, processID: before.processID)
+    // Takeover precheck for EVERY lane: the background transports used to run
+    // their first injected action before any takeover check (only the foreground
+    // validateTarget polled the monitor), so a user who had just taken over
+    // still ate one stray click/keystroke before the abort surfaced.
+    guard !userInput.takeoverDetected(sessionID: envelope.computerSessionID) else {
+      throw NativeHostPlatformError.userTakeover
+    }
 
     if envelope.executionLane == .foregroundInput,
       NativeBackgroundActionPolicy.isEligible(envelope.action)
@@ -261,14 +319,232 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
       if let background = try executeBackgroundAX(
         envelope, binding: binding, windowBounds: before.identity.windowBounds)
       {
-        return background
+        return (background, before)
       }
       // Background AX was unavailable for this target (empty/visual-only tree, no
-      // matching element, AX timeout/noop). Fall through to the legacy foreground HID
-      // path so behaviour stays identical to the pre-AX channel.
+      // matching element, AX timeout/noop). Try directed process injection next —
+      // it reaches custom-drawn controls AX cannot act on. Falls through to the
+      // legacy foreground HID path when not applicable (frontmost window) or on
+      // a transport error, so behaviour stays identical to the pre-AX channel.
+      if let pidExecution = try await executeBackgroundPID(
+        envelope, binding: binding, before: before)
+      {
+        return (pidExecution, before)
+      }
+    } else if envelope.executionLane == .foregroundInput,
+      NativeBackgroundActionPolicy.isPidEligible(envelope.action),
+      let pidExecution = try await executeBackgroundPID(
+        envelope, binding: binding, before: before)
+    {
+      // move/drag/keypress have no AX equivalent but postToPid handles them in
+      // the background; the frontmost case degrades to the foreground path.
+      return (pidExecution, before)
     }
 
-    return try await executeForeground(envelope: envelope, binding: binding, before: before)
+    return (try await executeForeground(envelope: envelope, binding: binding, before: before), before)
+  }
+
+  /// Builds the post-action skyshot: wait for the UI to settle, capture the
+  /// fresh frame, re-traverse the tree, and rebind the session observation so
+  /// the NEXT action can chain on this frame without another observe request.
+  private func buildSkyshot(
+    envelope: NativeComputerActionEnvelope,
+    before: FocusedTarget
+  ) async throws -> NativeObservedWindow {
+    await accessibility.waitForSettle(processID: before.processID)
+    let captureBindingKey = [
+      before.identity.appID,
+      before.identity.windowID,
+      String(before.identity.processID),
+      before.identity.executableIdentity ?? "",
+      before.identity.signingIdentity ?? "",
+    ].joined(separator: "|")
+    // The AX traversal does not read the captured bitmap (the screenshot only
+    // feeds the vision fallback), so run both concurrently and join them here.
+    async let capturedFuture = captureObservedWindow(
+      id: envelope.targetWindowID,
+      bindingKey: captureBindingKey,
+      persistent: persistentCaptureBindingKey == captureBindingKey
+    )
+    async let axTreeFuture = currentAXTree(
+      processID: before.processID, windowBounds: before.identity.windowBounds)
+    let captured = try await capturedFuture
+    let tree: NativeAXTreeSnapshot
+    if let axTree = await axTreeFuture {
+      tree = axTree
+    } else {
+      tree = visualFallbackTree(captured: captured)
+    }
+    let previousTreeVersion = observation?.treeVersion
+    let unchanged = previousTreeVersion != nil && previousTreeVersion == tree.treeVersion
+    let capturedAt = ISO8601DateFormatter().string(from: Date())
+    var frameHasher = SHA256()
+    frameHasher.update(data: captured.bytes)
+    frameHasher.update(data: Data(tree.treeVersion.utf8))
+    let frameID =
+      "frame-"
+      + frameHasher.finalize().prefix(16).map {
+        String(format: "%02x", $0)
+      }.joined()
+    observation = ObservationBinding(
+      frameID: frameID, treeVersion: tree.treeVersion, target: before.identity,
+      screenshotDigest: SHA256.hash(data: captured.bytes).map { String(format: "%02x", $0) }
+        .joined())
+    return NativeObservedWindow(
+      frameID: frameID,
+      treeVersion: tree.treeVersion,
+      capturedAt: capturedAt,
+      display: before.descriptor.display,
+      app: before.descriptor.app,
+      window: before.descriptor.window,
+      snapshotID: envelope.actionID,
+      capture: captured,
+      treeMode: tree.mode,
+      treeText: unchanged
+        ? "(tree unchanged since the previous frame — the element tree and ids from the last response remain valid; only the screenshot was refreshed)"
+        : tree.text,
+      elements: tree.elements,
+      loading: false,
+      sensitiveRegions: tree.sensitiveRegions
+    )
+  }
+
+  /// Concurrently-safe AX read for the skyshot path; nil when accessibility is
+  /// unavailable so the caller falls back to the visual tree.
+  private func currentAXTree(processID: pid_t, windowBounds: NativeRect) async
+    -> NativeAXTreeSnapshot?
+  {
+    guard accessibility.isAvailable else { return nil }
+    return try? accessibility.observe(
+      processID: processID,
+      preferredWindowBounds: windowBounds,
+      previousTreeVersion: nil,
+      fullTree: true
+    )
+  }
+
+  /// Vision fallback mirroring `accessibilityOrVisualTree`'s else-branch for
+  /// applications without a usable AX surface.
+  private func visualFallbackTree(captured: NativeCapturedWindow) -> NativeAXTreeSnapshot {
+    let digest = SHA256.hash(data: captured.bytes).prefix(16).map {
+      String(format: "%02x", $0)
+    }.joined()
+    let version = "visual-\(digest)"
+    let visualText = recognizeVisibleText(captured.bytes)
+    return NativeAXTreeSnapshot(
+      treeVersion: version,
+      mode: .full,
+      text: visualText,
+      elements: [],
+      sensitiveRegions: []
+    )
+  }
+
+  /// Directed injection channel: CGEventPostToPid delivers synthesized events
+  /// straight to the target process — no focus steal, no global HID traffic,
+  /// works on fully occluded windows and canvas/custom-drawn controls. Used
+  /// whether or not the target is frontmost (Codex posts every synthesized
+  /// event this way — the user's physical cursor never moves); the global
+  /// foreground path remains as the compatibility fallback on transport errors.
+  private func executeBackgroundPID(
+    _ envelope: NativeComputerActionEnvelope,
+    binding: ObservationBinding,
+    before: FocusedTarget
+  ) async throws -> NativeActionExecution? {
+    guard MacPidEventInjector.isAvailable else { return nil }
+    let pid = before.processID
+    let windowBounds = before.identity.windowBounds
+    do {
+      switch envelope.action {
+      case .click(let normalized, let button, let count, let modifiers):
+        let point = try NativeInputPolicy.screenPoint(
+          normalizedX: normalized.x, normalizedY: normalized.y, windowBounds: windowBounds)
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(to: CGPoint(x: point.x, y: point.y))
+        try await MacPidEventInjector.clickWithCursor(
+          pid: pid, at: CGPoint(x: point.x, y: point.y), button: button, count: count ?? 1,
+          modifiers: modifiers)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .move(let normalized):
+        let point = try NativeInputPolicy.screenPoint(
+          normalizedX: normalized.x, normalizedY: normalized.y, windowBounds: windowBounds)
+        let hover = try MacPidEventInjector.makeHoverEvent(at: CGPoint(x: point.x, y: point.y))
+        hover.postToPid(pid)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .drag(let from, let to, let durationMs):
+        let start = try NativeInputPolicy.screenPoint(
+          normalizedX: from.x, normalizedY: from.y, windowBounds: windowBounds)
+        let end = try NativeInputPolicy.screenPoint(
+          normalizedX: to.x, normalizedY: to.y, windowBounds: windowBounds)
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(to: CGPoint(x: start.x, y: start.y))
+        MacVirtualCursor.pressDown()
+        try await MacPidEventInjector.dragWithCursor(
+          pid: pid, from: CGPoint(x: start.x, y: start.y), to: CGPoint(x: end.x, y: end.y),
+          durationMs: durationMs ?? 250)
+        MacVirtualCursor.pressUp()
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .scroll(_, let normalized, let deltaX, let deltaY):
+        let point: NativeScreenPoint
+        if let normalized {
+          point = try NativeInputPolicy.screenPoint(
+            normalizedX: normalized.x, normalizedY: normalized.y, windowBounds: windowBounds)
+        } else if let elementID = envelope.action.elementID,
+          let bounds = try? accessibility.bounds(
+            elementID: elementID, treeVersion: binding.treeVersion)
+        {
+          point = NativeScreenPoint(
+            x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2)
+        } else {
+          point = NativeScreenPoint(
+            x: windowBounds.x + windowBounds.width / 2,
+            y: windowBounds.y + windowBounds.height / 2)
+        }
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(to: CGPoint(x: point.x, y: point.y))
+        try MacPidEventInjector.scroll(
+          pid: pid, at: CGPoint(x: point.x, y: point.y), deltaX: deltaX, deltaY: deltaY)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .keypress(let keys):
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(
+          to: CGPoint(
+            x: windowBounds.x + windowBounds.width / 2,
+            y: windowBounds.y + windowBounds.height / 2))
+        try await MacPidEventInjector.keyChord(
+          pid: pid, keys: keys, keyCode: MacCGEventController.keyCode)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .typeText(let text, _):
+        // AX set-value already failed above (field not settable / custom editor).
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(
+          to: CGPoint(
+            x: windowBounds.x + windowBounds.width / 2,
+            y: windowBounds.y + windowBounds.height / 2))
+        try await MacPidEventInjector.typeUnicode(pid: pid, text: text)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      case .pasteText(let text, _):
+        // Clipboard delivery (Codex `paste`): one cmd+V instead of per-chunk
+        // unicode injection — the reliable channel for long text and
+        // custom-drawn editors that ignore synthesized keyboard events.
+        MacPidEventInjector.prepareWindow(pid: pid, bounds: windowBounds)
+        MacVirtualCursor.move(
+          to: CGPoint(
+            x: windowBounds.x + windowBounds.width / 2,
+            y: windowBounds.y + windowBounds.height / 2))
+        try NativeClipboardWriter.write(text)
+        try await MacPidEventInjector.keyChord(
+          pid: pid, keys: ["Meta", "v"], keyCode: MacCGEventController.keyCode)
+        return NativeActionExecution(status: .executed, executionChannel: .backgroundPID)
+      default:
+        return nil
+      }
+    } catch let error as NativeHostPlatformError {
+      if NativeBackgroundActionPolicy.mustAbort(error) { throw error }
+      // Transport-level failure (missing source, event construction) — degrade
+      // to the foreground path instead of failing the action.
+      return nil
+    }
   }
 
   /// Validates the observation binding against the envelope, tolerating one stale
@@ -297,9 +573,16 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
         screenshotDigest: current.screenshotDigest)
       observation = resolved
     }
-    guard resolved.target.appID == envelope.targetAppID,
-      resolved.target.windowID == envelope.targetWindowID
-    else { throw NativeHostPlatformError.focusMismatch }
+    // Application identity is the session contract; window drift within the same
+    // validated app means the cached frame belongs to a dead window — surface it
+    // as a retryable stale tree so the caller re-observes (which self-heals onto
+    // the app's live window) instead of wedging on a terminal mismatch.
+    guard resolved.target.appID == envelope.targetAppID else {
+      throw NativeHostPlatformError.focusMismatch
+    }
+    guard resolved.target.windowID == envelope.targetWindowID else {
+      throw NativeHostPlatformError.staleTree
+    }
     return resolved
   }
 
@@ -308,7 +591,7 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
   ) throws {
     guard accessibility.focusedElementIsSecure(processID: processID) else { return }
     switch envelope.action {
-    case .typeText:
+    case .typeText, .pasteText:
       throw NativeHostPlatformError.sensitiveInputBlocked
     case .keypress(let keys) where NativeInputPolicy.keypressCanModifySecureField(keys):
       throw NativeHostPlatformError.sensitiveInputBlocked
@@ -358,18 +641,27 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
     guard accessibility.isAvailable else { return nil }
     do {
       switch envelope.action {
-      case .click(let normalized, let button, let count):
+      case .click(let normalized, let button, let count, let modifiers):
         // AXPress/AXConfirm are activation semantics; there is no background equivalent
-        // for right/middle buttons.
-        guard button == nil || button == "left" else { return nil }
+        // for right/middle buttons, and modifier chords (cmd+click) only exist as
+        // real events — those fall through to the directed-injection channel.
+        guard modifiers.isEmpty, button == nil || button == "left" else { return nil }
         let point = try NativeInputPolicy.screenPoint(
           normalizedX: normalized.x, normalizedY: normalized.y, windowBounds: windowBounds)
         guard
           let hit = accessibility.hitTestElement(
             point: point, treeVersion: binding.treeVersion, capability: .pressable)
         else { return nil }
+        if let bounds = try? accessibility.bounds(
+          elementID: hit.id, treeVersion: binding.treeVersion)
+        {
+          MacVirtualCursor.move(
+            to: CGPoint(x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2))
+        }
+        MacVirtualCursor.pressDown()
         let status = try accessibility.performBackgroundClick(
           elementID: hit.id, treeVersion: binding.treeVersion, count: count ?? 1)
+        MacVirtualCursor.pressUp()
         return NativeActionExecution(status: status, executionChannel: .backgroundAX)
       case .scroll(_, let normalized, let deltaX, let deltaY):
         let point: NativeScreenPoint
@@ -391,10 +683,15 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
           let hit = accessibility.hitTestElement(
             point: point, treeVersion: binding.treeVersion, capability: .scrollable)
         else { return nil }
+        MacVirtualCursor.move(to: CGPoint(x: point.x, y: point.y))
         let status = try accessibility.performBackgroundScroll(
           elementID: hit.id, treeVersion: binding.treeVersion, deltaX: deltaX, deltaY: deltaY)
         return NativeActionExecution(status: status, executionChannel: .backgroundAX)
       case .typeText(let text, _):
+        MacVirtualCursor.move(
+          to: CGPoint(
+            x: windowBounds.x + windowBounds.width / 2,
+            y: windowBounds.y + windowBounds.height / 2))
         let status = try accessibility.performBackgroundTypeText(
           processID: binding.target.processID, text: text)
         return NativeActionExecution(status: status, executionChannel: .backgroundAX)
@@ -448,7 +745,7 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
       // Semantic AX operations run on the cached tree without focus, exactly like the
       // coordinate AX path; report them as background so channel metrics stay truthful.
       executionChannel = .backgroundAX
-    case .click, .move, .drag, .keypress, .typeText,
+    case .click, .move, .drag, .keypress, .typeText, .pasteText,
       .scroll(elementID: nil, point: _, deltaX: _, deltaY: _),
       .scroll(elementID: .some, point: _, deltaX: _, deltaY: _):
       guard envelope.executionLane == .foregroundInput else {
@@ -461,8 +758,17 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
       } else {
         scrollBounds = nil
       }
+      // Foreground paste degrades to clipboard + a global cmd+V chord, reusing
+      // the existing keypress machinery instead of a bespoke CGEvent path.
+      let foregroundAction: NativeComputerAction
+      if case .pasteText(let text, _) = envelope.action {
+        try NativeClipboardWriter.write(text)
+        foregroundAction = .keypress(keys: ["Meta", "v"])
+      } else {
+        foregroundAction = envelope.action
+      }
       status = try await MacCGEventController.execute(
-        envelope.action, windowBounds: before.identity.windowBounds,
+        foregroundAction, windowBounds: before.identity.windowBounds,
         scrollTargetBounds: scrollBounds,
         validateTarget: { [weak self] in
           guard let self else { throw NativeHostPlatformError.sessionCanceled }
@@ -515,6 +821,14 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
 
   func cancelSession(id: String) async {
     canceledSessions.insert(id)
+    canceledSessionOrder.append(id)
+    // The set only grows through explicit cancels; without a bound it leaked
+    // one entry per finished task for the whole host-process lifetime. Broker
+    // session ids are never reused, so evicting the oldest entry is safe.
+    if canceledSessionOrder.count > 64, let oldest = canceledSessionOrder.first {
+      canceledSessionOrder.removeFirst()
+      canceledSessions.remove(oldest)
+    }
     userInput.unbind(sessionID: id)
     invalidateObservation()
     await stopPersistentCapture()
@@ -549,6 +863,7 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
           scaleFactor: scaleFactor
         )
         persistentCaptureBindingKey = bindingKey
+        startPersistentCaptureIdleWatch()
       }
       guard let persistentCapture else { throw NativeHostPlatformError.captureFailed }
       return try await persistentCapture.nextFrame(notBefore: requestedAt, timeout: 2)
@@ -559,19 +874,75 @@ actor MacScreenCaptureProvider: NativeHostPlatformProviding {
   }
 
   private func stopPersistentCapture() async {
+    persistentCaptureIdleWatchTask?.cancel()
+    persistentCaptureIdleWatchTask = nil
     let capture = persistentCapture
     persistentCapture = nil
     persistentCaptureBindingKey = nil
     await capture?.stop()
   }
 
+  /// Watch loop runs while a persistent capture exists; it parks the stream
+  /// after `persistentCaptureIdleTimeout` without a frame request. Because
+  /// `nextFrame` refreshes the idle clock on every observe, an active task
+  /// never trips it — only an abandoned stream does.
+  private func startPersistentCaptureIdleWatch() {
+    let timeout = Self.persistentCaptureIdleTimeout
+    persistentCaptureIdleWatchTask = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(5))
+        guard let self else { return }
+        let idle = await self.persistentCaptureIdle()
+        if idle > timeout {
+          await self.stopPersistentCapture()
+          return
+        }
+      }
+    }
+  }
+
+  private func persistentCaptureIdle() -> TimeInterval {
+    persistentCapture?.idleFor ?? 0
+  }
+
   private func focusedTarget(appID: String, windowID: String) async throws -> FocusedTarget {
-    let matches = try await listWindows().filter {
+    try await resolvingFocusedTarget(appID: appID, windowID: windowID, allowWindowFollow: false)
+  }
+
+  /// App-scoped window resolution, mirroring Codex's `ComputerUseAppController`
+  /// model: the session owns an APPLICATION, and the concrete window is
+  /// re-derived per call. When the requested window no longer exists (the
+  /// normal churn of apps that recreate windows — Electron chat apps opening a
+  /// new conversation, dropdowns morphing into windows), a follow-enabled
+  /// resolve rebinds to the app's live window (its focused one when possible,
+  /// else the largest) instead of erroring. Only a vanished application is a
+  /// terminal mismatch. A strict resolve (actions) surfaces window churn as
+  /// `staleFrame` — retryable — because the action's coordinates and element
+  /// references belong to the dead window's frame and MUST be rebuilt from a
+  /// fresh observation, never silently retargeted.
+  private func resolvingFocusedTarget(
+    appID: String,
+    windowID: String,
+    allowWindowFollow: Bool
+  ) async throws -> FocusedTarget {
+    var matches = try await listWindows().filter {
       !$0.minimized && $0.app.id == appID && $0.window.id == windowID
+    }
+    if matches.isEmpty, allowWindowFollow {
+      // Self-heal: any live window of the same validated application.
+      let appWindows = try await listWindows().filter { !$0.minimized && $0.app.id == appID }
+      if let focused = appWindows.first(where: { $0.focused }) { matches = [focused] }
+      else if let largest = appWindows.max(by: {
+        $0.window.bounds.width * $0.window.bounds.height
+          < $1.window.bounds.width * $1.window.bounds.height
+      }) { matches = [largest] }
     }
     guard matches.count == 1, let descriptor = matches.first,
       let processID = descriptor.app.processId, processID > 0
-    else { throw NativeHostPlatformError.focusMismatch }
+    else {
+      throw allowWindowFollow
+        ? NativeHostPlatformError.focusMismatch : NativeHostPlatformError.staleFrame
+    }
     guard
       !NativeInputPolicy.isSensitiveTarget(
         appName: descriptor.app.name, bundleID: descriptor.app.bundleId)
@@ -787,6 +1158,11 @@ private final class MacPersistentWindowCapture: NSObject, SCStreamOutput, SCStre
   private var stream: SCStream?
   private var latest: (image: CGImage, capturedAt: TimeInterval)?
   private var terminalError = false
+  /// Last time a client asked for a frame. The provider parks the stream when
+  /// nobody has requested one for a while — a live SCStream keeps macOS
+  /// showing the per-window "screen sharing" indicator long after the task
+  /// ended, which reads as a leak to the user.
+  private var lastRequestAt = ProcessInfo.processInfo.systemUptime
 
   static func start(window: SCWindow, scaleFactor: CGFloat) async throws
     -> MacPersistentWindowCapture
@@ -796,7 +1172,8 @@ private final class MacPersistentWindowCapture: NSObject, SCStreamOutput, SCStre
     let configuration = SCStreamConfiguration()
     configuration.width = width
     configuration.height = height
-    configuration.showsCursor = true
+    // See the one-shot capture above: cursor-free frames keep frameID stable.
+    configuration.showsCursor = false
     if #available(macOS 14.0, *) {
       configuration.ignoreShadowsSingleWindow = false
     }
@@ -824,6 +1201,7 @@ private final class MacPersistentWindowCapture: NSObject, SCStreamOutput, SCStre
   func nextFrame(notBefore requestedAt: TimeInterval, timeout: TimeInterval) async throws
     -> NativeCapturedWindow
   {
+    markRequested()
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
     while ProcessInfo.processInfo.systemUptime < deadline {
       let state = lock.withLock { (latest, terminalError) }
@@ -848,6 +1226,15 @@ private final class MacPersistentWindowCapture: NSObject, SCStreamOutput, SCStre
       return current
     }
     try? await current?.stopCapture()
+  }
+
+  /// Seconds since the last `nextFrame` request, for the provider's idle park.
+  var idleFor: TimeInterval {
+    lock.withLock { ProcessInfo.processInfo.systemUptime - lastRequestAt }
+  }
+
+  private func markRequested() {
+    lock.withLock { lastRequestAt = ProcessInfo.processInfo.systemUptime }
   }
 
   func stream(
