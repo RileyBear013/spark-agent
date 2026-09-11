@@ -1,10 +1,11 @@
 /**
- * 真机集成探针（默认跳过）——TeamAssetService 信封资产（workflow/agent/app）全链路
+ * 真机集成探针（默认跳过）——TeamAssetService 资产（workflow/agent/app）
+ * AgentSpec 原生承载全链路
  *
  * 运行方式（测试环境专用，探针数据用后即删）：
  *   TEAM_REGISTRY_LIVE=1 npx vitest run src/services/team-registry/asset-service-live.test.ts
  *
- * 验证：中文 slug 回退 → 发布（信封写配置中心 + checksum）→ 回读校验 →
+ * 验证：中文 slug 回退 → 发布（原生 zip 上传 + 生命周期 + PUBLIC）→ 回读校验 →
  * 版本防回退 → patch+1 → 第二「机器」安装/更新 → 六态比对 → 清理。
  * 端口与 pins 用内存桩（探针验证传输与服务编排，SQLite 归单测覆盖）。
  */
@@ -16,6 +17,7 @@ import {
   type TeamAssetPort,
   type TeamAssetBuildResult,
 } from './asset-service.js'
+import { agentSpecNameFor, envelopeFromAgentSpecVersion } from './agentspec.js'
 import { NacosClient } from './nacos-client.js'
 import { TeamRegistryConfigStore } from './team-registry-config.js'
 import type { TeamAssetPinsRepository } from '@spark/storage'
@@ -112,17 +114,19 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
     readNamespace: () => 'public',
   } as unknown as TeamRegistryConfigStore
 
+  const probeSlugs = [
+    ['workflow', slugifyAssetName(WF_NAME, 'wf')],
+    ['agent', slugifyAssetName(AGENT_NAME, 'agent')],
+    ['app', slugifyAssetName(APP_NAME, 'app')],
+  ] as const
+
   async function cleanup(): Promise<void> {
-    for (const [type, slug] of [
-      ['workflow', slugifyAssetName(WF_NAME, 'wf')],
-      ['agent', slugifyAssetName(AGENT_NAME, 'agent')],
-      ['app', slugifyAssetName(APP_NAME, 'app')],
-    ] as const) {
-      await client.deleteConfig(`${type}:${slug}`).catch(() => {})
+    for (const [type, slug] of probeSlugs) {
+      await client.deleteTeamAgentSpec(agentSpecNameFor(type, slug)).catch(() => {})
     }
   }
 
-  it('三类信封资产：发布 → 回读 → 防回退 → 安装/更新 → 六态 → 清理', async () => {
+  it('三类资产 AgentSpec 承载：发布 → 回读 → 防回退 → 安装/更新 → 六态 → 清理', async () => {
     await cleanup()
     try {
       const health = await client.testRoundTrip()
@@ -141,23 +145,39 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
 
       // ── 发布三类 ──
       const wfPub = await service.publishToTeam('workflow', 'w1')
-      expect(wfPub.version).toBe('1.0.0')
+      expect(wfPub.version).toBe('0.0.1')
       expect(wfPub.slug, '中文 slug 回退').toMatch(/^wf-[0-9a-f]{8}$/)
       const agentPub = await service.publishToTeam('agent', 'a1')
       const appPub = await service.publishToTeam('app', 'p1')
-      expect(Array.isArray(agentPub.warnings)).toBe(true) // warnings 是真实 Agent 端口的提示，stub 为空数组
+      expect(Array.isArray(agentPub.warnings)).toBe(true)
 
-      // ── 远端回读：信封结构与 checksum ──
+      // ── 远端回读：原生条目 scope=PUBLIC + 信封 checksum ──
+      for (const [type, slug, pub] of [
+        ['workflow', wfPub.slug, wfPub],
+        ['agent', agentPub.slug, agentPub],
+        ['app', appPub.slug, appPub],
+      ] as const) {
+        const name = agentSpecNameFor(type, slug)
+        const detail = await client.getTeamAgentSpec(name)
+        expect(detail, `${name} 应在原生 AgentSpec 列表可见`).toBeTruthy()
+        expect(detail!.scope, `${name} 应为 PUBLIC`).toBe('PUBLIC')
+        const vDetail = await client.getTeamAgentSpecVersion(name, pub.version)
+        expect(vDetail, `${name}@${pub.version} 版本详情可读`).toBeTruthy()
+        const env = envelopeFromAgentSpecVersion(vDetail!, type)
+        expect(env?.payload.kind).toBeTruthy()
+        expect(env!.checksum).toBe(computePayloadChecksum(env!.payload))
+      }
+
+      // ── 浏览列表可见 ──
       const list = await service.listTeamAssets('workflow')
       expect(list.map((i) => i.slug)).toContain(wfPub.slug)
-      const env = await new (await import('./index.js')).TeamRegistryService(configStore).getEnvelope('workflow', wfPub.slug)
-      expect(env?.payload.kind).toBe('workflow')
-      expect(env?.checksum).toBe(computePayloadChecksum(env?.payload))
 
-      // ── 防回退 + patch+1 ──
-      await expect(service.publishToTeam('workflow', 'w1', { version: '0.9.0' })).rejects.toThrow(/不高于远端当前版本/)
+      // ── 版本语义：指定版本不生效（服务端自分配 0.0.N 递增），发布自动 +1 ──
+      const explicit = await service.publishToTeam('workflow', 'w1', { version: '0.9.0' })
+      expect(explicit.version).toBe('0.0.2')
+      expect(explicit.warnings.some((w) => w.includes('不生效'))).toBe(true)
       const bump = await service.publishToTeam('workflow', 'w1')
-      expect(bump.version).toBe('1.0.1')
+      expect(bump.version).toBe('0.0.3')
 
       // ── 另一台机器（独立 service + 独立 pins）安装 → 更新 ──
       const serviceOther = new TeamAssetService(
@@ -179,7 +199,7 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       if (publisher && publisher.content.kind === 'workflow') {
         publisher.content = { kind: 'workflow', graph: { nodes: [{ id: 'v2-node' }], edges: [] } }
       }
-      await service.publishToTeam('workflow', 'w1', { version: '2.0.0' })
+      await service.publishToTeam('workflow', 'w1')
       const updates1 = await serviceOther.listTeamUpdates('workflow')
       expect(updates1.find((u) => u.slug === wfPub.slug)?.state).toBe('remote-newer')
       const item = [...wfOther.items.values()][0]
@@ -194,10 +214,10 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       expect((await service.listTeamAssets('app')).map((i) => i.slug)).toContain(appPub.slug)
     } finally {
       await cleanup()
-      // 注册中心还原为空校验
-      const rest = await client.listConfigs({ dataIdPrefix: '' })
-      const ours = [slugifyAssetName(WF_NAME, 'wf'), slugifyAssetName(AGENT_NAME, 'agent'), slugifyAssetName(APP_NAME, 'app')]
-      expect(rest.filter((c) => ours.some((slug) => c.dataId.endsWith('/' + slug))).map((c) => c.dataId)).toEqual([])
+      // 注册中心还原为空校验（原生 AgentSpec 维度）
+      const items = await client.listTeamAgentSpecs()
+      const ours = probeSlugs.map(([type, slug]) => agentSpecNameFor(type, slug))
+      expect(items.filter((i) => ours.includes(String(i.name))).map((i) => i.name)).toEqual([])
     }
   })
 })

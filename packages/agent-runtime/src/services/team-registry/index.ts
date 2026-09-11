@@ -49,6 +49,9 @@ export type {
   NacosConfigContent,
   NacosConfigSummary,
   SkillUploadPrecheck,
+  TeamAgentSpecDetail,
+  TeamAgentSpecVersionDetail,
+  TeamAgentSpecVersionRow,
   TeamMcpDetail,
   TeamMcpVersionInfo,
   TeamSkillDetail,
@@ -67,6 +70,15 @@ export type {
   NacosEndpointDirect,
   NacosServerSpecification,
 } from './mcp-mapping.js'
+export {
+  AGENT_SPEC_PREFIX,
+  AGENT_SPEC_X_FIELD,
+  agentSpecNameFor,
+  buildAgentSpecPackage,
+  envelopeFromAgentSpecVersion,
+  parseAgentSpecName,
+} from './agentspec.js'
+export type { AgentSpecAssetType } from './agentspec.js'
 export { buildZip, readZip, stripZipCommonRoot } from './zip.js'
 export type { ZipEntryInput, ZipEntryOutput } from './zip.js'
 export * from './types.js'

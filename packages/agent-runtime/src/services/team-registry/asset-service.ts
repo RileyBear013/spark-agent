@@ -1,23 +1,32 @@
 /**
  * @module team-registry/asset-service
  *
- * TeamAssetService — 工作流 / 平台 Agent / 子应用的团队推拉（M3/M4）
+ * TeamAssetService — 工作流 / 平台 Agent / 子应用的团队推拉（M3/M4 原生承载）
  *
- * 这三类资产没有 Nacos 原生 AI 资源类型，走配置中心统一信封
- * （dataId = `<assetType>/<slug>`，group = SPARK_TEAM）。本模块只做
- * 「信封编排 + 版本比对 + pins 锚点」，本地落地经由 TeamAssetPort
- * 由 desktop 主进程适配真实仓库（WorkflowRepository / AgentRepository /
- * SubAppRepository），保持 agent-runtime 不反向依赖主进程副作用
- * （RuntimeCompositionService / pushConfigChanged 在 handler 层补触发）。
+ * 三类资产以 Nacos 原生 AgentSpec 资源承载（最初走配置中心裸配置，因控制台
+ * 管理体验对不上 Skill/MCP 于 2026-09-11 切换）：发布 = envelope →
+ * manifest.json(含 x-spark 元数据) + payload.json 的 zip → 原生上传 →
+ * submit→publish→online→PUBLIC；安装/更新比对 = 版本详情内容回读 → envelope。
+ * 信封形状（spark.team.asset.v1）、六态判定与 pins 锚点语义不变，本地落地
+ * 经由 TeamAssetPort 由 desktop 主进程适配真实仓库（WorkflowRepository /
+ * AgentRepository / SubAppRepository），保持 agent-runtime 不反向依赖主进程
+ * 副作用（RuntimeCompositionService / pushConfigChanged 在 handler 层补触发）。
  */
 
 import crypto from 'node:crypto'
 
 import type { TeamAssetPinsRepository } from '@spark/storage'
 
-import { TeamRegistryService } from './index.js'
+import { pickLatestTeamVersion } from './index.js'
+import {
+  agentSpecNameFor,
+  buildAgentSpecPackage,
+  envelopeFromAgentSpecVersion,
+  parseAgentSpecName,
+} from './agentspec.js'
 import { TeamRegistryConfigStore } from './team-registry-config.js'
 import {
+  TEAM_ASSET_LIMITS,
   bumpPatchVersion,
   classifyTeamAssetState,
   compareSemver,
@@ -27,8 +36,9 @@ import {
   type TeamAssetType,
   type TeamAssetPayload,
 } from './types.js'
+import type { NacosClient } from './nacos-client.js'
 
-/** 信封型资产类型（skill/mcp 走原生 API，不经此服务） */
+/** 信封型资产类型（skill/mcp 走各自原生 API，不经此服务） */
 export type EnvelopeAssetType = Extract<TeamAssetType, 'workflow' | 'agent' | 'app'>
 
 /** 本地实体 → 信封载荷的构建结果 */
@@ -119,35 +129,76 @@ export function slugifyAssetName(name: string, prefix: string): string {
   return usable ? `${usable}-${hash}` : `${prefix}-${hash}`
 }
 
-export class TeamAssetService {
-  private readonly registry: TeamRegistryService
+/** 从远端列表条目按点路径取字符串（labels.latest 等嵌套字段） */
+function fieldStr(record: unknown, path: string[]): string | null {
+  let current: unknown = record
+  for (const segment of path) {
+    if (current == null || typeof current !== 'object') return null
+    current = (current as Record<string, unknown>)[segment] ?? null
+  }
+  return typeof current === 'string' && current.length > 0 ? current : null
+}
 
+export class TeamAssetService {
   constructor(
     private readonly configStore: TeamRegistryConfigStore,
     private readonly ports: Record<EnvelopeAssetType, TeamAssetPort>,
     private readonly pinsRepo: TeamAssetPinsRepository,
-  ) {
-    this.registry = new TeamRegistryService(configStore)
+  ) {}
+
+  private async requireClient(): Promise<NacosClient> {
+    const client = await this.configStore.buildClient()
+    if (!client) {
+      throw new Error('团队注册中心尚未配置（设置 → 团队注册中心），团队功能不可用')
+    }
+    return client
   }
 
-  /** 浏览团队某类信封资产（团队商店列表；未配置时返回空） */
+  /** 浏览团队某类资产（团队商店列表；未配置时返回空） */
   async listTeamAssets(assetType: EnvelopeAssetType): Promise<TeamAssetListItem[]> {
     const client = await this.configStore.buildClient()
     if (!client) return []
-    const envelopes = await this.registry.listEnvelopes(assetType)
-    return envelopes.map((envelope) => ({
-      slug: envelope.slug,
-      name: envelope.name,
-      description: envelope.description,
-      version: envelope.version,
-      author: envelope.author,
-      updatedAt: envelope.updatedAt,
-    }))
+    const items = await client.listTeamAgentSpecs()
+    // 列表只有 agentSpecName/labels.latest；取 x-spark 元数据需逐条版本详情
+    const ours: Array<{ agentSpecName: string; slug: string; latest: string }> = []
+    for (const item of items) {
+      const name = fieldStr(item, ['name'])
+      if (!name) continue
+      const parsed = parseAgentSpecName(name)
+      if (!parsed || parsed.assetType !== assetType) continue // 他人/异类条目跳过
+      const latest = fieldStr(item, ['labels', 'latest'])
+      if (!latest) continue // 尚无发布版本（同 MCP 列表语义，不展示草稿）
+      ours.push({ agentSpecName: name, slug: parsed.slug, latest })
+    }
+    const results = await Promise.all(
+      ours.map(async (entry): Promise<TeamAssetListItem | null> => {
+        try {
+          const detail = await client.getTeamAgentSpecVersion(entry.agentSpecName, entry.latest)
+          const envelope = detail ? envelopeFromAgentSpecVersion(detail, assetType) : null
+          if (!envelope) return null
+          return {
+            slug: envelope.slug,
+            name: envelope.name,
+            description: envelope.description,
+            version: envelope.version,
+            author: envelope.author,
+            updatedAt: envelope.updatedAt,
+          }
+        } catch {
+          return null // 单条详情失败不拖垮整个列表
+        }
+      }),
+    )
+    return results.filter((item): item is TeamAssetListItem => item != null)
   }
 
   /**
-   * 发布本地资产到团队注册中心。
-   * 链路：buildPayload → slug → 远端现状（默认 patch+1、防回退）→ 信封 → pins。
+   * 发布本地资产到团队注册中心（原生 AgentSpec 承载）。
+   * 链路：buildPayload → slug → zip 上传（自动建条目/新草稿）→ 回读服务端
+   * 分配的版本 → submit→publish→online→PUBLIC → pins。
+   * 版本语义：AgentSpec 服务端对版本号自分配（0.0.N 单调递增，上传包里的
+   * manifest.version 不生效，真机实测），防回退由单调性天然保证；
+   * opts.version 仅作记录并回显 warning。
    */
   async publishToTeam(
     assetType: EnvelopeAssetType,
@@ -160,43 +211,92 @@ export class TeamAssetService {
       throw new Error(`本地资产不存在或不可发布：${assetType}/${localId}`)
     }
     const slug = slugifyAssetName(built.name, SLUG_PREFIX[assetType])
+    const agentSpecName = agentSpecNameFor(assetType, slug)
     const author = (await this.configStore.getSnapshot()).username
+    const client = await this.requireClient()
 
-    const remote = await this.registry.getEnvelope(assetType, slug)
-    const remoteVersion = remote?.version ?? null
-    const explicitVersion = opts.version?.trim()
-    const version = explicitVersion || bumpPatchVersion(remoteVersion)
-    if (remoteVersion && explicitVersion && compareSemver(explicitVersion, remoteVersion) <= 0) {
-      throw new Error(
-        `指定版本 ${explicitVersion} 不高于远端当前版本 ${remoteVersion}；如需覆盖请升版本号`,
-      )
-    }
+    // 远端现状：已发布最高版本仅作展示（previousRemoteVersion）
+    const remoteDetail = await client.getTeamAgentSpec(agentSpecName)
+    const remoteVersion = remoteDetail ? pickLatestTeamVersion(remoteDetail.versions) : null
 
     const envelope: TeamAssetEnvelope = {
       schema: 'spark.team.asset.v1',
       assetType,
       slug,
       name: built.name,
-      version,
+      // 仅为 manifest 展示值；实际发布版本由服务端分配（见方法注释）
+      version: bumpPatchVersion(remoteVersion),
       author,
       description: built.description,
       updatedAt: new Date().toISOString(),
       checksum: computePayloadChecksum(built.payload),
       payload: built.payload,
     }
-    await this.registry.publishEnvelope(envelope)
+    const pkg = buildAgentSpecPackage(envelope)
+    if (pkg.zip.length > TEAM_ASSET_LIMITS.maxEnvelopeBytes) {
+      throw new Error(
+        `资产包 ${pkg.zip.length} 字节超过上限 ${TEAM_ASSET_LIMITS.maxEnvelopeBytes}；请精简载荷`,
+      )
+    }
+    await client.uploadTeamAgentSpecZip({
+      zip: pkg.zip,
+      commitMsg: `SparkWork ${assetType} ${built.name}`,
+    })
+
+    // 回读服务端分配的实际版本（新条目固定 0.0.1 起步，逐次 +1）
+    const assigned = (await client.getTeamAgentSpec(agentSpecName))?.editingVersion ?? null
+    if (!assigned) {
+      if (!remoteDetail) {
+        // 全新条目上传异常 → 清理半成品，避免控制台孤儿条目
+        await client.deleteTeamAgentSpec(agentSpecName).catch(() => {})
+      }
+      throw new Error(
+        `上传后回读校验失败（远端读不到编辑版本）${remoteDetail ? '' : '；已清理新建条目'}。agentSpecName=${agentSpecName}`,
+      )
+    }
+    const versionDetail = await client
+      .getTeamAgentSpecVersion(agentSpecName, assigned)
+      .catch(() => null)
+    if (!versionDetail) {
+      throw new Error(
+        `上传后版本 ${assigned} 内容回读失败，已中止发布。agentSpecName=${agentSpecName}`,
+      )
+    }
+
+    await client.submitTeamAgentSpecVersion(agentSpecName, assigned)
+    await client.publishTeamAgentSpecVersion(agentSpecName, assigned)
+    const warnings: string[] = [...(built.warnings ?? [])]
+    if (opts.version?.trim()) {
+      warnings.push(
+        `指定版本号 ${opts.version.trim()} 不生效：AgentSpec 服务端自动分配版本号（本次为 ${assigned}）`,
+      )
+    }
+    try {
+      await client.onlineTeamAgentSpecVersion(agentSpecName, assigned)
+    } catch (err) {
+      warnings.push(
+        `上线（online）步骤被服务端拒绝（版本可能已是终态，不影响发布）：${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    try {
+      await client.setTeamAgentSpecScope(agentSpecName, 'PUBLIC')
+    } catch (err) {
+      warnings.push(
+        `共享范围未设为 PUBLIC（当前可能仅自己可见，请到控制台 AgentSpec 页手工公开）：${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
 
     this.pinsRepo.upsert(assetType, slug, {
-      publishedVersion: version,
+      publishedVersion: assigned,
       publishedChecksum: envelope.checksum,
       publishedAt: envelope.updatedAt,
     })
     return {
       slug,
       name: built.name,
-      version,
+      version: assigned,
       previousRemoteVersion: remoteVersion,
-      warnings: built.warnings ?? [],
+      warnings,
     }
   }
 
@@ -207,11 +307,24 @@ export class TeamAssetService {
     if (!slug || slug.includes('/') || slug.includes('\\') || slug.includes('..')) {
       throw new Error(`非法的资产 slug：${slug}`)
     }
-    const port = this.ports[assetType]
-    const envelope = await this.registry.getEnvelope(assetType, slug)
-    if (!envelope) {
+    const client = await this.requireClient()
+    const agentSpecName = agentSpecNameFor(assetType, slug)
+    const detail = await client.getTeamAgentSpec(agentSpecName)
+    if (!detail) {
       throw new Error(`团队注册中心中不存在该资产：${assetType}/${slug}`)
     }
+    const version = pickLatestTeamVersion(detail.versions)
+    if (!version) {
+      throw new Error(`团队资产尚无已发布版本：${assetType}/${slug}`)
+    }
+    const versionDetail = await client.getTeamAgentSpecVersion(agentSpecName, version)
+    const envelope = versionDetail ? envelopeFromAgentSpecVersion(versionDetail, assetType) : null
+    if (!envelope) {
+      throw new Error(
+        `团队资产版本内容不可读或不是 SparkWork 信封：${assetType}/${slug} v${version}`,
+      )
+    }
+    const port = this.ports[assetType]
     port.validatePayload?.(envelope)
 
     const existingLocalId = port.findInstalledLocalId(slug)
@@ -232,54 +345,78 @@ export class TeamAssetService {
   }
 
   /**
-   * pins 锚点 vs 远端信封的更新比对（六态判定复用 classifyTeamAssetState）。
-   * 本地 checksum 由端口按与发布一致的 canonical 规则重算，本地改过即 local-modified。
+   * pins 锚点 vs 远端最新发布版本的更新比对（六态判定复用 classifyTeamAssetState）。
+   * 远端 checksum 来自版本详情回读的 envelope；本地 checksum 由端口按与发布
+   * 一致的 canonical 规则重算，本地改过即 local-modified。
    */
   async listTeamUpdates(assetType: EnvelopeAssetType): Promise<TeamAssetUpdateInfo[]> {
     const client = await this.configStore.buildClient()
     if (!client) return []
     const port = this.ports[assetType]
-    const envelopes = await this.registry.listEnvelopes(assetType)
-    const remoteBySlug = new Map(envelopes.map((envelope) => [envelope.slug, envelope]))
+    const items = await client.listTeamAgentSpecs()
+    const remoteBySlug = new Map<string, { agentSpecName: string; version: string }>()
+    for (const item of items) {
+      const name = fieldStr(item, ['name'])
+      if (!name) continue
+      const parsed = parseAgentSpecName(name)
+      if (!parsed || parsed.assetType !== assetType) continue
+      const latest = fieldStr(item, ['labels', 'latest'])
+      if (!latest) continue
+      remoteBySlug.set(parsed.slug, { agentSpecName: name, version: latest })
+    }
 
     const pins = this.pinsRepo.listByType(assetType)
-    const results: TeamAssetUpdateInfo[] = []
-    for (const pin of pins) {
-      const slug = pin.slug
-      const remote = remoteBySlug.get(slug)
-      const localId = port.findInstalledLocalId(slug)
-      if (!remote) {
-        if (localId != null) {
-          results.push({
-            slug,
-            name: this.portName(port, localId) ?? slug,
-            localId,
-            localVersion: pin.installed_version,
-            remoteVersion: '',
-            state: 'remote-missing',
-          })
+    const results = await Promise.all(
+      pins.map(async (pin): Promise<TeamAssetUpdateInfo | null> => {
+        const slug = pin.slug
+        const remote = remoteBySlug.get(slug)
+        const localId = port.findInstalledLocalId(slug)
+        if (!remote) {
+          if (localId != null) {
+            return {
+              slug,
+              name: this.portName(port, localId) ?? slug,
+              localId,
+              localVersion: pin.installed_version,
+              remoteVersion: '',
+              state: 'remote-missing',
+            }
+          }
+          return null
         }
-        continue
-      }
-      if (localId == null) continue // 装过又删了/改了名 → 不算更新项
-      const localChecksum = port.buildPayload(localId)?.payload
-      const state = classifyTeamAssetState({
-        localChecksum: localChecksum ? computePayloadChecksum(localChecksum) : null,
-        installedChecksum: pin.installed_checksum,
-        installedVersion: pin.installed_version,
-        remoteVersion: remote.version,
-        remoteChecksum: remote.checksum,
-      })
-      results.push({
-        slug,
-        name: remote.name,
-        localId,
-        localVersion: pin.installed_version,
-        remoteVersion: remote.version,
-        state,
-      })
-    }
-    return results
+        if (localId == null) return null // 装过又删了/改了名 → 不算更新项
+        // 远端 checksum：版本详情回读（失败按空串处理，退化到版本号比对）
+        let remoteChecksum = ''
+        let remoteName = slug
+        try {
+          const vDetail = await client.getTeamAgentSpecVersion(remote.agentSpecName, remote.version)
+          const envelope = vDetail ? envelopeFromAgentSpecVersion(vDetail, assetType) : null
+          if (envelope) {
+            remoteChecksum = envelope.checksum
+            remoteName = envelope.name
+          }
+        } catch {
+          // 详情失败 → checksum 不可比，走版本号判定
+        }
+        const localPayload = port.buildPayload(localId)?.payload
+        const state = classifyTeamAssetState({
+          localChecksum: localPayload ? computePayloadChecksum(localPayload) : null,
+          installedChecksum: pin.installed_checksum,
+          installedVersion: pin.installed_version,
+          remoteVersion: remote.version,
+          remoteChecksum,
+        })
+        return {
+          slug,
+          name: remoteName,
+          localId,
+          localVersion: pin.installed_version,
+          remoteVersion: remote.version,
+          state,
+        }
+      }),
+    )
+    return results.filter((item): item is TeamAssetUpdateInfo => item != null)
   }
 
   private portName(port: TeamAssetPort, localId: string): string | null {

@@ -381,3 +381,38 @@ Nacos 配置大小参数（`nacos.config` 相关 max content 配置）或按上�
 - Agent 载荷不含 mcpServerIds（与文件导出一致：MCP id 是机器本地概念）；skillIds/ruleIds/
   workflowId 随包共享但依赖对方机器存在同 id 资产，发布弹窗有提示。
 - 配置中心信封上限 900KB（留余量于实测 1MB）；超限报错提示后续 gzip/MinIO 方向。
+
+
+## AgentSpec 原生承载迁移（2026-09-11 下午）
+
+> 状态: 已落地（本分支） | 最后核对: 2026-09-11
+
+用户裁决：工作流 / 平台 Agent / 子应用要像 Skill/MCP 一样在 Nacos 控制台有原生管理页，
+而不是配置中心里的裸 JSON。承载资源选定为 Nacos 原生 **AgentSpec**（Beta）：
+包格式 manifest.json + 资源文件 zip，控制台有独立管理页（版本生命周期 / 共享范围 /
+下载统计），与 Skill 管理页同级的体验。
+
+### 真机契约（192.168.163.174 测试机，全部实测）
+
+| 项 | 结论 |
+|---|---|
+| 条目身份 | 服务端以 manifest 的 `worker.suggested_name` 为身份（≠ manifest.name 时条目建到 suggested_name 名下，按 name 回读 404）——两者必须同值 |
+| 版本号 | **服务端自分配** 0.0.N 单调递增；上传包里的 manifest.version 不生效（仅展示） |
+| 上传 | POST /v3/console/ai/agentspecs/upload（multipart file+namespaceId）；条目不存在时自动创建（create 端点在当前 SNAPSHOT 上 500，无需依赖） |
+| 冲突 | 存在 editing/reviewing 版本时拒绝再传（code 20005）——生命周期走完才能发下一版 |
+| 生命周期 | submit → publish → online（POST + query 参数）；终态 online |
+| 共享范围 | PUT /agentspecs/scope（form：agentSpecName/scope）设 PUBLIC |
+| 内容回读 | GET /agentspecs/version 返回 manifest 原文 + 全部资源内容（资源键转义 /→_ 、.→__，以 resourceIdentifier/name 还原）——**上游无 zip 下载端点**（develop 分支源码核实），内容回读即安装/比对依据 |
+| x-spark 扩展 | manifest 自定义字段服务端原样保留，携带信封元数据（checksum/slug/assetType） |
+
+### 实现要点
+
+- `agentspec.ts`：信封 ⇄ zip 编解码；agentSpecName = `spark-<资产类型>-<slug>`；
+  版本以服务端分配为准（envelopeFromAgentSpecVersion 用 detail.version 优先）
+- `asset-service.ts`：三类资产运输从配置中心切到 AgentSpec；发布链路
+  upload → 回读 editingVersion → submit → publish → online → PUBLIC → pins；
+  防回退由服务端版本单调性天然保证（opts.version 仅回显 warning）
+- 信封形状（spark.team.asset.v1）/ 六态判定 / pins 锚点 / IPC / UI 全部不变——纯运输层替换
+- 迁移：5 条资产（1 工作流 + 4 应用）已重发为原生 AgentSpec（PUBLIC，v0.0.2，
+  checksum 字节级校验通过），5 条 SPARK_TEAM 裸配置已删除清零
+- 已知边界：V2 多文件子应用不支持（发布入口明确报错）；上游 AgentSpec 为 Beta

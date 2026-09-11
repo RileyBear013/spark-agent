@@ -16,6 +16,7 @@
  *   - 配置中心（cs/config）：工作流 / 子应用信封运输（M3/M4 用）
  *   - AI Skill 原生 API：技能推拉（M1.5 起为权威路径）
  *   - AI MCP 原生 API：MCP 推拉（M2）
+ *   - AI AgentSpec 原生 API：工作流 / 平台 Agent / 子应用信封承载（M3/M4 原生化）
  */
 
 import { fetchJson, HttpError } from '@spark/shared'
@@ -100,6 +101,38 @@ export interface TeamMcpDetail {
   description: string
   versions: TeamMcpVersionInfo[]
   serverSpecification: Record<string, unknown> | null
+  raw: Record<string, unknown>
+}
+
+/** AgentSpec 版本行（详情接口 data.versions 元素，宽容提取） */
+export interface TeamAgentSpecVersionRow {
+  version: string
+  /** draft → (submit) → (publish) → online；中间态透传 */
+  status: string
+  author: string | null
+}
+
+/** AgentSpec 详情（详情接口 data，宽容提取） */
+export interface TeamAgentSpecDetail {
+  name: string
+  description: string
+  scope: string
+  /** 最新已发布（online）版本（labels.latest）；null = 尚无发布版本 */
+  latestPublished: string | null
+  /** 当前草稿编辑版本（editingVersion） */
+  editingVersion: string | null
+  versions: TeamAgentSpecVersionRow[]
+  raw: Record<string, unknown>
+}
+
+/** AgentSpec 版本详情（manifest 原文 + 资源内容；上游无 zip 下载端点，内容回读为准） */
+export interface TeamAgentSpecVersionDetail {
+  name: string
+  version: string
+  /** manifest.json 原文（JSON 字符串） */
+  manifestRaw: string
+  /** 资源文件（相对路径由 resourceIdentifier/name 还原） */
+  resources: Array<{ path: string; content: string }>
   raw: Record<string, unknown>
 }
 
@@ -480,6 +513,105 @@ export class NacosClient {
     return res != null
   }
 
+  // ─── AI AgentSpec 原生 API（工作流 / 平台 Agent / 子应用承载） ──────
+
+/** 团队 AgentSpec 列表（控制台原生管理页同一数据源） */
+  async listTeamAgentSpecs(): Promise<Array<Record<string, unknown>>> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, pageNo: '1', pageSize: '200' })
+    const res = await this.apiRequest('GET', '/v3/console/ai/agentspecs/list', { query })
+    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
+      (item) => item != null && typeof item === 'object',
+    ) as Array<Record<string, unknown>>
+  }
+
+  /** AgentSpec 详情（含 versions[] 生命周期）；不存在返回 null */
+  async getTeamAgentSpec(agentSpecName: string): Promise<TeamAgentSpecDetail | null> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, agentSpecName })
+    try {
+      const res = await this.apiRequest('GET', '/v3/console/ai/agentspecs', { query })
+      const data = asRecord(getPath(res, 'data')) ?? asRecord(res)
+      if (!data) return null
+      return normalizeAgentSpecDetail(data, agentSpecName)
+    } catch (err) {
+      if (err instanceof NacosClientError && agentspecMissing(err)) return null
+      throw err
+    }
+  }
+
+  /**
+   * 上传 AgentSpec zip（服务端解析 manifest.json 建版本）。真机实测：条目不存在
+   * 时直接创建（无需先调 create——create 端点在当前 SNAPSHOT 上 500，不依赖）；
+   * 已存在且版本更新时生成新草稿版本。返回服务端确认的 agentSpecName。
+   */
+  async uploadTeamAgentSpecZip(args: { zip: Buffer; commitMsg?: string }): Promise<string> {
+    const extra: Record<string, string> = {}
+    if (args.commitMsg != null) extra.commitMsg = args.commitMsg
+    const res = await this.apiRequest('POST', '/v3/console/ai/agentspecs/upload', {
+      multipart: buildZipMultipart(args.zip, this.namespace, 'agentspec-package.zip', extra),
+    })
+    return pickString(res, ['data']) ?? ''
+  }
+
+  /** 草稿 → 提交审核（query 参数形态，真机核实） */
+  async submitTeamAgentSpecVersion(agentSpecName: string, version: string): Promise<void> {
+    await this.agentSpecAction('submit', agentSpecName, version)
+  }
+
+  /** 提交 → 发布（query 参数形态） */
+  async publishTeamAgentSpecVersion(agentSpecName: string, version: string): Promise<void> {
+    await this.agentSpecAction('publish', agentSpecName, version)
+  }
+
+  /** 发布 → 上线（query 参数形态）；终态拒绝由调用方容忍 */
+  async onlineTeamAgentSpecVersion(agentSpecName: string, version: string): Promise<void> {
+    await this.agentSpecAction('online', agentSpecName, version)
+  }
+
+  /** 下线（撤回共享时用） */
+  async offlineTeamAgentSpecVersion(agentSpecName: string, version: string): Promise<void> {
+    await this.agentSpecAction('offline', agentSpecName, version)
+  }
+
+  /** 共享范围：PRIVATE → PUBLIC（团队可见前提；真机核实为 PUT + form） */
+  async setTeamAgentSpecScope(agentSpecName: string, scope: 'PRIVATE' | 'PUBLIC'): Promise<void> {
+    await this.apiRequest('PUT', '/v3/console/ai/agentspecs/scope', {
+      form: { namespaceId: this.namespace, agentSpecName, scope },
+    })
+  }
+
+  /**
+   * 版本详情：manifest 原文 + 全部资源内容（安装/更新比对依据）。
+   * 不存在（条目或版本）返回 null。
+   */
+  async getTeamAgentSpecVersion(
+    agentSpecName: string,
+    version: string,
+  ): Promise<TeamAgentSpecVersionDetail | null> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, agentSpecName, version })
+    try {
+      const res = await this.apiRequest('GET', '/v3/console/ai/agentspecs/version', { query })
+      const data = asRecord(getPath(res, 'data'))
+      if (!data) return null
+      return normalizeAgentSpecVersionDetail(data, agentSpecName, version)
+    } catch (err) {
+      if (err instanceof NacosClientError && agentspecMissing(err)) return null
+      throw err
+    }
+  }
+
+  /** 删除整个 AgentSpec（清理/撤回用；调用方必须先取得用户确认） */
+  async deleteTeamAgentSpec(agentSpecName: string): Promise<boolean> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, agentSpecName })
+    const res = await this.apiRequest('DELETE', '/v3/console/ai/agentspecs', { query })
+    return res != null
+  }
+
+  private async agentSpecAction(action: string, agentSpecName: string, version: string): Promise<void> {
+    await this.apiRequest('POST', `/v3/console/ai/agentspecs/${action}`, {
+      query: new URLSearchParams({ namespaceId: this.namespace, agentSpecName, version }),
+    })
+  }
+
   // ─── 健康 ───────────────────────────────────────────────────────────
 
   /** 连接测试：探 /v3/console/server/state（只读、无需业务数据） */
@@ -675,19 +807,28 @@ function buildMultipartBody(parts: MultipartPart[], boundary: string): Buffer {
   return Buffer.concat(chunks)
 }
 
+/** 通用 zip multipart（skill / agentspec 上传共用） */
+function buildZipMultipart(
+  zip: Buffer,
+  namespaceId: string,
+  filename: string,
+  extra: Record<string, string> = {},
+): { body: Buffer; contentType: string } {
+  const boundary = `spark-team-${Math.abs(hashString(`${filename}-${zip.length}-${namespaceId}`))}-${partCounter++}`
+  const parts: MultipartPart[] = [
+    { name: 'file', value: zip, filename, contentType: 'application/zip' },
+    { name: 'namespaceId', value: namespaceId },
+  ]
+  for (const [key, value] of Object.entries(extra)) parts.push({ name: key, value })
+  return { body: buildMultipartBody(parts, boundary), contentType: `multipart/form-data; boundary=${boundary}` }
+}
+
 function buildSkillZipMultipart(
   zip: Buffer,
   namespaceId: string,
   extra: { overwrite?: string; commitMsg?: string } = {},
 ): { body: Buffer; contentType: string } {
-  const boundary = `spark-team-${Math.abs(hashString(`${zip.length}-${namespaceId}`))}-${partCounter++}`
-  const parts: MultipartPart[] = [
-    { name: 'file', value: zip, filename: 'skill-package.zip', contentType: 'application/zip' },
-    { name: 'namespaceId', value: namespaceId },
-  ]
-  if (extra.overwrite != null) parts.push({ name: 'overwrite', value: extra.overwrite })
-  if (extra.commitMsg != null) parts.push({ name: 'commitMsg', value: extra.commitMsg })
-  return { body: buildMultipartBody(parts, boundary), contentType: `multipart/form-data; boundary=${boundary}` }
+  return buildZipMultipart(zip, namespaceId, 'skill-package.zip', { ...extra })
 }
 
 let partCounter = 0
@@ -831,6 +972,73 @@ function normalizeConfigSummary(item: unknown): NacosConfigSummary | null {
   const modified = record.lastModifiedTime ?? record.modifiedTime ?? record.modifyTime
   if (typeof modified === 'number') out.modifiedTime = modified
   return out
+}
+
+function normalizeAgentSpecDetail(data: Record<string, unknown>, fallbackName: string): TeamAgentSpecDetail {
+  const versions = pickArray(data, ['versions'])
+    .map((v) => asRecord(v))
+    .filter((v): v is Record<string, unknown> => v != null)
+    .map((v) => ({
+      version: pickString(v, ['version']) ?? '',
+      status: pickString(v, ['status']) ?? '',
+      author: pickString(v, ['author']),
+    }))
+    .filter((v) => v.version)
+  const labels = asRecord(data.labels)
+  const out: TeamAgentSpecDetail = {
+    name: pickString(data, ['name', 'agentSpecName']) ?? fallbackName,
+    description: pickString(data, ['description']) ?? '',
+    scope: pickString(data, ['scope']) ?? 'PRIVATE',
+    latestPublished: labels ? pickString(labels, ['latest']) : null,
+    editingVersion: pickString(data, ['editingVersion']),
+    versions,
+    raw: data,
+  }
+  return out
+}
+
+function normalizeAgentSpecVersionDetail(
+  data: Record<string, unknown>,
+  fallbackName: string,
+  fallbackVersion: string,
+): TeamAgentSpecVersionDetail {
+  const resources: Array<{ path: string; content: string }> = []
+  const resourceMap = asRecord(data.resource)
+  if (resourceMap) {
+    for (const [key, value] of Object.entries(resourceMap)) {
+      const entry = asRecord(value)
+      if (!entry) continue
+      const content = pickString(entry, ['content'])
+      if (content == null) continue
+      // 服务端把资源键里的 / 与 . 转义（payload.json → payload__json）；
+      // 相对路径以 resourceIdentifier（子目录资源为 `res::path`）或 name 还原。
+      const identifier = pickString(entry, ['resourceIdentifier'])
+      const name = pickString(entry, ['name'])
+      const path =
+        identifier != null && identifier.includes('::')
+          ? identifier.slice(identifier.indexOf('::') + 2)
+          : (name ?? key)
+      resources.push({ path, content })
+    }
+  }
+  const out: TeamAgentSpecVersionDetail = {
+    name: pickString(data, ['name']) ?? fallbackName,
+    version: fallbackVersion,
+    manifestRaw: pickString(data, ['content']) ?? '',
+    resources,
+    raw: data,
+  }
+  return out
+}
+
+/** AgentSpec / 版本不存在的确定语义（详情与版本详情接口） */
+function agentspecMissing(err: NacosClientError): boolean {
+  return (
+    err.statusCode === 404 ||
+    err.nacosCode === 404 ||
+    /agents?\s?spec.{0,24}not exist|agentspecname not exist|agent spec.{0,24}不存在/i.test(err.message) ||
+    /not exist|不存在/i.test(err.message)
+  )
 }
 
 function isNotFound(err: NacosClientError): boolean {
