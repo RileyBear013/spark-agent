@@ -18,6 +18,7 @@ import type {
 } from '@spark/protocol'
 import { useIpcInvoke } from '../hooks/useIpc'
 import { useToast } from '../components/Toast'
+import { TeamVersionsModal } from './TeamAssetMarket'
 import './McpTeamMarket.less'
 
 function describeError(err: unknown): string {
@@ -32,6 +33,7 @@ export function TeamMcpSection({ onInstalled }: { onInstalled: () => void }) {
   const { invoke: listMcp } = useIpcInvoke('team-registry:list-mcp')
   const { invoke: installMcp } = useIpcInvoke('team-registry:install-mcp')
   const { invoke: listMcpUpdates } = useIpcInvoke('team-registry:list-mcp-updates')
+  const { invoke: listMcpVersions } = useIpcInvoke('team-registry:list-mcp-versions')
   const { toast } = useToast()
 
   const [open, setOpen] = useState(false)
@@ -41,6 +43,7 @@ export function TeamMcpSection({ onInstalled }: { onInstalled: () => void }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [installingSlugs, setInstallingSlugs] = useState<Set<string>>(new Set())
+  const [versionsFor, setVersionsFor] = useState<TeamRegistryMcpListItemDto | null>(null)
   const reloadToken = useRef(0)
 
   const reload = useCallback(async () => {
@@ -76,10 +79,13 @@ export function TeamMcpSection({ onInstalled }: { onInstalled: () => void }) {
     void reload()
   }, [reload])
 
-  const handleInstall = async (server: TeamRegistryMcpListItemDto) => {
+  const handleInstall = async (server: TeamRegistryMcpListItemDto, version?: string) => {
     setInstallingSlugs((prev) => new Set(prev).add(server.slug))
     try {
-      const res = await installMcp({ slug: server.slug })
+      const res = await installMcp({
+        slug: server.slug,
+        ...(version != null && version !== '' ? { version } : {}),
+      })
       toast.success(
         `已安装团队 MCP：${server.slug} v${res.version}${res.requiresRestart ? '（重连或重启后生效）' : ''}`,
       )
@@ -164,6 +170,9 @@ export function TeamMcpSection({ onInstalled }: { onInstalled: () => void }) {
                       )}
                     </div>
                     <div className="mcp-team-item-actions">
+                      <Button size="small" type="text" onClick={() => setVersionsFor(server)}>
+                        版本
+                      </Button>
                       {busy ? (
                         <span className="mcp-team-item-version">安装中…</span>
                       ) : installed ? (
@@ -193,6 +202,26 @@ export function TeamMcpSection({ onInstalled }: { onInstalled: () => void }) {
           )}
         </div>
       )}
+
+      <TeamVersionsModal
+        open={versionsFor != null}
+        title={`团队 MCP 版本 · ${versionsFor?.slug ?? ''}`}
+        currentVersion={versionsFor ? (updates[versionsFor.slug]?.localVersion ?? null) : null}
+        fetchVersions={async () => {
+          if (!versionsFor) return []
+          const res = await listMcpVersions({ slug: versionsFor.slug })
+          return res.versions
+        }}
+        onInstall={async (v) => {
+          if (!versionsFor) return
+          await handleInstall(versionsFor, v)
+        }}
+        onClose={() => setVersionsFor(null)}
+        onInstalled={async () => {
+          await reload()
+          onInstalled()
+        }}
+      />
     </div>
   )
 }

@@ -100,6 +100,7 @@ import type { ImportProviderResolution } from '../services/HistoryImport/History
 import { registerAuthIpc } from '../services/Auth/registerAuthIpc.js'
 import { registerAccountSyncIpc } from '../services/AccountSync/registerAccountSyncIpc.js'
 import { isCommand, parseCommand } from '@spark/agent-runtime'
+import { listInstallableTeamVersions, toVersionInfos } from '@spark/agent-runtime'
 import {
   EventRepository,
   ProviderProfileRepository,
@@ -7789,14 +7790,22 @@ export function registerAllIpcHandlers(): void {
   }))
 
   typedIpcHandle('team-registry:install-skill', async (req) => runTeamRegistryTask(async () => {
-    log.info(`team-registry:install-skill requested, slug=${req.slug}`)
-    const skill = await getSkillRegistryService().installFromTeam(req.slug)
+    log.info(`team-registry:install-skill requested, slug=${req.slug}, version=${req.version ?? 'latest'}`)
+    const skill = await getSkillRegistryService().installFromTeam(req.slug, {
+      ...(req.version !== undefined ? { version: req.version } : {}),
+    })
     return { skill }
   }))
 
   typedIpcHandle('team-registry:list-updates', async () => runTeamRegistryTask(async () => {
     const updates = await getSkillRegistryService().listTeamUpdates()
     return { updates }
+  }))
+  typedIpcHandle('team-registry:list-skill-versions', async (req) => runTeamRegistryTask(async () => {
+    const client = await getTeamRegistryService().client()
+    if (!client) return { versions: [] }
+    const detail = await client.getTeamSkill(req.slug)
+    return { versions: listInstallableTeamVersions(toVersionInfos(detail?.versions ?? [])).map((v) => ({ ...v, author: null })) }
   }))
 
   typedIpcHandle('team-registry:list-mcp', async () => runTeamRegistryTask(async () => {
@@ -7820,14 +7829,22 @@ export function registerAllIpcHandlers(): void {
   }))
 
   typedIpcHandle('team-registry:install-mcp', async (req) => runTeamRegistryTask(async () => {
-    log.info(`team-registry:install-mcp requested, slug=${req.slug}`)
-    const result = await getTeamMcpService().installFromTeam(req.slug)
+    log.info(`team-registry:install-mcp requested, slug=${req.slug}, version=${req.version ?? 'latest'}`)
+    const result = await getTeamMcpService().installFromTeam(req.slug, {
+      ...(req.version !== undefined ? { version: req.version } : {}),
+    })
     return result
   }))
 
   typedIpcHandle('team-registry:list-mcp-updates', async () => runTeamRegistryTask(async () => {
     const updates = await getTeamMcpService().listTeamUpdates()
     return { updates }
+  }))
+  typedIpcHandle('team-registry:list-mcp-versions', async (req) => runTeamRegistryTask(async () => {
+    const client = await getTeamRegistryService().client()
+    if (!client) return { versions: [] }
+    const detail = await client.getTeamMcpServer(req.slug)
+    return { versions: detail ? listInstallableTeamVersions(detail.versions).map((v) => ({ ...v, author: null })) : [] }
   }))
 
   typedIpcHandle('team-registry:config-history', async (req) => runTeamRegistryTask(async () => {

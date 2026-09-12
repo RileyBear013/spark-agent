@@ -17,7 +17,7 @@ import crypto from 'node:crypto'
 
 import type { TeamAssetPinsRepository } from '@spark/storage'
 
-import { pickLatestTeamVersion } from './index.js'
+import { listInstallableTeamVersions, pickLatestTeamVersion } from './index.js'
 import {
   agentSpecNameFor,
   buildAgentSpecPackage,
@@ -104,6 +104,13 @@ export interface TeamAssetUpdateInfo {
   localVersion: string | null
   remoteVersion: string
   state: TeamAssetState
+}
+
+/** 团队资产版本行（安装历史版本 / 回滚选择；仅含已发布可安装版本） */
+export interface TeamAssetVersionInfo {
+  version: string
+  status: string
+  author: string | null
 }
 
 export interface TeamAssetPublishResult {
@@ -325,7 +332,11 @@ export class TeamAssetService {
   /**
    * 从团队注册中心安装/更新资产（落地经端口；副作用由 handler 层补触发）。
    */
-  async installFromTeam(assetType: EnvelopeAssetType, slug: string): Promise<TeamAssetInstallResult> {
+  async installFromTeam(
+    assetType: EnvelopeAssetType,
+    slug: string,
+    opts: { version?: string } = {},
+  ): Promise<TeamAssetInstallResult> {
     if (!slug || slug.includes('/') || slug.includes('\\') || slug.includes('..')) {
       throw new Error(`非法的资产 slug：${slug}`)
     }
@@ -335,9 +346,23 @@ export class TeamAssetService {
     if (!detail) {
       throw new Error(`团队注册中心中不存在该资产：${assetType}/${slug}`)
     }
-    const version = pickLatestTeamVersion(detail.versions)
-    if (!version) {
-      throw new Error(`团队资产尚无已发布版本：${assetType}/${slug}`)
+    // 显式版本（安装历史版本/回滚）必须落在已发布版本集合内；缺省取最新已发布
+    let version: string
+    if (opts.version?.trim()) {
+      const wanted = opts.version.trim()
+      const row = detail.versions.find((v) => v.version === wanted)
+      if (!row || !/online|publish/i.test(row.status)) {
+        throw new Error(
+          `资产 ${assetType}/${slug} 不存在可安装的版本 ${wanted}（仅已发布版本可安装/回滚）`,
+        )
+      }
+      version = wanted
+    } else {
+      const latest = pickLatestTeamVersion(detail.versions)
+      if (!latest) {
+        throw new Error(`团队资产尚无已发布版本：${assetType}/${slug}`)
+      }
+      version = latest
     }
     const versionDetail = await client.getTeamAgentSpecVersion(agentSpecName, version)
     const envelope = versionDetail ? envelopeFromAgentSpecVersion(versionDetail, assetType) : null
@@ -443,6 +468,28 @@ export class TeamAssetService {
       }),
     )
     return results.filter((item): item is TeamAssetUpdateInfo => item != null)
+  }
+
+  /**
+   * 团队资产的可安装版本列表（已发布终态，semver 降序）——安装历史版本/回滚用。
+   */
+  async listTeamAssetVersions(
+    assetType: EnvelopeAssetType,
+    slug: string,
+  ): Promise<TeamAssetVersionInfo[]> {
+    if (!slug || slug.includes('/') || slug.includes('\\') || slug.includes('..')) {
+      throw new Error(`非法的资产 slug：${slug}`)
+    }
+    const client = await this.configStore.buildClient()
+    if (!client) return []
+    const agentSpecName = agentSpecNameFor(assetType, slug)
+    const detail = await client.getTeamAgentSpec(agentSpecName)
+    if (!detail) return []
+    return listInstallableTeamVersions(detail.versions).map((v) => ({
+      version: v.version,
+      status: v.status,
+      author: v.author,
+    }))
   }
 
   private async portName(port: TeamAssetPort, localId: string): Promise<string | null> {

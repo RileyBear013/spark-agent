@@ -1197,10 +1197,10 @@ export class SkillRegistryService {
 
   /**
    * 从团队源安装/更新一个技能（原生 zip API，M1.5）。
-   * 下载最新已发布版本 zip → 解包 → 落盘文件树 →
-   * upsert DB 行（registry_id=team）→ 记录 pins 锚点。
+   * 下载 zip（缺省最新已发布版本；opts.version 指定历史版本/回滚）→ 解包 →
+   * 落盘文件树 → upsert DB 行（registry_id=team）→ 记录 pins 锚点。
    */
-  async installFromTeam(slug: string): Promise<SkillItem> {
+  async installFromTeam(slug: string, opts: { version?: string } = {}): Promise<SkillItem> {
     if (!slug) throw new Error('团队技能 slug 不能为空')
     if (!this.userSkillsDir) {
       throw new Error('User skills directory not configured; cannot install')
@@ -1210,8 +1210,20 @@ export class SkillRegistryService {
     if (!client) throw new Error('团队注册中心尚未配置，无法安装')
     const detail = await client.getTeamSkill(slug)
     if (!detail) throw new Error('团队源中不存在该技能：' + slug)
-    const version = pickLatestTeamVersion(detail.versions)
-    if (!version) throw new Error('技能 ' + slug + ' 没有已发布版本，无法安装')
+    // 显式版本（安装历史版本/回滚）必须落在已发布版本集合内；缺省取最新已发布
+    let version: string
+    if (opts.version?.trim()) {
+      const wanted = opts.version.trim()
+      const row = detail.versions.find((v) => v.version === wanted)
+      if (!row || !/online|publish/i.test(row.status)) {
+        throw new Error('技能 ' + slug + ' 不存在可安装的版本 ' + wanted + '（仅已发布版本可安装/回滚）')
+      }
+      version = wanted
+    } else {
+      const latest = pickLatestTeamVersion(detail.versions)
+      if (!latest) throw new Error('技能 ' + slug + ' 没有已发布版本，无法安装')
+      version = latest
+    }
     const zip = await client.downloadTeamSkillVersion(slug, version)
     const files: TeamSkillFile[] = stripZipCommonRoot(readZip(zip))
       .filter((e) => !e.path.endsWith('/'))

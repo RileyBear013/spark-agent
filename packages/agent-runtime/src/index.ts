@@ -325,7 +325,7 @@ export type {
   CommandListItem,
 } from './core/index.js'
 export { TeamRegistryService, collectSkillFiles } from './services/team-registry/index.js'
-export { TeamMcpService, mcpSlugOf, pickLatestTeamVersion } from './services/team-registry/index.js'
+export { TeamMcpService, mcpSlugOf, pickLatestTeamVersion, listInstallableTeamVersions, toVersionInfos } from './services/team-registry/index.js'
 export {
   TeamAssetService,
   slugifyAssetName,

@@ -488,3 +488,22 @@ MCP、Agent 都没有」的空机器上一键安装即可运行，不依赖本�
 服务端自增版本），逐条回读校验 checksum 与捆绑清单。依赖收集确认：9 个工作流
 均为内联 prompt 的 agent 节点流（零外部引用，天然自包含）；「发布巡检中心」
 HTML 源码扫描发现引用 hq-static-db，自动随包捆绑 1 个脱敏 MCP 配置。
+
+
+## v2.2 版本管理加深（2026-09-12）
+
+状态行：已落地（真机探针通过）。
+
+- **安装历史版本/回滚**：installFromTeam 支持 opts.version（信封三资产 / 技能 / MCP 全覆盖），
+  指定版本必须落在已发布版本集合内（draft/不存在版本明确拒绝）；缺省仍为最新已发布。
+- **版本列表**：TeamAssetService.listTeamAssetVersions + team-registry:list-{asset,skill,mcp}-versions
+  三个通道；统一 listInstallableTeamVersions（online/publish 终态，semver 降序）。
+- **UI**：TeamVersionsModal（三市场组件共用）——条目「版本」按钮 → 版本列表（状态/作者/当前版本标注）
+  → 逐版本安装/回滚；回滚后六态判定显示「可更新」（回归最新一键完成）。
+- **发布弹窗修正**：信封资产发布弹窗移除版本号输入（AgentSpec 由服务端自分配 0.0.N，
+  输入不生效）；技能/MCP 发布弹窗保留版本输入（其协议版本生效）。
+- **真机形态补记**：MCP allVersions 行无 status，以 release_date 有值为已发布信号
+  （normalizeMcpDetail 合成 published）；MCP 版本级详情端点 /v3/console/ai/mcp/version
+  返回该版本 serverSpecification（安装历史版本的内容源）。
+- **验证**：单测 43/43；真机探针 2/2（工作流四版本发布→指定 0.0.1 安装→remote-newer→
+  重装最新 up-to-date；MCP 两版本发布→版本列表→版本详情回读→指定 0.0.1 安装→pins 校验）。

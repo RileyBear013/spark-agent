@@ -559,8 +559,12 @@ export function registerTeamAssetIpc(deps: TeamAssetIpcDeps): void {
 
   typedIpcHandle('team-registry:install-asset', async (req) =>
     runAssetTask(async () => {
-      log.info(`team-registry:install-asset requested, assetType=${req.assetType}, slug=${req.slug}`)
-      const result = await service().installFromTeam(req.assetType, req.slug)
+      log.info(
+        `team-registry:install-asset requested, assetType=${req.assetType}, slug=${req.slug}, version=${req.version ?? 'latest'}`,
+      )
+      const result = await service().installFromTeam(req.assetType, req.slug, {
+        ...(req.version !== undefined ? { version: req.version } : {}),
+      })
       // 主资产为 Agent：补运行时副作用（提示词/技能配置刷新 + 变更广播）
       if (req.assetType === 'agent') {
         const agent = new AgentRepository(db).get(result.localId)
@@ -595,6 +599,12 @@ export function registerTeamAssetIpc(deps: TeamAssetIpcDeps): void {
     runAssetTask(async () => {
       const updates = await service().listTeamUpdates(req.assetType)
       return { updates }
+    }),
+  )
+  typedIpcHandle('team-registry:list-asset-versions', async (req) =>
+    runAssetTask(async () => {
+      const versions = await service().listTeamAssetVersions(req.assetType, req.slug)
+      return { versions }
     }),
   )
 }

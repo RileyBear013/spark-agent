@@ -478,6 +478,23 @@ export class NacosClient {
   }
 
   /**
+   * MCP 版本级详情（该版本的 serverSpecification；顶层详情恒为最新发布版本）。
+   * 路由已在真机核实存在（虚构名称返回业务 404 而非网关 No static resource）。
+   */
+  async getTeamMcpVersion(mcpName: string, version: string): Promise<Record<string, unknown> | null> {
+    const query = new URLSearchParams({ namespaceId: this.namespace, mcpName, version })
+    try {
+      const res = await this.apiRequest('GET', '/v3/console/ai/mcp/version', { query })
+      return getPath(res, 'data') != null && typeof getPath(res, 'data') === 'object'
+        ? (getPath(res, 'data') as Record<string, unknown>)
+        : asRecord(res)
+    } catch (err) {
+      if (err instanceof NacosClientError && mcpMissing(err)) return null
+      throw err
+    }
+  }
+
+  /**
    * 创建 MCP 草稿（form）。
    *
    * ⚠️ 孤儿行陷阱（真机复现）：spec 校验不过时 server 行已建、version 行缺失，
@@ -925,7 +942,11 @@ function normalizeMcpDetail(data: Record<string, unknown>, fallbackName: string)
     .filter((v): v is Record<string, unknown> => v != null)
     .map((v) => ({
       version: pickString(v, ['version']) ?? '',
-      status: pickString(v, ['status']) ?? '',
+      // 真机形态：allVersions 行无 status；「已发布」以 release_date 有值为信号
+      //（草稿行无 release_date），合成 published 供版本过滤/安装校验使用。
+      status:
+        pickString(v, ['status']) ??
+        (pickString(v, ['release_date']) != null ? 'published' : ''),
     }))
     .filter((v) => v.version)
   const explicitSpec = asRecord(data.serverSpecification)

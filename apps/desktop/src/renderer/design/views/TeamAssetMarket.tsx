@@ -9,12 +9,13 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Modal } from 'antd'
-import { Button, Input, Tag } from '@lobehub/ui'
+import { Button, Tag } from '@lobehub/ui'
 import { Icons } from '../Icons'
 import type {
   TeamRegistryAssetListItemDto,
   TeamRegistryAssetTypeDto,
   TeamRegistryAssetUpdateItemDto,
+  TeamRegistryVersionItemDto,
 } from '@spark/protocol'
 import { useIpcInvoke } from '../hooks/useIpc'
 import { useToast } from '../components/Toast'
@@ -44,6 +45,7 @@ export function TeamAssetSection({
   const { invoke: listAssets } = useIpcInvoke('team-registry:list-assets')
   const { invoke: installAsset } = useIpcInvoke('team-registry:install-asset')
   const { invoke: listUpdates } = useIpcInvoke('team-registry:list-asset-updates')
+  const { invoke: listVersions } = useIpcInvoke('team-registry:list-asset-versions')
   const { toast } = useToast()
 
   const [open, setOpen] = useState(false)
@@ -53,6 +55,7 @@ export function TeamAssetSection({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [installingSlugs, setInstallingSlugs] = useState<Set<string>>(new Set())
+  const [versionsFor, setVersionsFor] = useState<TeamRegistryAssetListItemDto | null>(null)
   const reloadToken = useRef(0)
 
   const label = ASSET_TYPE_LABEL[assetType]
@@ -92,10 +95,14 @@ export function TeamAssetSection({
     void reload()
   }, [reload])
 
-  const handleInstall = async (item: TeamRegistryAssetListItemDto) => {
+  const handleInstall = async (item: TeamRegistryAssetListItemDto, version?: string) => {
     setInstallingSlugs((prev) => new Set(prev).add(item.slug))
     try {
-      const res = await installAsset({ assetType, slug: item.slug })
+      const res = await installAsset({
+        assetType,
+        slug: item.slug,
+        ...(version != null && version !== '' ? { version } : {}),
+      })
       toast.success(
         `已安装团队${label}：${res.name} v${res.version}${
           res.updatedExisting ? '（已更新本地版本）' : ''
@@ -189,6 +196,9 @@ export function TeamAssetSection({
                       )}
                     </div>
                     <div className="mcp-team-item-actions">
+                      <Button size="small" type="text" onClick={() => setVersionsFor(item)}>
+                        版本
+                      </Button>
                       {busy ? (
                         <span className="mcp-team-item-version">安装中…</span>
                       ) : installed ? (
@@ -218,6 +228,26 @@ export function TeamAssetSection({
           )}
         </div>
       )}
+
+      <TeamVersionsModal
+        open={versionsFor != null}
+        title={`团队${label}版本 · ${versionsFor?.name ?? ''}`}
+        currentVersion={versionsFor ? (updates[versionsFor.slug]?.localVersion ?? null) : null}
+        fetchVersions={async () => {
+          if (!versionsFor) return []
+          const res = await listVersions({ assetType, slug: versionsFor.slug })
+          return res.versions
+        }}
+        onInstall={async (v) => {
+          if (!versionsFor) return
+          await handleInstall(versionsFor, v)
+        }}
+        onClose={() => setVersionsFor(null)}
+        onInstalled={async () => {
+          await reload()
+          onInstalled?.()
+        }}
+      />
     </div>
   )
 }
@@ -253,7 +283,6 @@ export function TeamAssetPublishModal({
 }) {
   const { invoke: publishAsset } = useIpcInvoke('team-registry:publish-asset')
   const { toast } = useToast()
-  const [version, setVersion] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<AssetPublishResultView | null>(null)
@@ -262,7 +291,6 @@ export function TeamAssetPublishModal({
 
   useEffect(() => {
     if (open) {
-      setVersion('')
       setError('')
       setResult(null)
     }
@@ -273,11 +301,7 @@ export function TeamAssetPublishModal({
     setBusy(true)
     setError('')
     try {
-      const res = await publishAsset({
-        assetType,
-        localId,
-        ...(version.trim() !== '' ? { version: version.trim() } : {}),
-      })
+      const res = await publishAsset({ assetType, localId })
       setResult(res)
       toast.success(`已发布到团队：${res.name} v${res.version}`)
       onPublished()
@@ -323,15 +347,9 @@ export function TeamAssetPublishModal({
             {hint != null && hint !== '' ? <br /> : null}
             {hint}
           </p>
-          <label className="mcp-team-publish-field">
-            <span>版本号（留空自动递增 patch 位，首发为 1.0.0）</span>
-            <Input
-              value={version}
-              onChange={(e) => setVersion(e.target.value)}
-              placeholder="如 1.0.1（留空自动）"
-              autoComplete="off"
-            />
-          </label>
+          <p className="mcp-team-publish-hint">
+            版本号由注册中心自动分配（0.0.N 单调递增）；发布后团队成员可在「版本」列表安装任意历史版本。
+          </p>
           {error !== '' && <div className="mcp-team-publish-error">{error}</div>}
         </div>
       ) : (
@@ -354,6 +372,125 @@ export function TeamAssetPublishModal({
               {warning}
             </div>
           ))}
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+
+// ─── 团队资产版本列表弹窗（安装历史版本 / 回滚；各团队区块共用） ─────────
+
+export function TeamVersionsModal({
+  open,
+  title,
+  currentVersion,
+  fetchVersions,
+  onInstall,
+  onClose,
+  onInstalled,
+}: {
+  open: boolean
+  title: string
+  /** 本地当前安装版本（null = 未安装）；与行版本相同则该行禁用并标注当前版本 */
+  currentVersion: string | null
+  fetchVersions: () => Promise<TeamRegistryVersionItemDto[]>
+  onInstall: (version: string) => Promise<void>
+  onClose: () => void
+  /** 安装成功后的父组件联动刷新 */
+  onInstalled?: () => void
+}) {
+  const { toast } = useToast()
+  const [versions, setVersions] = useState<TeamRegistryVersionItemDto[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [busyVersion, setBusyVersion] = useState<string | null>(null)
+  const reloadToken = useRef(0)
+
+  useEffect(() => {
+    if (!open) return
+    const token = ++reloadToken.current
+    setLoading(true)
+    setError('')
+    setVersions([])
+    fetchVersions()
+      .then((rows) => {
+        if (token === reloadToken.current) setVersions(rows)
+      })
+      .catch((err) => {
+        if (token === reloadToken.current) setError(describeError(err))
+      })
+      .finally(() => {
+        if (token === reloadToken.current) setLoading(false)
+      })
+    // fetchVersions 随选中资产变化，重置效应只依赖 open
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const handleInstall = async (version: string) => {
+    setBusyVersion(version)
+    try {
+      await onInstall(version)
+      toast.success(`已安装版本 v${version}`)
+      onInstalled?.()
+      onClose()
+    } catch (err) {
+      toast.error(`安装 v${version} 失败：${describeError(err)}`)
+    } finally {
+      setBusyVersion(null)
+    }
+  }
+
+  return (
+    <Modal
+      title={title}
+      open={open}
+      width="min(520px, 92vw)"
+      centered
+      destroyOnClose
+      onCancel={onClose}
+      footer={null}
+    >
+      {loading ? (
+        <div className="mcp-team-empty">加载版本列表…</div>
+      ) : error !== '' ? (
+        <div className="mcp-team-error">版本列表加载失败：{error}</div>
+      ) : versions.length === 0 ? (
+        <div className="mcp-team-empty">该资产还没有已发布版本。</div>
+      ) : (
+        <div className="mcp-team-list">
+          {versions.map((row) => {
+            const isCurrent = currentVersion != null && currentVersion === row.version
+            const busy = busyVersion === row.version
+            return (
+              <div key={row.version} className="mcp-team-item">
+                <div className="mcp-team-item-info">
+                  <div className="mcp-team-item-name">
+                    v{row.version}
+                    <span className="mcp-team-item-version">
+                      {/online/i.test(row.status) ? '已上线' : '已发布'}
+                    </span>
+                    {isCurrent && <span className="mcp-team-item-version">当前版本</span>}
+                    {row.author && <span className="mcp-team-item-version">by {row.author}</span>}
+                  </div>
+                </div>
+                <div className="mcp-team-item-actions">
+                  {busy ? (
+                    <span className="mcp-team-item-version">安装中…</span>
+                  ) : (
+                    <Button
+                      size="small"
+                      type={isCurrent ? 'default' : 'primary'}
+                      disabled={isCurrent}
+                      onClick={() => void handleInstall(row.version)}
+                    >
+                      {isCurrent ? '当前版本' : '安装此版本'}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </Modal>

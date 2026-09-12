@@ -2640,6 +2640,8 @@ export interface TeamRegistryPublishSkillResponse {
 
 export interface TeamRegistryInstallSkillRequest {
   slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
 }
 
 export interface TeamRegistryInstallSkillResponse {
@@ -2707,6 +2709,8 @@ export interface TeamRegistryPublishMcpResponse {
 
 export interface TeamRegistryInstallMcpRequest {
   slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
 }
 
 export interface TeamRegistryInstallMcpResponse {
@@ -2775,6 +2779,8 @@ export interface TeamRegistryPublishAssetResponse {
 export interface TeamRegistryInstallAssetRequest {
   assetType: TeamRegistryAssetTypeDto
   slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
 }
 
 export interface TeamRegistryInstallAssetResponse {
@@ -2803,6 +2809,37 @@ export interface TeamRegistryListAssetUpdatesRequest {
 
 export interface TeamRegistryListAssetUpdatesResponse {
   updates: TeamRegistryAssetUpdateItemDto[]
+}
+/** 团队资产版本行（安装历史版本 / 回滚选择；仅含已发布可安装版本） */
+export interface TeamRegistryVersionItemDto {
+  version: string
+  status: string
+  author: string | null
+}
+
+export interface TeamRegistryListAssetVersionsRequest {
+  assetType: TeamRegistryAssetTypeDto
+  slug: string
+}
+
+export interface TeamRegistryListAssetVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
+}
+
+export interface TeamRegistryListSkillVersionsRequest {
+  slug: string
+}
+
+export interface TeamRegistryListSkillVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
+}
+
+export interface TeamRegistryListMcpVersionsRequest {
+  slug: string
+}
+
+export interface TeamRegistryListMcpVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
 }
 
 // ─── Installable Skill Catalog（内置可安装技能卡片） ─────────────────────
@@ -7075,6 +7112,18 @@ export interface IpcChannelMap
   'team-registry:list-mcp-updates': [
     TeamRegistryListMcpUpdatesRequest,
     TeamRegistryListMcpUpdatesResponse
+  ]
+  'team-registry:list-asset-versions': [
+    TeamRegistryListAssetVersionsRequest,
+    TeamRegistryListAssetVersionsResponse
+  ]
+  'team-registry:list-skill-versions': [
+    TeamRegistryListSkillVersionsRequest,
+    TeamRegistryListSkillVersionsResponse
+  ]
+  'team-registry:list-mcp-versions': [
+    TeamRegistryListMcpVersionsRequest,
+    TeamRegistryListMcpVersionsResponse
   ]
   'team-registry:list-assets': [
     TeamRegistryListAssetsRequest,

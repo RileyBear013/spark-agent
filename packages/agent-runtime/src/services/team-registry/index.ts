@@ -430,24 +430,54 @@ export class TeamMcpService {
    * 从团队注册中心安装/更新 MCP（写 mcp_servers 行；启动/重连归 McpService）。
    * @param slug 团队 MCP 名
    */
-  async installFromTeam(slug: string): Promise<TeamMcpInstallResult> {
+  async installFromTeam(
+    slug: string,
+    opts: { version?: string } = {},
+  ): Promise<TeamMcpInstallResult> {
     if (!slug || slug.includes('/') || slug.includes('\\') || slug.includes('..')) {
       throw new Error(`非法的 MCP slug：${slug}`)
     }
     const client = await this.requireClient()
     const detail = await client.getTeamMcpServer(slug)
     if (!detail) throw new Error(`团队注册中心中不存在该 MCP：${slug}`)
-    const version = latestPublishedVersion(detail.versions.map((v) => v.version))
-    if (!version) throw new Error(`MCP ${slug} 没有已发布版本`)
+    // 显式版本（安装历史版本/回滚）必须落在已发布版本集合内；缺省取最新已发布
+    let version: string
+    if (opts.version?.trim()) {
+      const wanted = opts.version.trim()
+      const row = detail.versions.find((v) => v.version === wanted)
+      if (!row || !/online|publish/i.test(row.status)) {
+        throw new Error(`MCP ${slug} 不存在可安装的版本 ${wanted}（仅已发布版本可安装/回滚）`)
+      }
+      version = wanted
+    } else {
+      const latest = latestPublishedVersion(detail.versions.map((v) => v.version))
+      if (!latest) throw new Error(`MCP ${slug} 没有已发布版本`)
+      version = latest
+    }
 
-    const spec = detail.serverSpecification
+    // 指定版本时以版本级详情为准（顶层 serverSpecification 恒为最新发布版本）
+    let spec = detail.serverSpecification
+    let endpointSpec: Record<string, unknown> | null =
+      detail.raw.endpointSpecification != null && typeof detail.raw.endpointSpecification === 'object'
+        ? (detail.raw.endpointSpecification as Record<string, unknown>)
+        : null
+    if (opts.version?.trim()) {
+      const versionRaw = await client.getTeamMcpVersion(slug, version)
+      const versionSpec = versionRaw?.serverSpecification
+      if (versionSpec == null || typeof versionSpec !== 'object') {
+        throw new Error(`MCP ${slug} v${version} 版本内容缺少 serverSpecification，无法安装`)
+      }
+      spec = versionSpec as Record<string, unknown>
+      const versionEndpoint = versionRaw?.endpointSpecification
+      if (versionEndpoint != null && typeof versionEndpoint === 'object') {
+        endpointSpec = versionEndpoint as Record<string, unknown>
+      }
+    }
     if (!spec) throw new Error(`MCP ${slug} 详情缺少 serverSpecification，无法安装`)
     // endpointSpecification 可能与 serverSpecification 平级，合并后交给映射器
     const mergedSpec = {
       ...spec,
-      ...(detail.raw.endpointSpecification != null
-        ? { endpointSpecification: detail.raw.endpointSpecification }
-        : {}),
+      ...(endpointSpec != null ? { endpointSpecification: endpointSpec } : {}),
     }
     const configJson = specToLocalConfigJson(mergedSpec)
     if (!configJson) {
@@ -601,6 +631,18 @@ export function pickLatestTeamVersion(
   const pool = online.length > 0 ? online : nonDraft.length > 0 ? nonDraft : all
   if (pool.length === 0) return null
   return pool.reduce((a, b) => (compareSemver(b.version, a.version) > 0 ? b : a)).version
+}
+
+/**
+ * 版本列表中的「可安装」版本（online/publish 终态），按 semver 降序。
+ * 安装历史版本/回滚 UI 与各 version-list 通道共用。
+ */
+export function listInstallableTeamVersions<T extends { version: string; status: string }>(
+  versions: T[],
+): T[] {
+  return versions
+    .filter((v) => /^\d/.test(v.version) && /online|publish/i.test(v.status))
+    .sort((a, b) => compareSemver(b.version, a.version))
 }
 
 /** 把团队版本行数组归一为 {version,status}（宽容） */

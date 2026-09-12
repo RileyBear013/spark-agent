@@ -466,3 +466,57 @@ describe('TeamAssetService.listTeamUpdates', () => {
     expect(await bare.listTeamAssets('workflow')).toEqual([])
   })
 })
+
+
+// ─── 版本管理：可安装版本列表 + 指定版本安装/回滚 ────────────────────────
+
+describe('TeamAssetService 版本管理', () => {
+  function setup() {
+    const bundle = makeWorkflowPort([{ id: 'wf1', name: '流程' }])
+    const { service, pins, server } = makeService(undefined, bundle.port)
+    return { service, pins, server, items: bundle.items }
+  }
+
+  it('listTeamAssetVersions 只返回已发布版本并按 semver 降序', async () => {
+    const { service, server } = setup()
+    await service.publishToTeam('workflow', 'wf1', {})
+    await service.publishToTeam('workflow', 'wf1', {})
+    const slug = slugifyAssetName('流程', 'wf')
+    const spec = server.specs.get(agentSpecNameFor('workflow', slug))
+    // 手工塞一个 draft 版本——非发布态不应出现在可安装列表
+    spec?.versions.set('0.0.3', { status: 'draft', manifestRaw: '{}', resources: [] })
+    const versions = await service.listTeamAssetVersions('workflow', slug)
+    expect(versions.map((v) => v.version)).toEqual(['0.0.2', '0.0.1'])
+    expect(versions[0]?.author).toBe('tester')
+  })
+
+  it('installFromTeam 指定历史版本 → 安装该版本并记录 pins（回滚后显示可更新）', async () => {
+    const { service, pins, items } = setup()
+    await service.publishToTeam('workflow', 'wf1', {})
+    // 第二版改内容——同内容升版按规则 2 判 up-to-date（内容一致优先于版本号）
+    const item = items.get('wf1')
+    if (item) item.graph = { nodes: [{ id: 'n2' }], edges: [] }
+    await service.publishToTeam('workflow', 'wf1', {})
+    const slug = slugifyAssetName('流程', 'wf')
+    const res = await service.installFromTeam('workflow', slug, { version: '0.0.1' })
+    expect(res.version).toBe('0.0.1')
+    expect(res.updatedExisting).toBe(true) // 本地同名 wf1 → 更新（回滚语义）
+    expect(pins.get('workflow', slug)?.installed_version).toBe('0.0.1')
+    const updates = await service.listTeamUpdates('workflow')
+    expect(updates.find((u) => u.slug === slug)?.state).toBe('remote-newer')
+  })
+
+  it('installFromTeam 指定 draft / 不存在版本 → 拒绝', async () => {
+    const { service, server } = setup()
+    await service.publishToTeam('workflow', 'wf1', {})
+    const slug = slugifyAssetName('流程', 'wf')
+    const spec = server.specs.get(agentSpecNameFor('workflow', slug))
+    spec?.versions.set('0.0.2', { status: 'draft', manifestRaw: '{}', resources: [] })
+    await expect(
+      service.installFromTeam('workflow', slug, { version: '0.0.2' }),
+    ).rejects.toThrow(/仅已发布版本/)
+    await expect(
+      service.installFromTeam('workflow', slug, { version: '9.9.9' }),
+    ).rejects.toThrow(/不存在可安装的版本/)
+  })
+})

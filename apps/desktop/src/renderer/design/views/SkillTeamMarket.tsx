@@ -13,6 +13,7 @@ import type { RemoteSkillItem, SkillItem, TeamRegistryUpdateItemDto } from '@spa
 import { Icons } from '../Icons'
 import { useIpcInvoke } from '../hooks/useIpc'
 import { useToast } from '../components/Toast'
+import { TeamVersionsModal } from './TeamAssetMarket'
 
 // ─── 团队源市场 Tab ────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ export function TeamMarketTab({ onInstalled }: { onInstalled: () => void }) {
   const { invoke: installSkill } = useIpcInvoke('team-registry:install-skill')
   const { invoke: uninstallRemote } = useIpcInvoke('skill-registry:uninstall')
   const { invoke: listUpdates } = useIpcInvoke('team-registry:list-updates')
+  const { invoke: listSkillVersions } = useIpcInvoke('team-registry:list-skill-versions')
   const { toast } = useToast()
 
   const [configured, setConfigured] = useState<boolean | null>(null)
@@ -32,6 +34,7 @@ export function TeamMarketTab({ onInstalled }: { onInstalled: () => void }) {
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [installingSlugs, setInstallingSlugs] = useState<Set<string>>(new Set())
   const [updates, setUpdates] = useState<Record<string, TeamRegistryUpdateItemDto>>({})
+  const [versionsFor, setVersionsFor] = useState<RemoteSkillItem | null>(null)
   const reloadToken = useRef(0)
 
   useEffect(() => {
@@ -75,12 +78,15 @@ export function TeamMarketTab({ onInstalled }: { onInstalled: () => void }) {
     void reloadUpdates()
   }, [reload, reloadUpdates])
 
-  const handleInstall = async (skill: RemoteSkillItem) => {
+  const handleInstall = async (skill: RemoteSkillItem, version?: string) => {
     const slug = slugOf(skill)
     if (!slug) return
     setInstallingSlugs((prev) => new Set(prev).add(slug))
     try {
-      await installSkill({ slug })
+      await installSkill({
+        slug,
+        ...(version != null && version !== '' ? { version } : {}),
+      })
       toast.success(`已从团队源安装：${skill.name}`)
       await Promise.all([reload(), reloadUpdates()])
       onInstalled()
@@ -197,6 +203,9 @@ export function TeamMarketTab({ onInstalled }: { onInstalled: () => void }) {
                     </div>
                   </div>
                   <div className="skill-store-card-actions">
+                    <Button size="small" type="text" onClick={() => setVersionsFor(skill)}>
+                      版本
+                    </Button>
                     {busy ? (
                       <span className="skill-store-card-progress">安装中…</span>
                     ) : skill.installed ? (
@@ -227,6 +236,28 @@ export function TeamMarketTab({ onInstalled }: { onInstalled: () => void }) {
           })}
         </div>
       )}
+      <TeamVersionsModal
+        open={versionsFor != null}
+        title={`团队技能版本 · ${versionsFor?.name ?? ''}`}
+        currentVersion={
+          versionsFor ? (updates[slugOf(versionsFor) ?? '']?.localVersion ?? null) : null
+        }
+        fetchVersions={async () => {
+          const slug = versionsFor ? slugOf(versionsFor) : null
+          if (!slug) return []
+          const res = await listSkillVersions({ slug })
+          return res.versions
+        }}
+        onInstall={async (v) => {
+          if (!versionsFor) return
+          await handleInstall(versionsFor, v)
+        }}
+        onClose={() => setVersionsFor(null)}
+        onInstalled={() => {
+          void Promise.all([reload(), reloadUpdates()])
+          onInstalled()
+        }}
+      />
     </div>
   )
 }

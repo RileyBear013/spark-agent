@@ -18,9 +18,10 @@ import {
   type TeamAssetBuildResult,
 } from './asset-service.js'
 import { agentSpecNameFor, envelopeFromAgentSpecVersion } from './agentspec.js'
+import { TeamMcpService, listInstallableTeamVersions } from './index.js'
 import { NacosClient } from './nacos-client.js'
 import { TeamRegistryConfigStore } from './team-registry-config.js'
-import type { TeamAssetPinsRepository } from '@spark/storage'
+import type { McpServerRepository, TeamAssetPinsRepository } from '@spark/storage'
 import { computePayloadChecksum, type TeamAssetEnvelope } from './types.js'
 
 const LIVE = process.env.TEAM_REGISTRY_LIVE === '1'
@@ -209,6 +210,23 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       const updates2 = await serviceOther.listTeamUpdates('workflow')
       expect(updates2.find((u) => u.slug === wfPub.slug)?.state).toBe('local-modified')
 
+      // ── 版本化安装/回滚（此时远端 0.0.4 内容与 0.0.1 不同，规则 2 不误判）──
+      const installOld = await serviceOther.installFromTeam('workflow', wfPub.slug, {
+        version: '0.0.1',
+      })
+      expect(installOld.version).toBe('0.0.1')
+      expect(installOld.updatedExisting).toBe(true)
+      const updatesRolled = await serviceOther.listTeamUpdates('workflow')
+      expect(updatesRolled.find((u) => u.slug === wfPub.slug)?.state).toBe('remote-newer')
+      await expect(
+        serviceOther.installFromTeam('workflow', wfPub.slug, { version: '9.9.9' }),
+      ).rejects.toThrow(/不存在可安装的版本/)
+      const versions = await serviceOther.listTeamAssetVersions('workflow', wfPub.slug)
+      expect(versions.map((v) => v.version)).toEqual(['0.0.4', '0.0.3', '0.0.2', '0.0.1'])
+      await serviceOther.installFromTeam('workflow', wfPub.slug) // 重装最新
+      const updatesRestored = await serviceOther.listTeamUpdates('workflow')
+      expect(updatesRestored.find((u) => u.slug === wfPub.slug)?.state).toBe('up-to-date')
+
       // ── 三类都在远端可见 ──
       expect((await service.listTeamAssets('agent')).map((i) => i.slug)).toContain(agentPub.slug)
       expect((await service.listTeamAssets('app')).map((i) => i.slug)).toContain(appPub.slug)
@@ -218,6 +236,67 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       const items = await client.listTeamAgentSpecs()
       const ours = probeSlugs.map(([type, slug]) => agentSpecNameFor(type, slug))
       expect(items.filter((i) => ours.includes(String(i.name))).map((i) => i.name)).toEqual([])
+    }
+  })
+
+  it('MCP 版本化安装：发布两版 → 版本列表 → 指定 0.0.1 安装（回滚语义）→ 清理', async () => {
+    const slug = 'probe-mcp-versions'
+    try {
+      const health = await client.testRoundTrip()
+      expect(health.healthy, health.error).toBe(true)
+      await client.deleteTeamMcpServer(slug).catch(() => {})
+
+      const rows: Array<Record<string, unknown>> = []
+      let seq = 0
+      const repoStub = {
+        get: (id: string) => rows.find((r) => r.id === id) ?? null,
+        listAll: () => rows,
+        update: (id: string, patch: Record<string, unknown>) => {
+          const row = rows.find((r) => r.id === id)
+          if (row) Object.assign(row, patch)
+          return row ?? null
+        },
+        create: (fields: Record<string, unknown>) => {
+          const row = { id: `row-${++seq}`, ...fields }
+          rows.push(row)
+          return row
+        },
+      } as unknown as McpServerRepository
+      const pins = makePinsStub()
+      const mcpService = new TeamMcpService(configStore, repoStub, pins)
+      const row = repoStub.create({
+        scope: 'user',
+        name: slug,
+        config_json: '{"command":"echo","args":["probe"],"env":{}}',
+        enabled: false,
+      })
+
+      const pub1 = await mcpService.publishToTeam(String(row.id), { version: '0.0.1' })
+      expect(pub1.version).toBe('0.0.1')
+      const pub2 = await mcpService.publishToTeam(String(row.id), { version: '0.0.2' })
+      expect(pub2.version).toBe('0.0.2')
+
+      // 版本列表（已发布终态、semver 降序）
+      const detail = await client.getTeamMcpServer(slug)
+      expect(detail, 'MCP 详情可读').toBeTruthy()
+      expect(listInstallableTeamVersions(detail!.versions).map((v) => v.version)).toEqual([
+        '0.0.2',
+        '0.0.1',
+      ])
+
+      // 版本级详情端点（真机路由核实；顶层详情恒为最新发布）
+      const versionRaw = await client.getTeamMcpVersion(slug, '0.0.1')
+      expect(versionRaw, 'MCP 版本详情应可读').toBeTruthy()
+
+      // 指定 0.0.1 安装（回滚）→ pins 记 0.0.1；非法版本拒绝
+      const install = await mcpService.installFromTeam(slug, { version: '0.0.1' })
+      expect(install.version).toBe('0.0.1')
+      expect(pins.listByType('mcp')[0]?.installed_version).toBe('0.0.1')
+      await expect(mcpService.installFromTeam(slug, { version: '9.9.9' })).rejects.toThrow(
+        /不存在可安装的版本/,
+      )
+    } finally {
+      await client.deleteTeamMcpServer(slug).catch(() => {})
     }
   })
 })
