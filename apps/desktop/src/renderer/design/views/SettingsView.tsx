@@ -76,6 +76,7 @@ import { CODEX_PERMISSION_MODE_OPTIONS as SHARED_CODEX_PERMISSION_MODE_OPTIONS }
 import { ComputerUseSettingsSection } from '../computer-use/ComputerUseSettingsSection'
 import { AccountSyncSettingsSection } from './account-sync/AccountSyncSettingsSection'
 import { UpdateReleaseNotesCard } from './UpdateReleaseNotesCard'
+import { HooksV2Section } from './hooks/HooksV2Section'
 import './SettingsView.less'
 import type {
   SessionAgentAdapter,
@@ -528,7 +529,7 @@ export function SettingsView({ initialSection }: { initialSection?: string } = {
     integrity: IntegritySection,
     playwright: PlaywrightStatusCard,
     telemetry: TelemetrySection,
-    hooks: HooksSection,
+    hooks: HooksV2Section,
     storage: StorageSection,
     usage: UsageSection,
     archived: ArchivedSection,
@@ -5848,170 +5849,6 @@ function AboutSection() {
       </div>
 
       <div className="about-footer">© 2026 SparkWork Team. All rights reserved.</div>
-    </div>
-  )
-}
-
-/* ───────── HOOKS ───────── */
-type HookNodeType = 'permission_request' | 'ask_user_question' | 'session_end' | 'session_fail'
-
-type HookNodeConfig = {
-  sound: boolean
-  notification: boolean
-}
-
-type HookConfig = {
-  enabled: boolean
-  nodes: Record<HookNodeType, HookNodeConfig>
-}
-
-const SETTINGS_HOOKS_KEY = 'spark-settings-hooks'
-
-const DEFAULT_HOOK_CONFIG: HookConfig = {
-  enabled: true,
-  nodes: {
-    permission_request: { sound: true, notification: true },
-    ask_user_question: { sound: true, notification: true },
-    session_end: { sound: true, notification: true },
-    session_fail: { sound: true, notification: true },
-  },
-}
-
-const HOOK_NODE_LABELS: Record<HookNodeType, { label: string; desc: string }> = {
-  permission_request: { label: '权限请求', desc: 'Agent 需要您的审批' },
-  ask_user_question: { label: '用户提问', desc: 'Agent 需要您提供更多信息' },
-  session_end: { label: '任务完成', desc: '当前任务已成功完成' },
-  session_fail: { label: '任务失败', desc: '任务执行出错' },
-}
-
-const HOOK_NODE_ICONS: Record<
-  HookNodeType,
-  (p: { size?: number; className?: string }) => React.JSX.Element
-> = {
-  permission_request: Icons.Shield,
-  ask_user_question: Icons.Chat,
-  session_end: Icons.CheckCircle,
-  session_fail: Icons.AlertTriangle,
-}
-
-function HooksSection() {
-  const [config, setConfig] = usePersistedSettings(SETTINGS_HOOKS_KEY, DEFAULT_HOOK_CONFIG)
-  const [testing, setTesting] = useState<string | null>(null)
-  const { toast } = useToast()
-
-  const updateNodeConfig = (node: HookNodeType, type: 'sound' | 'notification', value: boolean) => {
-    setConfig({
-      ...config,
-      nodes: {
-        ...config.nodes,
-        [node]: {
-          ...config.nodes[node],
-          [type]: value,
-        },
-      },
-    })
-  }
-
-  const testHook = async (node: HookNodeType) => {
-    setTesting(node)
-    try {
-      await window.spark?.invoke('hook:play-sound', {})
-      const nodeInfo = HOOK_NODE_LABELS[node]
-      await window.spark?.invoke('hook:show-notification', {
-        title: `测试：${nodeInfo.label}`,
-        body: `这是一条测试通知，来自 ${nodeInfo.label} 节点`,
-      })
-      toast.success('Hook 测试完成')
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '测试失败')
-    } finally {
-      setTesting(null)
-    }
-  }
-
-  return (
-    <div className="settings-section">
-      <div className="row section-header-row">
-        <div className="flex1">
-          <h2 className="section-h2">Hooks</h2>
-          <div className="lede section-lede">
-            在会话关键节点触发提示音和系统通知，帮助您及时响应 Agent 的状态变化。
-          </div>
-        </div>
-        <Switch
-          size="middle"
-          checked={config.enabled}
-          onChange={(v) => setConfig({ ...config, enabled: v })}
-        />
-      </div>
-
-      {config.enabled && (
-        <>
-          <div className="subsec-h">节点配置</div>
-          <div className="hook-nodes-list">
-            {(Object.keys(HOOK_NODE_LABELS) as HookNodeType[]).map((node) => {
-              const info = HOOK_NODE_LABELS[node]
-              const nodeConfig = config.nodes[node]
-              const Icon = HOOK_NODE_ICONS[node]
-              const anyEnabled = nodeConfig.sound || nodeConfig.notification
-              return (
-                <div key={node} className="hook-node-card">
-                  <div className="hook-node-header">
-                    <div className="hook-node-icon-wrap">
-                      <Icon size={14} />
-                    </div>
-                    <div className="hook-node-meta flex1 min-w-0">
-                      <div className="hook-node-label">{info.label}</div>
-                      <div className="hook-node-desc">{info.desc}</div>
-                    </div>
-                    <span className={`badge dot ${anyEnabled ? 'success' : ''}`}>
-                      {anyEnabled ? '已启用' : '已关闭'}
-                    </span>
-                  </div>
-                  <div className="hook-node-toggles">
-                    <div className="hook-toggle-row">
-                      <div className="hook-toggle-info">
-                        <Icons.Bell size={13} className="hook-toggle-icon" />
-                        <span className="hook-toggle-label">系统通知</span>
-                        <span className="hook-toggle-hint">原生横幅通知，点击聚焦窗口</span>
-                      </div>
-                      <Switch
-                        size="middle"
-                        checked={nodeConfig.notification}
-                        onChange={(v) => updateNodeConfig(node, 'notification', v)}
-                      />
-                    </div>
-                    <div className="hook-toggle-row">
-                      <div className="hook-toggle-info">
-                        <Icons.Activity size={13} className="hook-toggle-icon" />
-                        <span className="hook-toggle-label">提示音</span>
-                        <span className="hook-toggle-hint">系统默认提示音</span>
-                      </div>
-                      <Switch
-                        size="middle"
-                        checked={nodeConfig.sound}
-                        onChange={(v) => updateNodeConfig(node, 'sound', v)}
-                      />
-                    </div>
-                  </div>
-                  <div className="hook-node-footer">
-                    <Button
-                      size="middle"
-                      type="text"
-                      loading={testing === node}
-                      icon={<Icons.Play size={11} />}
-                      onClick={() => void testHook(node)}
-                      disabled={testing === node}
-                    >
-                      测试
-                    </Button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </>
-      )}
     </div>
   )
 }

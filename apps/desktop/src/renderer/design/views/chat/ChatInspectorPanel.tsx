@@ -54,6 +54,7 @@ import type {
 import type { UIMessage } from '../../services/event-mapper'
 import { getVisibleTurnPromptSnapshotUserMessage } from './internal-turn-message-visibility'
 import { parseEnvVarsJson, serializeEnvVarsJson } from './chat-config-env-json'
+import { SessionHooksSection } from '../hooks/SessionHooksSection'
 
 const EMPTY_PROMPT_LAYER: PromptConfigGetResponse['system'] = { enabled: false, content: '' }
 const EMPTY_ENV_LAYER: EnvConfigGetResponse['project'] = { enabled: true, vars: [] }
@@ -186,6 +187,7 @@ export function ChatConfigPanel({
   const { toast } = useToast()
   const [promptsCollapsed, setPromptsCollapsed] = useState(false)
   const [envCollapsed, setEnvCollapsed] = useState(false)
+  const [hooksCollapsed, setHooksCollapsed] = useState(false)
   const [promptConfig, setPromptConfig] = useState<PromptConfigGetResponse | null>(null)
   const [envConfig, setEnvConfig] = useState<EnvConfigGetResponse | null>(null)
   const [projectPromptDraft, setProjectPromptDraft] = useState('')
@@ -589,6 +591,29 @@ export function ChatConfigPanel({
                 )}
               </>
             )}
+          </div>
+        )}
+
+        {/* Hooks：当前会话最终生效列表（§15.3），允许会话临时停用继承 Hook */}
+        {sessionId != null && (
+          <div className="inspector-section">
+            <h4 className="config-panel-header">
+              <button
+                type="button"
+                className="session-panel-toggle"
+                aria-expanded={!hooksCollapsed}
+                onClick={() => setHooksCollapsed(!hooksCollapsed)}
+              >
+                <Icons.Zap size={11} />
+                Hooks
+                <span className="spacer" />
+                <Icons.ChevronRight
+                  size={10}
+                  className={`chev ${hooksCollapsed ? '' : 'chev-open'}`}
+                />
+              </button>
+            </h4>
+            {!hooksCollapsed && <SessionHooksSection sessionId={sessionId} />}
           </div>
         )}
       </div>
