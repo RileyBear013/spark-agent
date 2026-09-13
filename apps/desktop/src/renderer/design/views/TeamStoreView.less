@@ -189,12 +189,46 @@
 
 .team-store-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 12px;
 
   @media (max-width: 640px) {
     grid-template-columns: 1fr;
   }
+}
+
+// ── 「全部」视图的分类分节 ──
+
+.team-store-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  & + .team-store-section {
+    margin-top: 8px;
+  }
+}
+
+.team-store-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--dividing-line-1, rgba(128, 128, 128, 0.14));
+
+  h3 {
+    margin: 0;
+    font-size: 13.5px;
+    font-weight: 600;
+  }
+}
+
+.team-store-section-count {
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--color-bg-2, rgba(128, 128, 128, 0.12));
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 .team-store-card {
@@ -269,8 +303,36 @@
 
 .tsc-type {
   flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
   font-size: 11px;
-  opacity: 0.65;
+  line-height: 1.6;
+
+  &--app {
+    color: #4a9eff;
+    background: rgba(74, 158, 255, 0.12);
+  }
+  &--workflow {
+    color: #a878ff;
+    background: rgba(168, 120, 255, 0.12);
+  }
+  &--agent {
+    color: #34c77b;
+    background: rgba(52, 199, 123, 0.12);
+  }
+  &--skill {
+    color: #ff9f43;
+    background: rgba(255, 159, 67, 0.12);
+  }
+  &--mcp {
+    color: #35c3d6;
+    background: rgba(53, 195, 214, 0.12);
+  }
+}
+
+.tsc-ver {
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 .tsc-desc {
@@ -418,6 +480,149 @@
   font-size: 11.5px;
   line-height: 1.6;
   opacity: 0.65;
+}
+
+// ── 上传共享面板（TeamStorePublish） ──
+
+.team-store-pub {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.team-store-pub-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.team-store-pub-hint {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--color-bg-2, rgba(128, 128, 128, 0.06));
+  font-size: 12px;
+  line-height: 1.7;
+  opacity: 0.7;
+}
+
+.team-store-pub-tabs {
+  display: flex;
+  overflow: hidden;
+  width: fit-content;
+  border: 1px solid var(--dividing-line-1, rgba(128, 128, 128, 0.2));
+  border-radius: 8px;
+
+  button {
+    padding: 5px 16px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--color-bg-2, rgba(128, 128, 128, 0.06));
+    }
+
+    &.is-active {
+      background: var(--color-bg-2, rgba(128, 128, 128, 0.1));
+      font-weight: 600;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--color-primary, #4a9eff);
+      outline-offset: -2px;
+    }
+  }
+}
+
+.team-store-pub-search {
+  max-width: 360px;
+}
+
+.team-store-pub-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.team-store-pub-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--dividing-line-1, rgba(128, 128, 128, 0.2));
+  border-radius: 10px;
+  background: var(--color-bg-1, transparent);
+
+  &.is-disabled {
+    opacity: 0.55;
+  }
+}
+
+.team-store-pub-row-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.team-store-pub-row-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.team-store-pub-row-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-store-pub-row-desc {
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.65;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-store-pub-row-warn {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #e6a23c;
+}
+
+.team-store-pub-row-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  padding-top: 2px;
+}
+
+.team-store-pub-result {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(52, 199, 123, 0.08);
+  font-size: 12px;
+
+  b {
+    color: #34c77b;
+  }
+}
+
+.team-store-pub-warn {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #e6a23c;
+}
+
+.team-store-pub-empty {
+  padding: 30px 0;
 }
 
 // ── 空态 / 加载 / 错误 ──

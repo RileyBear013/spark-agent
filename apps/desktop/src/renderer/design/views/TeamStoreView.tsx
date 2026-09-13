@@ -25,6 +25,7 @@ import { useIpcInvoke } from '../hooks/useIpc'
 import { useApp } from '../AppContext'
 import { useToast } from '../components/Toast'
 import { TeamVersionsModal } from './TeamAssetMarket'
+import { TeamStorePublish } from './TeamStorePublish'
 import './TeamStoreView.less'
 
 function describeError(err: unknown): string {
@@ -101,6 +102,9 @@ function relativeTime(iso: string): string {
 type Category = 'all' | StoreKind
 type StatusFilter = 'all' | 'updatable' | 'not-installed' | 'installed' | 'attention'
 
+/** 「全部」视图的分节顺序：平台资产（应用/工作流/助手）在前，扩展资产（技能/MCP）在后 */
+const GROUP_ORDER: readonly StoreKind[] = ['app', 'workflow', 'agent', 'skill', 'mcp']
+
 function matchStatus(card: StoreCard, filter: StatusFilter): boolean {
   switch (filter) {
     case 'updatable':
@@ -149,6 +153,7 @@ export function TeamStoreView() {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [detail, setDetail] = useState<StoreCard | null>(null)
   const [versionsOpen, setVersionsOpen] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
   const reloadToken = useRef(0)
 
   useEffect(() => {
@@ -426,6 +431,16 @@ export function TeamStoreView() {
   const detailBadge = detail != null ? stateBadge(detail.state) : null
   const detailInstalled = detail != null && detail.localId != null
 
+  const renderCard = (card: StoreCard) => (
+    <StoreCardItem
+      key={`${card.kind}:${card.slug}`}
+      card={card}
+      busy={bulkBusy || installingSlugs.has(card.slug)}
+      onOpen={() => setDetail(card)}
+      onInstall={(c) => void handleInstall(c)}
+    />
+  )
+
   return (
     <div className="team-store-page">
       <header className="team-store-header">
@@ -437,6 +452,12 @@ export function TeamStoreView() {
           <p>团队共享的应用、工作流、助手、技能与 MCP —— 一键安装、版本可选、开箱即运行。</p>
         </div>
         <div className="team-store-header-actions">
+          {configured === true && (
+            <Button size="small" type="primary" onClick={() => setPublishOpen(true)}>
+              <Icons.Upload size={13} />
+              上传共享
+            </Button>
+          )}
           <Button size="small" onClick={() => void reload()} loading={loading}>
             刷新
           </Button>
@@ -547,23 +568,34 @@ export function TeamStoreView() {
               <Empty
                 description={
                   cards.length === 0
-                    ? '团队注册中心还没有共享资产——到各管理页把应用/工作流/助手/技能发布到团队'
+                    ? '团队注册中心还没有共享资产——点右上角「上传共享」，把本地的应用 / 工作流 / 助手分享给团队'
                     : '没有符合当前筛选条件的资产'
                 }
               />
             </div>
+          ) : category === 'all' ? (
+            // 「全部」视图按类分节排版：应用 / 工作流 / 助手 / 技能 / MCP 各自成组，
+            // 空分类不渲染，避免五类混排难以扫读。
+            GROUP_ORDER.filter((k) => filtered.some((c) => c.kind === k)).map((k) => {
+              const SectionIcon = KIND_ICONS[k]
+              const sectionCards = filtered.filter((c) => c.kind === k)
+              return (
+                <section key={k} className="team-store-section" aria-label={KIND_META[k].label}>
+                  <div className="team-store-section-head">
+                    <span className={`tsc-icon tsc-icon--${k}`}>
+                      <SectionIcon size={13} />
+                    </span>
+                    <h3>{KIND_META[k].label}</h3>
+                    <span className="team-store-section-count">{sectionCards.length}</span>
+                  </div>
+                  <div className="team-store-grid">
+                    {sectionCards.map(renderCard)}
+                  </div>
+                </section>
+              )
+            })
           ) : (
-            <div className="team-store-grid">
-              {filtered.map((card) => (
-                <StoreCardItem
-                  key={`${card.kind}:${card.slug}`}
-                  card={card}
-                  busy={bulkBusy || installingSlugs.has(card.slug)}
-                  onOpen={() => setDetail(card)}
-                  onInstall={(c) => void handleInstall(c)}
-                />
-              ))}
-            </div>
+            <div className="team-store-grid">{filtered.map(renderCard)}</div>
           )}
         </>
       )}
@@ -668,6 +700,17 @@ export function TeamStoreView() {
         onClose={() => setVersionsOpen(false)}
         onInstalled={() => void reload()}
       />
+
+      <TeamStorePublish
+        open={publishOpen}
+        remoteCards={cards.flatMap((c) =>
+          c.kind === 'workflow' || c.kind === 'app' || c.kind === 'agent'
+            ? [{ kind: c.kind, name: c.name, version: c.version }]
+            : [],
+        )}
+        onClose={() => setPublishOpen(false)}
+        onPublished={() => void reload()}
+      />
     </div>
   )
 }
@@ -722,7 +765,7 @@ function StoreCardItem({
       </div>
       <p className="tsc-desc">{card.description !== '' ? card.description : '（暂无简介）'}</p>
       <div className="tsc-meta">
-        <span>v{card.version}</span>
+        <span className="tsc-ver">v{card.version}</span>
         {card.author !== '' && <span>by {card.author}</span>}
         {relTime !== '' && <span>{relTime}</span>}
         {card.kind === 'mcp' && card.protocol !== '' && <span>{card.protocol}</span>}
