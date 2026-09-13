@@ -1,6 +1,6 @@
 {
   "name": "@spark/desktop",
-  "version": "0.11.63",
+  "version": "0.11.64",
   "description": "SparkWork desktop application — Electron + React + TypeScript",
   "author": "SparkWork Team",
   "private": true,
