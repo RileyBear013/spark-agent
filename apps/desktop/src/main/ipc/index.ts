@@ -4602,10 +4602,13 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('provider:list', async (req) => {
     const svc = getProviderService()
-    if (await svc.isLocalCliAvailable()) {
+    // forceRefreshLocalCli: Onboarding「重新检测」需要绕过 5 分钟 TTL 缓存，
+    // 否则用户刚装完 CLI 立刻重新检测仍会命中旧的"未安装"缓存结果。
+    const forceRefresh = req.forceRefreshLocalCli === true
+    if (await svc.isLocalCliAvailable({ forceRefresh })) {
       await svc.ensureLocalCliProvider()
     }
-    if (await svc.isLocalCodexCliAvailable()) {
+    if (await svc.isLocalCodexCliAvailable({ forceRefresh })) {
       await svc.ensureLocalCodexCliProvider()
     }
     const profiles = await svc.listProviders({
@@ -8373,8 +8376,6 @@ export function registerAllIpcHandlers(): void {
     getSkillRegistryService,
     getTeamMcpService,
   })
-
-
 
   // ─── Team Registry 信封资产（工作流/Agent/子应用 推拉，M3/M4） ──────────
   // 放在 team-registry handler 块之后：依赖上方声明的 assertWorkflowGraphValid 闭包

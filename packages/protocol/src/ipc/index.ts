@@ -1006,6 +1006,8 @@ export interface ProviderListRequest {
   includeDisabled?: boolean
   /** Provider 编辑界面使用；返回未过滤的完整 modelIds（被禁模型仍展示，置灰）。 */
   includeScheduledBlocked?: boolean
+  /** 绕过本地 CLI 可用性检测的 5 分钟缓存立即重新探测；Onboarding「重新检测」按钮使用。 */
+  forceRefreshLocalCli?: boolean
 }
 
 export interface ProviderListResponse {
@@ -7148,50 +7150,35 @@ export interface IpcChannelMap
     TeamRegistryTestConnectionRequest,
     TeamRegistryTestConnectionResponse,
   ]
-  'team-registry:publish-skill': [
-    TeamRegistryPublishSkillRequest,
-    TeamRegistryPublishSkillResponse,
-  ]
-  'team-registry:install-skill': [
-    TeamRegistryInstallSkillRequest,
-    TeamRegistryInstallSkillResponse,
-  ]
+  'team-registry:publish-skill': [TeamRegistryPublishSkillRequest, TeamRegistryPublishSkillResponse]
+  'team-registry:install-skill': [TeamRegistryInstallSkillRequest, TeamRegistryInstallSkillResponse]
   'team-registry:list-updates': [TeamRegistryListUpdatesRequest, TeamRegistryListUpdatesResponse]
   'team-registry:list-mcp': [TeamRegistryListMcpRequest, TeamRegistryListMcpResponse]
   'team-registry:publish-mcp': [TeamRegistryPublishMcpRequest, TeamRegistryPublishMcpResponse]
   'team-registry:install-mcp': [TeamRegistryInstallMcpRequest, TeamRegistryInstallMcpResponse]
   'team-registry:list-mcp-updates': [
     TeamRegistryListMcpUpdatesRequest,
-    TeamRegistryListMcpUpdatesResponse
+    TeamRegistryListMcpUpdatesResponse,
   ]
   'team-registry:list-asset-versions': [
     TeamRegistryListAssetVersionsRequest,
-    TeamRegistryListAssetVersionsResponse
+    TeamRegistryListAssetVersionsResponse,
   ]
   'team-registry:list-skill-versions': [
     TeamRegistryListSkillVersionsRequest,
-    TeamRegistryListSkillVersionsResponse
+    TeamRegistryListSkillVersionsResponse,
   ]
   'team-registry:list-mcp-versions': [
     TeamRegistryListMcpVersionsRequest,
-    TeamRegistryListMcpVersionsResponse
+    TeamRegistryListMcpVersionsResponse,
   ]
-  'team-registry:list-assets': [
-    TeamRegistryListAssetsRequest,
-    TeamRegistryListAssetsResponse
-  ],
-  'team-registry:publish-asset': [
-    TeamRegistryPublishAssetRequest,
-    TeamRegistryPublishAssetResponse
-  ],
-  'team-registry:install-asset': [
-    TeamRegistryInstallAssetRequest,
-    TeamRegistryInstallAssetResponse
-  ],
+  'team-registry:list-assets': [TeamRegistryListAssetsRequest, TeamRegistryListAssetsResponse]
+  'team-registry:publish-asset': [TeamRegistryPublishAssetRequest, TeamRegistryPublishAssetResponse]
+  'team-registry:install-asset': [TeamRegistryInstallAssetRequest, TeamRegistryInstallAssetResponse]
   'team-registry:list-asset-updates': [
     TeamRegistryListAssetUpdatesRequest,
-    TeamRegistryListAssetUpdatesResponse
-  ],
+    TeamRegistryListAssetUpdatesResponse,
+  ]
   'team-registry:config-history': [
     TeamRegistryConfigHistoryRequest,
     TeamRegistryConfigHistoryResponse,

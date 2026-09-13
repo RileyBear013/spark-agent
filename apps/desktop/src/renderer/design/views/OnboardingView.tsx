@@ -297,6 +297,7 @@ export function OnboardingView(): React.ReactElement {
   const { toast } = useToast()
   const { invoke: createProvider } = useIpcInvoke('provider:create')
   const { invoke: listProviders } = useIpcInvoke('provider:list')
+  const { invoke: updateProvider } = useIpcInvoke('provider:update')
   const { invoke: fetchProviderModels } = useIpcInvoke('provider:fetch-models')
   const { invoke: createAgent } = useIpcInvoke('agent:create')
   const { invoke: sendTurn } = useIpcInvoke('session:submit-turn')
@@ -457,9 +458,10 @@ export function OnboardingView(): React.ReactElement {
       setError('')
       setConnectionTestOutput(`正在检测本机 ${label} …`)
       try {
-        // listProviders 已会过滤掉不可用的本地 CLI provider；
-        // 若返回结果里能看到对应 id，说明宿主机真的装了该 CLI。
-        const res = await listProviders({})
+        // 本地 CLI provider 的可见性由 listProviders 内的 CLI 可用性检测把关：
+        // 能看到对应 id 就说明宿主机真的装了该 CLI。这里带 includeDisabled，
+        // 避免用户曾在 Providers 界面禁用过该内置项时被误判为"未安装"。
+        const res = await listProviders({ includeDisabled: true })
         const profiles = res.profiles as ProviderProfile[]
         const profile = profiles.find((p) => p.id === providerId)
         if (!profile) {
@@ -468,6 +470,11 @@ export function OnboardingView(): React.ReactElement {
               kind === 'codex' ? 'npm i -g @openai/codex' : 'npm i -g @anthropic-ai/claude-code'
             }）并完成一次登录。`,
           )
+        }
+        // 引导页里明确选择连接本机 CLI，等价于要求该内置 Provider 可用；
+        // 若之前被禁用，这里重新启用，否则后续会话/模型选择器解析不到它。
+        if (profile.enabled === false) {
+          await updateProvider({ id: profile.id, enabled: true })
         }
         // 二次确认：本地 CLI 的 healthCheck 就是检查可执行文件存在，无副作用。
         const test = await healthCheck({ id: profile.id })
@@ -493,7 +500,7 @@ export function OnboardingView(): React.ReactElement {
         setBusy(false)
       }
     },
-    [healthCheck, listProviders, sessionCtx, setError, toast],
+    [healthCheck, listProviders, sessionCtx, setError, toast, updateProvider],
   )
 
   const handleCreateAgent = useCallback(async () => {
@@ -920,23 +927,33 @@ function LocalCliStep({
     codex: 'checking',
   })
 
-  const detect = useCallback(async () => {
-    try {
-      const res = await listProviders({})
-      const profiles = res.profiles as ProviderProfile[]
-      setStatus({
-        claude: profiles.some(isLocalClaudeCliProvider) ? 'available' : 'unavailable',
-        codex: profiles.some(isLocalCodexCliProvider) ? 'available' : 'unavailable',
-      })
-    } catch {
-      setStatus({ claude: 'unavailable', codex: 'unavailable' })
-    }
-  }, [listProviders])
+  const detect = useCallback(
+    async (options: { forceRefresh?: boolean } = {}) => {
+      try {
+        // 检测语义是"CLI 是否安装"，不是"Provider 是否启用"：
+        // - includeDisabled: 用户曾在 Providers 界面禁用过内置项时，不算"未安装"
+        // - listProviders 内部仍会按 CLI 可用性过滤这两个内置 id，装了才会出现
+        const res = await listProviders({
+          includeDisabled: true,
+          forceRefreshLocalCli: options.forceRefresh === true,
+        })
+        const profiles = res.profiles as ProviderProfile[]
+        setStatus({
+          claude: profiles.some(isLocalClaudeCliProvider) ? 'available' : 'unavailable',
+          codex: profiles.some(isLocalCodexCliProvider) ? 'available' : 'unavailable',
+        })
+      } catch {
+        setStatus({ claude: 'unavailable', codex: 'unavailable' })
+      }
+    },
+    [listProviders],
+  )
 
   const handleRedetect = useCallback(() => {
-    // 点击「重新检测」时先把状态重置回 checking，再发起探测。
+    // 点击「重新检测」时先把状态重置回 checking，再发起探测；
+    // 强制绕过主进程 5 分钟可用性缓存，刚装完 CLI 也能立即检出。
     setStatus({ claude: 'checking', codex: 'checking' })
-    void detect()
+    void detect({ forceRefresh: true })
   }, [detect])
 
   useEffect(() => {
@@ -1098,9 +1115,7 @@ function ProviderStep(props: {
             onChange={(e) => props.setApiKey(e.target.value)}
             placeholder="粘贴 API Key"
           />
-          <small className="onboarding-field-hint">
-            只保存在本机，不会上传到任何服务器
-          </small>
+          <small className="onboarding-field-hint">只保存在本机，不会上传到任何服务器</small>
         </label>
         <label>
           <span className="onboarding-field-head">
