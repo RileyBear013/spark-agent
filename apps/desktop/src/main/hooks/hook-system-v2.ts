@@ -18,7 +18,9 @@ import { Notification, shell } from 'electron'
 import type { SparkDatabase } from '@spark/storage'
 import type { HookToolCandidateV1 } from '@spark/protocol'
 import {
+  HookCompensator,
   HookDispatcher,
+  HookLegacyMigrationService,
   HookLifecycleBridge,
   HookManagementService,
   HookWorker,
@@ -189,6 +191,7 @@ export class HookSystemV2 {
   private readonly bridge: HookLifecycleBridge
   private readonly dispatcher: HookDispatcher
   private readonly worker: HookWorker
+  private readonly compensator: HookCompensator
   private started = false
 
   constructor(deps: HookSystemV2Deps) {
@@ -201,6 +204,7 @@ export class HookSystemV2 {
         void this.dispatcher.dispatchPending(8).catch(() => {})
       },
     })
+    this.compensator = new HookCompensator(deps.db, this.bridge)
     this.worker = new HookWorker(deps.db, {
       owner: `main:${process.pid}`,
       builtins: createBuiltinActionHandlers(),
@@ -217,6 +221,13 @@ export class HookSystemV2 {
     sessionService.setHookLifecycleBridge(this.bridge)
     if (!this.started) {
       try {
+        // §16 迁移：legacy 通知配置 → V2 内置定义（幂等；失败保持 legacy 不影响通知）。
+        const migration = new HookLegacyMigrationService(this.deps.db).migrate()
+        if (!migration.skipped && migration.createdDefinitionIds.length > 0) {
+          log.info(
+            `legacy hook config migrated: ${migration.createdDefinitionIds.length} definitions`,
+          )
+        }
         const recovery = this.worker.recoverOnStartup()
         if (recovery.unknownRuns > 0 || recovery.requeuedEvents > 0) {
           log.info(`startup recovery: ${JSON.stringify(recovery)}`)
@@ -231,6 +242,9 @@ export class HookSystemV2 {
           )
         // 周期维护扫描：兜底派发失败重试/开关关闭期间积累的事件。
         this.dispatcher.startSweep()
+        // §13.2 补偿扫描：按 turn_requests / 最终 assistant message 稳定事实源
+        // 补发崩溃窗口内丢失的事件（eventId 确定性去重，未启用 Hook 时零写入）。
+        this.compensator.start()
         this.worker.start()
         this.started = true
       } catch (error) {
@@ -337,6 +351,7 @@ export class HookSystemV2 {
 
   /** 应用退出流程：停止领取并尽力取消运行中动作（不撤回已发生的外部副作用）。 */
   stop(): void {
+    this.compensator.stop()
     this.dispatcher.stopSweep()
     this.worker.stop()
     this.started = false

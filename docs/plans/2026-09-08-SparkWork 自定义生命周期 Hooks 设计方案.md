@@ -1,6 +1,6 @@
 # SparkWork 自定义生命周期 Hooks 设计方案
 
-> 状态: 实施中 | 最后核对: 2026-09-12
+> 状态: 实施中 | 最后核对: 2026-09-13
 
 ## 1. 文档目的
 
@@ -51,16 +51,16 @@
 
 ## 4. 术语与语义边界
 
-| 术语 | 含义 |
-| --- | --- |
-| 产品 Hook | 由 SparkWork 宿主调度、跨 Agent 引擎一致的用户自动化 |
-| 原生 Hook | 某一执行引擎自身支持的 Hook，例如 Spark Engine 命令 Hook |
-| 观察型 Hook | 事件发生后执行动作，不能改变已经发生的结果 |
-| 拦截型 Hook | 事件提交前返回允许、拒绝或改写结果；首期不实现 |
-| Hook 定义 | 事件、条件、动作、映射和执行策略的可复用定义 |
-| Hook 绑定 | 将某个定义启用或停用于具体作用域，并记录授权 |
-| Hook 事件 | 生命周期事实的持久化事件信封 |
-| Hook 运行 | 某个 Hook 定义针对某个事件的一次动作执行记录 |
+| 术语        | 含义                                                     |
+| ----------- | -------------------------------------------------------- |
+| 产品 Hook   | 由 SparkWork 宿主调度、跨 Agent 引擎一致的用户自动化     |
+| 原生 Hook   | 某一执行引擎自身支持的 Hook，例如 Spark Engine 命令 Hook |
+| 观察型 Hook | 事件发生后执行动作，不能改变已经发生的结果               |
+| 拦截型 Hook | 事件提交前返回允许、拒绝或改写结果；首期不实现           |
+| Hook 定义   | 事件、条件、动作、映射和执行策略的可复用定义             |
+| Hook 绑定   | 将某个定义启用或停用于具体作用域，并记录授权             |
+| Hook 事件   | 生命周期事实的持久化事件信封                             |
+| Hook 运行   | 某个 Hook 定义针对某个事件的一次动作执行记录             |
 
 必须区分以下概念：
 
@@ -125,15 +125,15 @@ apps/desktop/src/renderer/design/views/hooks/
 
 ### 6.1 MVP 事件
 
-| 事件 | 准确触发时机 | 典型用途 |
-| --- | --- | --- |
-| `turn.started` | Turn 已建立并准备进入执行管线 | 计时、外部状态同步 |
-| `permission.requested` | 一个真实权限请求已持久化并进入等待 | 通知审批人、外部告警 |
-| `question.requested` | Agent 提问已持久化并进入等待用户输入 | 通知、工单联动 |
-| `response.committed` | 最终用户可见回答成功持久化，正文和 messageId 已确定 | Webhook、归档、后续工作流 |
-| `turn.completed` | Turn 的成功终态已持久化 | 兼容任务完成通知、终态统计 |
-| `turn.failed` | Turn 进入不可恢复失败终态 | 故障通知、失败记录 |
-| `turn.cancelled` | 用户或系统明确取消 Turn | 取消通知、外部状态同步 |
+| 事件                   | 准确触发时机                                        | 典型用途                   |
+| ---------------------- | --------------------------------------------------- | -------------------------- |
+| `turn.started`         | Turn 已建立并准备进入执行管线                       | 计时、外部状态同步         |
+| `permission.requested` | 一个真实权限请求已持久化并进入等待                  | 通知审批人、外部告警       |
+| `question.requested`   | Agent 提问已持久化并进入等待用户输入                | 通知、工单联动             |
+| `response.committed`   | 最终用户可见回答成功持久化，正文和 messageId 已确定 | Webhook、归档、后续工作流  |
+| `turn.completed`       | Turn 的成功终态已持久化                             | 兼容任务完成通知、终态统计 |
+| `turn.failed`          | Turn 进入不可恢复失败终态                           | 故障通知、失败记录         |
+| `turn.cancelled`       | 用户或系统明确取消 Turn                             | 取消通知、外部状态同步     |
 
 `response.committed` 是用户示例中“回答完毕后发送最终总结”的推荐绑定点。它必须在最终可见正文写库成功后触发，不能从流式片段、`agent_status=completed` 或 UI 渲染状态反推。
 
@@ -348,12 +348,12 @@ type HookActionV1 =
 
 ### 10.2 工具风险策略
 
-| 工具 effect | MVP 策略 |
-| --- | --- |
-| `read` | 用户明确授权后允许 |
-| `low-write` | 用户明确授权并查看发送字段后允许 |
-| `high-write` | 需要强化确认；默认建议停用，可由产品策略决定首期是否开放 |
-| `destructive` | 观察型 MVP 禁止 |
+| 工具 effect   | MVP 策略                                                 |
+| ------------- | -------------------------------------------------------- |
+| `read`        | 用户明确授权后允许                                       |
+| `low-write`   | 用户明确授权并查看发送字段后允许                         |
+| `high-write`  | 需要强化确认；默认建议停用，可由产品策略决定首期是否开放 |
+| `destructive` | 观察型 MVP 禁止                                          |
 
 Hook 运行时不弹审批。如果授权缺失、工具停用、版本不存在、权限提高或 Schema 改变，则记录 `blocked`/`needs_review` 并跳过动作，不得阻塞会话。
 
@@ -473,13 +473,13 @@ Hook 运行时不弹审批。如果授权缺失、工具停用、版本不存在
 
 对暂时无法与领域事实共事务的 MVP 事件，实施时必须逐项登记补偿来源：
 
-| 事件 | 稳定事实与补偿游标 |
-| --- | --- |
-| `turn.started` | turn request/registry 的持久化开始记录，以 turnId 扫描 |
-| `permission.requested` | pending permission request，以 requestId 扫描 |
-| `question.requested` | pending question，以 questionId 扫描 |
-| `response.committed` | 最终 assistant message，以 messageId 扫描 |
-| `turn.completed/failed/cancelled` | 持久化 Turn 终态，以 turnId + terminal status 扫描 |
+| 事件                              | 稳定事实与补偿游标                                     |
+| --------------------------------- | ------------------------------------------------------ |
+| `turn.started`                    | turn request/registry 的持久化开始记录，以 turnId 扫描 |
+| `permission.requested`            | pending permission request，以 requestId 扫描          |
+| `question.requested`              | pending question，以 questionId 扫描                   |
+| `response.committed`              | 最终 assistant message，以 messageId 扫描              |
+| `turn.completed/failed/cancelled` | 持久化 Turn 终态，以 turnId + terminal status 扫描     |
 
 补偿器保存单调游标和重叠扫描窗口，事件 ID 由事件名与稳定事实 ID 确定性生成。源事实的保留期不得短于补偿窗口；若当前表无法提供稳定事实或游标，该事件不得宣称具备崩溃不丢的交付保证，必须先补齐领域持久化。
 
@@ -547,12 +547,12 @@ Hook 运行时不弹审批。如果授权缺失、工具停用、版本不存在
 
 旧事件映射：
 
-| 旧节点 | 新事件/动作 |
-| --- | --- |
-| `permission_request` | `permission.requested` + sound/notification |
-| `ask_user_question` | `question.requested` + sound/notification |
-| `session_end` | `turn.completed` + sound/notification；回答正文自动化需由用户另建 `response.committed` Hook |
-| `session_fail` | 分拆为 `turn.failed` 与 `turn.cancelled` |
+| 旧节点               | 新事件/动作                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `permission_request` | `permission.requested` + sound/notification                                                 |
+| `ask_user_question`  | `question.requested` + sound/notification                                                   |
+| `session_end`        | `turn.completed` + sound/notification；回答正文自动化需由用户另建 `response.committed` Hook |
+| `session_fail`       | 分拆为 `turn.failed` 与 `turn.cancelled`                                                    |
 
 兼容要求：
 
@@ -651,6 +651,29 @@ Hook 运行时不弹审批。如果授权缺失、工具停用、版本不存在
 - 增加工具、压缩、子 Agent、Goal、定时任务和会话级观察事件。
 - 独立设计拦截型 Hook 协议。
 - 评估 Spark Engine 原生 Hook 与产品 Hook 的统一配置、导入和迁移。
+
+## 19.1 实施进展（2026-09-13）
+
+- Phase A–D（协议、四表持久化、调度执行链、七类 MVP 事件接入、统一工具动作与
+  `invocationSource='hook'` 归因）已合并 master，自动化测试覆盖见
+  `packages/agent-runtime/src/services/hooks/hook-runtime.integration.test.ts`。
+- Phase E（设置页 Hooks 区块：总开关、定义 CRUD、四作用域绑定与授权、运行记录、
+  映射预览与测试运行）已实现，位于
+  `apps/desktop/src/renderer/design/views/hooks/`；Agent 编辑页（§15.2，
+  `AgentHooksSection`，替代旧 hookConfig 表单）与会话配置面板入口（§15.3，
+  `SessionHooksSection` 最终生效列表 + 会话级临时停用）亦已接入。
+- Phase F（§16 迁移）已实现：`HookLegacyMigrationService` 在启动时把 legacy
+  sound/notification 配置幂等转换为内置定义 + application/agent 绑定并同事务切换
+  执行所有权；`hook:trigger` 与内部 `triggerHook` 对已迁移节点短路防双发。
+  `permission_request` 节点暂不迁移（plan 审批仍依赖 legacy 路径，V2 侧无定义不会双发）。
+- §13.2 补偿扫描器已实现：`HookCompensator` 按 `turn_requests` 与最终
+  assistant message 稳定事实源补发崩溃窗口内丢失的事件（游标 + 5 分钟重叠窗口，
+  eventId 确定性去重）。permission/question 的事实源是内存态，按 §13.2 约定
+  不宣称崩溃不丢。
+- 可靠性修复：Worker 周期租约恢复（崩溃后在租约窗口内重启的僵尸 running 会
+  永久阻塞 serial_per_session 队列，现已由 tickLoop 周期回收兜底）；
+  `stop()` 立即停止领取。
+- 待办：用户在真实应用中完成前端手工验收（§21.10）后，状态改为「已落地」。
 
 ## 20. 测试矩阵
 

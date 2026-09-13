@@ -178,6 +178,7 @@ import {
   formatWorkflowCycleError,
   normalizeWorkflowGraph,
   SCHEDULED_TASK_SESSION_TITLE_PREFIX,
+  HookLegacyMigrationService,
 } from '@spark/agent-runtime'
 import type {
   MediaProviderProfile as MediaProviderProfileRuntime,
@@ -2803,6 +2804,11 @@ async function triggerHook(
   context?: { title?: string; body?: string },
 ): Promise<boolean> {
   try {
+    // Hooks V2 迁移后（所有权 v2），已迁移节点由 V2 定义接管，legacy 路径短路防双发；
+    // permission_request 未迁移（plan 审批仍依赖本路径），继续走 legacy。
+    if (isLegacyNodeTakenOverByHooksV2(node)) {
+      return false
+    }
     // 直接调用 hook 逻辑（不通过 IPC）
     // 迁移期双读：renderer 历史上写 ('hooks','data')，主进程读 ('hooks','config')。
     const hookConfigValue =
@@ -2862,6 +2868,23 @@ function readAgentHookConfig(sessionId: string): HookConfigInternal {
   const agent = getAgentRepository().get(session.agent_id ?? 'platform-manager-agent')
   if (agent == null) return { ...DEFAULT_HOOK_CONFIG_INTERNAL, enabled: false }
   return parseHookConfig(agent.hookConfig, { ...DEFAULT_HOOK_CONFIG_INTERNAL, enabled: false })
+}
+
+/**
+ * Hooks V2 所有权检查：迁移（§16）切到 v2 后，session_end / session_fail /
+ * ask_user_question 由 V2 内置定义接管，legacy 触发路径短路防止双发。
+ * permission_request 不迁移（plan 审批仍依赖 legacy 路径），永不由本函数短路。
+ */
+function isLegacyNodeTakenOverByHooksV2(node: HookNode): boolean {
+  if (node !== 'session_end' && node !== 'session_fail' && node !== 'ask_user_question') {
+    return false
+  }
+  try {
+    return new HookLegacyMigrationService(getDatabase()).getOwnership() === 'v2'
+  } catch (err) {
+    log.warn(`hooks v2 ownership check failed: ${String(err)}`)
+    return false
+  }
 }
 
 function applyTelemetrySettings(value: unknown): void {
@@ -9683,6 +9706,11 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('hook:trigger', async (req) => {
     const { sessionId, node, title, body } = req
     log.info(`hook:trigger requested, sessionId=${sessionId}, node=${node}`)
+
+    // Hooks V2 迁移后已迁移节点短路（§16 执行所有权）；permission_request 继续走 legacy。
+    if (isLegacyNodeTakenOverByHooksV2(node)) {
+      return { triggered: false }
+    }
 
     // 从 settings 获取 hook 配置
     // 迁移期双读：renderer 历史上写 ('hooks','data')，主进程读 ('hooks','config')。

@@ -16,6 +16,7 @@ import {
   TextArea as LobeTextArea,
 } from '@lobehub/ui'
 import { ActionIcon, Button } from '@lobehub/ui'
+import { AgentHooksSection } from './hooks/AgentHooksSection'
 import { AvatarPicker } from '../components/AvatarPicker'
 import { AvatarImage } from '../components/AvatarImage'
 import { SkillsPickerModal } from '../components/SkillsPickerModal'
@@ -1577,12 +1578,8 @@ function AgentsTabContent({
             )}
           </ConfigSection>
 
-          <ConfigSection
-            title="Hook"
-            count={draft.hookConfig.enabled ? 1 : 0}
-            description="在特定事件触发 Agent 专属逻辑"
-          >
-            <HookEditor value={draft.hookConfig} onChange={(c) => updateDraft('hookConfig', c)} />
+          <ConfigSection title="Hook" description="Agent 专属 Hook 覆盖（来源与授权状态可见）">
+            <AgentHooksSection agentId={draft.id ?? null} />
           </ConfigSection>
         </aside>
       </div>
@@ -2326,48 +2323,6 @@ function normalizeDraftAvatar(draft: AgentDraft): SparkAvatarConfig {
   const config = draft.avatar
   if (config.kind === 'url' || config.kind === 'upload' || config.kind === 'builtin') return config
   return { kind: 'builtin', id: DEFAULT_AGENT_AVATAR_ID }
-}
-
-function HookEditor({
-  value,
-  onChange,
-}: {
-  value: AgentHookConfig
-  onChange: (v: AgentHookConfig) => void
-}) {
-  const patchNode = (
-    node: AgentHookNode,
-    patch: Partial<AgentHookConfig['nodes'][AgentHookNode]>,
-  ) => {
-    onChange({ ...value, nodes: { ...value.nodes, [node]: { ...value.nodes[node], ...patch } } })
-  }
-  return (
-    <div className="agent-hook-editor">
-      <LobeCheckbox
-        checked={value.enabled}
-        onChange={(checked) => onChange({ ...value, enabled: checked })}
-      >
-        启用 Agent 专属 Hook
-      </LobeCheckbox>
-      {HOOK_NODES.map((item) => (
-        <div key={item.node} className="agent-hook-row">
-          <span>{item.label}</span>
-          <LobeCheckbox
-            checked={value.nodes[item.node].sound}
-            onChange={(checked) => patchNode(item.node, { sound: checked })}
-          >
-            声音
-          </LobeCheckbox>
-          <LobeCheckbox
-            checked={value.nodes[item.node].notification}
-            onChange={(checked) => patchNode(item.node, { notification: checked })}
-          >
-            通知
-          </LobeCheckbox>
-        </div>
-      ))}
-    </div>
-  )
 }
 
 function normalizeAgentHookConfig(value: Record<string, unknown>): AgentHookConfig {

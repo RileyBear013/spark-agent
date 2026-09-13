@@ -238,3 +238,48 @@
     grid-column: 3;
   }
 }
+
+// ─── 会话 Hooks 生效列表（§15.3）────────────────────────────────────────────
+
+.session-hooks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 6px;
+}
+
+.session-hooks-empty {
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.session-hooks-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border-color, rgba(128, 128, 128, 0.15));
+}
+
+.session-hooks-row:last-child {
+  border-bottom: none;
+}
+
+.session-hooks-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.session-hooks-sub {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-hooks-actions {
+  flex-shrink: 0;
+}

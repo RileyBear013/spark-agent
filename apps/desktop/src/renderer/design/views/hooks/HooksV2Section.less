@@ -1,0 +1,424 @@
+/**
+ * Hooks V2 设置区块样式（设计方案 §15：扁平简洁基线——分割线、文字层级、
+ * 图标与状态色表达关系，不做卡片墙）。
+ */
+
+@import (reference) '../SettingsView.less';
+
+.hookv2-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.18));
+}
+
+.hookv2-toolbar-hint {
+  font-size: 12px;
+}
+
+.hookv2-empty-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 36px 0;
+  text-align: center;
+}
+
+.hookv2-def-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.hookv2-def-row {
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.18));
+}
+
+.hookv2-def-row.expanded {
+  background: var(--fill-color, rgba(128, 128, 128, 0.06));
+}
+
+.hookv2-def-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 4px;
+}
+
+.hookv2-def-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.hookv2-def-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.hookv2-def-sub {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hookv2-def-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.hookv2-def-body {
+  padding: 4px 4px 14px 24px;
+}
+
+.rot90 {
+  transform: rotate(90deg);
+}
+
+// ─── 绑定面板 ────────────────────────────────────────────────────────────────
+
+.hookv2-subhead {
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 0 6px;
+}
+
+.hookv2-bindings {
+  max-width: 640px;
+}
+
+.hookv2-binding-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border-color, rgba(128, 128, 128, 0.15));
+}
+
+.hookv2-binding-row:last-of-type {
+  border-bottom: none;
+}
+
+.hookv2-binding-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.hookv2-binding-sub {
+  font-size: 12px;
+}
+
+.hookv2-binding-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+
+.hookv2-empty {
+  padding: 10px 0;
+  font-size: 13px;
+}
+
+// ─── 运行记录 ────────────────────────────────────────────────────────────────
+
+.hookv2-runs {
+  margin-top: 18px;
+}
+
+.hookv2-runs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.hookv2-runs-filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hookv2-run-row {
+  border-bottom: 1px solid var(--border-color, rgba(128, 128, 128, 0.14));
+}
+
+.hookv2-run-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 2px;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font-size: 13px;
+}
+
+.hookv2-run-event {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+
+.hookv2-run-time,
+.hookv2-run-attempts,
+.hookv2-run-duration {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.hookv2-run-error {
+  color: var(--error-color, #d4380d);
+  font-size: 12px;
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hookv2-run-detail {
+  padding: 4px 10px 14px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hookv2-run-detail pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  background: var(--fill-color, rgba(128, 128, 128, 0.08));
+  border-radius: 6px;
+  font-size: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.hookv2-run-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  font-size: 12px;
+}
+
+.hookv2-run-detail-grid code {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.hookv2-run-error-message {
+  font-size: 12px;
+  color: var(--error-color, #d4380d);
+}
+
+.hookv2-run-actions {
+  display: flex;
+  gap: 8px;
+}
+
+// ─── 编辑器 ──────────────────────────────────────────────────────────────────
+
+.hookv2-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 4px;
+}
+
+.hookv2-form-row {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  flex-wrap: wrap;
+}
+
+.hookv2-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+  flex: 1;
+}
+
+.hookv2-field--wide {
+  flex: 3;
+}
+
+.hookv2-field-label {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hookv2-field-hint {
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.hookv2-field-meta {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.hookv2-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.hookv2-mapping-row > *:first-child {
+  width: 160px;
+  flex-shrink: 0;
+}
+
+.hookv2-mapping-row > .lobehub-segmented,
+.hookv2-mapping-row > [class*='segmented'] {
+  flex-shrink: 0;
+}
+
+.hookv2-mapping-empty {
+  font-size: 12px;
+}
+
+.hookv2-fold {
+  border-top: 1px dashed var(--border-color, rgba(128, 128, 128, 0.15));
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.hookv2-fold-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+}
+
+.hookv2-fold-body {
+  padding: 6px 0 10px;
+}
+
+.hookv2-toggle-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  padding: 4px 0;
+  max-width: 360px;
+}
+
+.hookv2-preview {
+  margin-top: 8px;
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.2));
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hookv2-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hookv2-preview-errors {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--error-color, #d4380d);
+}
+
+.hookv2-preview-line {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hookv2-preview-line pre {
+  margin: 0;
+  width: 100%;
+  padding: 8px;
+  background: var(--fill-color, rgba(128, 128, 128, 0.08));
+  border-radius: 6px;
+  font-size: 12px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.hookv2-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.18));
+}
+
+.hookv2-editor-footer-left,
+.hookv2-editor-footer-right {
+  display: flex;
+  gap: 8px;
+}
+
+// ─── 经典通知（V1 兼容）─────────────────────────────────────────────────────
+
+.hookv2-legacy {
+  margin-top: 24px;
+  border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.18));
+  padding-top: 8px;
+}
+
+.hookv2-legacy-hint {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.hookv2-legacy-head {
+  padding: 8px 0;
+  font-size: 13px;
+}
+
+// 窄屏：表单行换行由 flex-wrap 处理；运行行隐藏次要列
+@media (max-width: 720px) {
+  .hookv2-run-attempts,
+  .hookv2-run-duration {
+    display: none;
+  }
+
+  .hookv2-mapping-row {
+    flex-wrap: wrap;
+  }
+}

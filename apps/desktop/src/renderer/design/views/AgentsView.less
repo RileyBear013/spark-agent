@@ -288,7 +288,9 @@
   color: var(--text);
   text-align: left;
   cursor: default;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
   width: 100%;
   font-family: inherit;
   min-height: 220px;
@@ -454,7 +456,6 @@
   gap: 8px;
   margin-top: auto;
 }
-
 
 .agents-card-model {
   display: inline-flex;
@@ -693,7 +694,9 @@
   color: var(--text);
   text-align: left;
   cursor: pointer;
-  transition: background 0.14s ease, box-shadow 0.14s ease;
+  transition:
+    background 0.14s ease,
+    box-shadow 0.14s ease;
 }
 
 .agents-quickchat-project:hover,
@@ -784,7 +787,6 @@
     padding-top: 12px;
   }
 }
-
 
 .agents-loading-state {
   display: flex;
@@ -1178,7 +1180,6 @@
   background: color-mix(in srgb, var(--bg-soft) 40%, transparent);
 }
 
-
 /* Keep the agent editor responsive after the workflow page styles move. */
 @media (max-width: 980px) {
   .agents-detail-grid {
@@ -1570,4 +1571,53 @@
 }
 .agent-config-section.is-interactive:hover .agent-config-advanced {
   color: var(--primary);
+}
+
+// ─── Agent Hooks V2 区块（§15.2）────────────────────────────────────────────
+
+.agent-hooks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-hooks-hint {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.agent-hooks-empty {
+  font-size: 12px;
+  padding: 6px 0;
+}
+
+.agent-hooks-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--border-color, rgba(128, 128, 128, 0.15));
+}
+
+.agent-hooks-row:last-child {
+  border-bottom: none;
+}
+
+.agent-hooks-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.agent-hooks-sub {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-hooks-actions {
+  flex-shrink: 0;
 }

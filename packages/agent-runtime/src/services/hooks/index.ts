@@ -34,3 +34,7 @@ export {
   validateDefinitionInput,
 } from './hook-expression.js'
 export { isSensitiveKey, redactValue, summarizeValue } from './hook-redaction.js'
+export { HookCompensator } from './hook-compensator.js'
+export type { CompensatorSweepResult } from './hook-compensator.js'
+export { HookLegacyMigrationService } from './hook-legacy-migration.js'
+export type { HookOwnership, LegacyMigrationResult } from './hook-legacy-migration.js'

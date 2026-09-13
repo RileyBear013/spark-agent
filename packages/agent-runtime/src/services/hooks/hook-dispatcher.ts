@@ -143,14 +143,16 @@ export class HookDispatcher {
   }
 
   /**
-   * 单次维护扫描：派发积压的 pending 事件并按保留期清理已 resolved 的队列残留。
+   * 单次维护扫描：回收过期 resolving 租约（崩溃后在租约窗口内重启的僵尸事件，
+   * 启动恢复看不到它们）、派发积压的 pending 事件并按保留期清理已 resolved 的队列残留。
    * 宿主用 startSweep 周期调用；事件只在「新事件持久化」时触发派发是不够的——
    * 派发失败释放回 pending 的事件、总开关关闭期间积累的事件、启动恢复出来的
    * 事件都必须靠周期扫描兜底，否则会永久滞留。
    */
   async sweepOnce(
     options: { pruneResolvedAfterMs?: number } = {},
-  ): Promise<{ dispatched: number; pruned: number }> {
+  ): Promise<{ dispatched: number; pruned: number; requeuedLeases: number }> {
+    const requeuedLeases = this.events.requeueExpiredLeases()
     const dispatched = await this.dispatchPending(32)
     let pruned = 0
     const retainMs = options.pruneResolvedAfterMs ?? DEFAULT_RESOLVED_RETENTION_MS
@@ -165,7 +167,7 @@ export class HookDispatcher {
         )
       }
     }
-    return { dispatched, pruned }
+    return { dispatched, pruned, requeuedLeases }
   }
 
   /** 启动周期维护扫描（宿主组合根调用；unref 不阻止进程退出）。 */
