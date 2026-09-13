@@ -591,6 +591,7 @@ export function SparkTuiApp(props: SparkTuiAppProps): ReactElement {
         <WelcomeBox
           version={props.version ?? SPARK_ENGINE_VERSION}
           model={visibleModelName}
+          cwd={formatCwd(props.cwd)}
           capabilities={capabilities}
           theme={theme}
         />

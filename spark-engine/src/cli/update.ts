@@ -348,20 +348,20 @@ function emitCheckReport(outcome: UpdateCheckOutcome, json: boolean, io: UpdateI
   switch (outcome.status) {
     case 'update_available':
       lines.push(
-        `Update available: ${outcome.current} -> ${outcome.manifest.version} (from ${outcome.base})`,
+        `发现新版本 ${outcome.current} → ${outcome.manifest.version}，运行 spark update 安装。`,
       )
       break
     case 'up_to_date':
-      lines.push(`spark ${outcome.current} is up to date (checked ${outcome.base}).`)
+      lines.push(`spark ${outcome.current} 已是最新版本。`)
       break
     case 'remote_older':
       lines.push(
-        `The latest release is ${outcome.manifest.version}, older than the installed ${outcome.current}; refusing to downgrade.`,
+        `远端最新版本 ${outcome.manifest.version} 低于当前安装的 ${outcome.current}，已跳过降级。`,
       )
       break
     case 'prerelease_available':
       lines.push(
-        `The latest release ${outcome.manifest.version} is a prerelease; pass --allow-prerelease to install it.`,
+        `最新版本 ${outcome.manifest.version} 是预发布版；如需安装请使用 --allow-prerelease。`,
       )
       break
   }
