@@ -107,8 +107,11 @@ describe('team-registry types', () => {
     expect(classifyTeamAssetState({ ...base })).toBe('remote-newer')
     // 本地更高
     expect(classifyTeamAssetState({ ...base, remoteVersion: '0.9.0' })).toBe('local-newer')
-    // 版本同、内容异
-    expect(classifyTeamAssetState({ ...base, remoteVersion: '1.0.0' })).toBe(
+    // v2 自包含捆绑：本地与安装基准一致且版本同 → up-to-date（安装后图引用被改写，
+    // 本地与远端信封不可逐字节比；AgentSpec 版本必递增，同版本异内容形态不可达）
+    expect(classifyTeamAssetState({ ...base, remoteVersion: '1.0.0' })).toBe('up-to-date')
+    // 版本同、内容异（无本地 checksum 参与时可达）
+    expect(classifyTeamAssetState({ ...base, localChecksum: null, remoteVersion: '1.0.0' })).toBe(
       'version-equal-content-differs',
     )
   })
@@ -341,14 +344,15 @@ describe('NacosClient', () => {
       calls,
     )
     const client = new NacosClient({ ...baseOpts, fetchImpl })
-    await client.publishConfig({ dataId: 'skill/demo', content: '{}' })
+    await client.publishConfig({ dataId: 'skill:demo', content: '{}' })
     const publishCall = calls.find((c) => c.method === 'POST' && c.url.includes('/cs/config'))
     expect(publishCall).toBeDefined()
-    const body = JSON.parse(publishCall!.body!) as Record<string, string>
-    expect(body.dataId).toBe('skill/demo')
-    expect(body.groupName).toBe('SPARK_TEAM')
-    expect(body.namespaceId).toBe('public')
-    expect(body.content).toBe('{}')
+    // 写端点为 form 编码（JSON body 会被服务端报 Required parameter 缺参）
+    const params = new URLSearchParams(publishCall!.body!)
+    expect(params.get('dataId')).toBe('skill:demo')
+    expect(params.get('groupName')).toBe('SPARK_TEAM')
+    expect(params.get('namespaceId')).toBe('public')
+    expect(params.get('content')).toBe('{}')
   })
 
   it('401 后自动重登重试一轮', async () => {
