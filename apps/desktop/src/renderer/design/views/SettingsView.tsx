@@ -45,6 +45,7 @@ import { useIpcInvoke } from '../hooks/useIpc'
 import { useToast } from '../components/Toast'
 import { filterProvidersForVisibleUi } from '../utils/auto-router-ui'
 import { estimateTokens, ModelCapabilityRegistry } from '@spark/shared'
+import { DEFAULT_TELEGRAM_REMOTE_COMMANDS } from '@spark/protocol'
 import { PlaywrightStatusCard } from './PlaywrightStatusCard'
 import { FfmpegStatusCard } from './FfmpegStatusCard'
 import { VoiceIntegritySettingsItem } from '../voice/VoiceIntegritySettingsItem'
@@ -145,12 +146,12 @@ const REMOTE_CHANNEL_LABELS: Record<RemoteChannelType, string> = {
 
 /**
  * 对外可「新建」的远程通道白名单。
- * QQ 通道依赖腾讯官方 webhook（强制公网 HTTPS + 仅 80/443/8080/8443 + Ed25519 验签），
- * 桌面端本机无法直连；微信 Claw 通道依赖一个项目尚未提供的自建网关，二者目前均不可用，
- * 故暂不在 UI 暴露新建入口。已保存的存量 QQ / 微信连接仍会渲染展示，
- * 因此 REMOTE_CHANNEL_LABELS / REMOTE_CHANNEL_META 保留 qq / wechat-claw 键以保证兼容。
+ * QQ 通道已改为官方 WebSocket 长连接接入（与飞书同构，客户端主动拉取，无需公网），
+ * 现已开放新建；微信 Claw 通道依赖一个项目尚未提供的自建网关，暂不在 UI 暴露新建入口。
+ * 已保存的存量微信连接仍会渲染展示，
+ * 因此 REMOTE_CHANNEL_LABELS / REMOTE_CHANNEL_META 保留 wechat-claw 键以保证兼容。
  */
-const AVAILABLE_REMOTE_CHANNELS: RemoteChannelType[] = ['telegram', 'feishu']
+const AVAILABLE_REMOTE_CHANNELS: RemoteChannelType[] = ['telegram', 'feishu', 'qq']
 
 const REMOTE_STATUS_LABELS: Record<RemoteConnectionConfig['status'], string> = {
   disabled: '已停用',
@@ -197,7 +198,8 @@ const REMOTE_CHANNEL_META: Record<
     short: 'QQ',
     icon: qqLogo,
     consoleLabel: 'QQ 开放平台',
-    setupHint: '填写机器人 AppID 和 AppSecret，用 webhook 接收远程消息。',
+    setupHint:
+      '填写机器人 AppID / App Secret 后保存并启用，系统会自动启动 WebSocket 长连接；单聊加好友直接私聊，群聊需 @机器人。',
   },
   'wechat-claw': {
     label: '微信 Claw',
@@ -784,7 +786,7 @@ function createRemoteDraft(channel: RemoteChannelType): RemoteConnectionConfig {
     commandPrefix: '/',
     allowedUserIds: [],
     allowedChatIds: [],
-    telegramCommands: ['help', 'sessions', 'models', 'agents', 'status'],
+    telegramCommands: [...DEFAULT_TELEGRAM_REMOTE_COMMANDS],
     capabilities: { ...DEFAULT_REMOTE_CAPABILITIES },
     pairedDevices: [],
     createdAt: now,
@@ -912,29 +914,40 @@ function RemoteConnectionsSection() {
     }))
   }
 
+  // 把当前表单草稿落盘（不带任何 UI 反馈），返回服务端归一后的连接配置。
+  // 测试/配对等操作先走它，保证后端基于表单里的最新配置执行；
+  // 保存后 setDraft 与持久化一致，后续 refresh 不会把表单回退成旧值。
+  const persistDraft = async () => {
+    const payload: Omit<Partial<RemoteConnectionConfig>, 'defaultSessionId'> &
+      Pick<RemoteConnectionConfig, 'channel' | 'name'> & {
+        defaultSessionId?: string | null
+      } = {
+      ...draft,
+      defaultSessionId: draft.defaultSessionId ?? null,
+      status: draft.enabled ? draft.status : 'disabled',
+    }
+    // 新建草稿时 createRemoteDraft 把 id 初始化成 ''，spread 会把它带进来，
+    // 这里统一清掉，让服务端按缺失 id 处理（service 会自动 createId）。
+    if (!draft.id) delete (payload as { id?: string }).id
+    else payload.id = draft.id
+    const res = await window.spark.invoke('remote:save', { connection: payload })
+    setConnections((prev) => {
+      const exists = prev.some((item) => item.id === res.connection.id)
+      return exists
+        ? prev.map((item) => (item.id === res.connection.id ? res.connection : item))
+        : [res.connection, ...prev]
+    })
+    setSelectedId(res.connection.id)
+    setDraft(res.connection)
+    await refreshRuntime()
+    return res.connection
+  }
+
   const saveDraft = async () => {
     setBusy('save')
     try {
-      const payload: Partial<RemoteConnectionConfig> &
-        Pick<RemoteConnectionConfig, 'channel' | 'name'> = {
-        ...draft,
-        status: draft.enabled ? draft.status : 'disabled',
-      }
-      // 新建草稿时 createRemoteDraft 把 id 初始化成 ''，spread 会把它带进来，
-      // 这里统一清掉，让服务端按缺失 id 处理（service 会自动 createId）。
-      if (!draft.id) delete (payload as { id?: string }).id
-      else payload.id = draft.id
-      const res = await window.spark.invoke('remote:save', { connection: payload })
-      setConnections((prev) => {
-        const exists = prev.some((item) => item.id === res.connection.id)
-        return exists
-          ? prev.map((item) => (item.id === res.connection.id ? res.connection : item))
-          : [res.connection, ...prev]
-      })
-      setSelectedId(res.connection.id)
-      setDraft(res.connection)
+      await persistDraft()
       setEditorOpen(true)
-      await refreshRuntime()
       toast.success('远程连接已保存')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '保存失败')
@@ -965,13 +978,12 @@ function RemoteConnectionsSection() {
   }
 
   const testConnection = async () => {
-    if (!draft.id) {
-      toast.error('请先保存连接')
-      return
-    }
     setBusy('test')
     try {
-      const res = await window.spark.invoke('remote:test', { id: draft.id })
+      // 先落盘表单里的最新配置再测试：后端 remote:test 只读持久化存储，
+      // 不保存的话测的是旧配置；保存后 setDraft 已同步，refresh 不会清空表单。
+      const saved = await persistDraft()
+      const res = await window.spark.invoke('remote:test', { id: saved.id })
       toast[res.ok ? 'success' : 'error'](res.message)
       await refresh()
     } catch (err) {
@@ -999,6 +1011,17 @@ function RemoteConnectionsSection() {
       toast.error(err instanceof Error ? err.message : '生成配对失败')
     } finally {
       setBusy(null)
+    }
+  }
+
+  const copyPairingCommand = async () => {
+    if (draft.pairing == null) return
+    try {
+      if (navigator.clipboard == null) throw new Error('当前环境不支持剪贴板')
+      await navigator.clipboard.writeText(`/bind ${draft.pairing.code}`)
+      toast.success('配对命令已复制')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : '复制配对命令失败')
     }
   }
 
@@ -1065,6 +1088,12 @@ function RemoteConnectionsSection() {
     (item) => item.connectionId === draft.id,
   )
   const selectedSession = sessions.find((item) => item.id === draft.defaultSessionId)
+  const sessionBindingConflicts =
+    draft.defaultSessionId == null
+      ? []
+      : connections.filter(
+          (item) => item.id !== draft.id && item.defaultSessionId === draft.defaultSessionId,
+        )
   const enabledCount = connections.filter((item) => item.enabled).length
   const connectedCount = connections.filter((item) => item.status === 'connected').length
   const draftChannelMeta = REMOTE_CHANNEL_META[draft.channel]
@@ -1074,7 +1103,7 @@ function RemoteConnectionsSection() {
       <div className="remote-settings-hero">
         <div>
           <h2>远程连接</h2>
-          <div className="lede">通过 Telegram、飞书从远程桌面或移动端与 SparkWork 通信。</div>
+          <div className="lede">通过 Telegram、飞书、QQ 从远程桌面或移动端与 SparkWork 通信。</div>
         </div>
         <div className="remote-runtime-summary">
           <span className={runtimeStatus.running ? 'live' : ''}>
@@ -1325,7 +1354,23 @@ function RemoteConnectionsSection() {
                     })),
                   ]}
                 />
+
+                <label>
+                  跨连接共享会话
+                  <span className="sub">默认关闭；开启会共享对话历史和会话运行配置</span>
+                </label>
+                <Switch
+                  size="middle"
+                  checked={draft.allowSharedSession === true}
+                  onChange={(value) => updateDraft({ allowSharedSession: value })}
+                />
               </div>
+              {sessionBindingConflicts.length > 0 && (
+                <div className="remote-muted-box">
+                  该会话也绑定到：{sessionBindingConflicts.map((item) => item.name).join('、')}。
+                  只有所有相关连接都开启“跨连接共享会话”后才会共享；否则下一条远程消息会自动创建独立会话。
+                </div>
+              )}
               {selectedSession == null && draft.defaultSessionId != null && (
                 <div className="remote-muted-box">
                   当前默认会话未在最近会话列表中找到：{draft.defaultSessionId}
@@ -1356,22 +1401,43 @@ function RemoteConnectionsSection() {
                       : '保存并启用 App ID / App Secret 后会自动启动飞书长连接。'}
                 </div>
               )}
+              {draft.channel === 'qq' && (
+                <div className="remote-muted-box">
+                  {longConnection?.running
+                    ? 'QQ WebSocket 长连接已启动，无需公网 webhook；在 QQ 里发送 /bind 配对码 后即可使用（单聊直接私聊，群聊需 @机器人）。'
+                    : longConnection?.lastError != null
+                      ? `QQ 长连接未启动：${longConnection.lastError}`
+                      : '保存并启用 AppID / AppSecret 后会自动启动 QQ 长连接；建议在 QQ 开放平台配置好群聊与单聊消息能力。'}
+                  {/(op:9|code=40(13|14)|code=49(14|15))/.test(longConnection?.lastError ?? '') && (
+                    <div className="remote-muted-hint">
+                      该报错只影响当前这条连接对应的机器人（多条 QQ 连接相互独立）。常见原因与处理：
+                      机器人未开通「群聊与单聊消息」能力（op:9 /
+                      code=4014）——连接会自动降低事件订阅重试，
+                      开通后重新启用本连接即可恢复全量订阅；机器人未上线时仅允许连接沙箱环境（code=4914）——
+                      请到 QQ 开放平台 → 机器人管理核对消息能力与沙箱/上线配置。
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
             <section className="remote-editor-section">
               <div className="subsec-h">配对</div>
               <div className="remote-pairing-panel">
-                {webhookUrl && draft.channel !== 'telegram' && draft.channel !== 'feishu' && (
-                  <div className="remote-webhook-box">
-                    <span>{webhookUrl}</span>
-                    <Button
-                      size="middle"
-                      icon={<Icons.Copy size={13} />}
-                      onClick={() => void navigator.clipboard?.writeText(webhookUrl)}
-                    >
-                      复制
-                    </Button>
-                  </div>
-                )}
+                {webhookUrl &&
+                  draft.channel !== 'telegram' &&
+                  draft.channel !== 'feishu' &&
+                  draft.channel !== 'qq' && (
+                    <div className="remote-webhook-box">
+                      <span>{webhookUrl}</span>
+                      <Button
+                        size="middle"
+                        icon={<Icons.Copy size={13} />}
+                        onClick={() => void navigator.clipboard?.writeText(webhookUrl)}
+                      >
+                        复制
+                      </Button>
+                    </div>
+                  )}
                 <div className="remote-pairing-actions">
                   <Button
                     size="middle"
@@ -1396,7 +1462,19 @@ function RemoteConnectionsSection() {
                       <div className="remote-pair-code">{draft.pairing.code}</div>
                       <div className="remote-pair-tip">
                         在 {REMOTE_CHANNEL_META[draft.channel].label} 中发送{' '}
-                        <code>/bind {draft.pairing.code}</code> 完成配对。
+                        <span className="remote-pair-command">
+                          <code>/bind {draft.pairing.code}</code>
+                          <button
+                            type="button"
+                            className="remote-pair-command-copy"
+                            title="复制配对命令"
+                            aria-label="复制配对命令"
+                            onClick={() => void copyPairingCommand()}
+                          >
+                            <Icons.Copy size={13} />
+                          </button>
+                        </span>{' '}
+                        完成配对。
                       </div>
                       <div className="muted text-xs-12">
                         过期时间：{new Date(draft.pairing.expiresAt).toLocaleString()}
@@ -1537,7 +1615,8 @@ const REMOTE_CAPABILITY_DESCS: Record<keyof RemoteConnectionCapabilities, string
   controlDesktop: '允许 /focus、/click、/type、/hotkey 等桌面控制命令，默认关闭',
   useInternalBrowser:
     '允许远程会话打开本机可见的 spark_browser 窗口，并读取控制台 / 网络元信息，默认关闭',
-  transferFiles: '预留给远程文件上传、下载与摘要读取，默认关闭',
+  transferFiles:
+    '允许 Telegram、飞书和 QQ 双向传输图片：入站图片进入当前会话识别；QQ 大图及 Telegram 发送失败时可使用 Spark 临时存储中转',
   manageRuntime: '允许 /progress、/queue、/history、/cancel 管理远程任务',
   dangerousActions: '允许 /confirm 确认高危动作，仍需二次确认',
 }

@@ -49,8 +49,13 @@ import { SubAppV2IpcSchemaRegistry } from '../sub-app-v2.js'
 import { CustomToolsIpcSchemaRegistry } from '../custom-tools.js'
 import { ToolPackagesIpcSchemaRegistry } from '../tool-package.js'
 import { NotificationsIpcSchemaRegistry } from '../notifications.js'
+import { HookV2IpcSchemaRegistry } from '../hooks-v2.js'
 import { AccountSyncIpcSchemaRegistry } from '../account-sync.js'
 import { WorkflowBundleIpcSchemaRegistry } from '../workflow-bundle-ipc.js'
+import {
+  SessionWorkflowBindingCreateSchema,
+  SessionWorkflowBindingIpcSchemaRegistry,
+} from '../session-workflow-binding.js'
 
 const PLATFORM_NEWAPI_PROVIDER_ID = 'spark-platform-newapi'
 
@@ -154,10 +159,14 @@ const RemoteConnectionPatchSchema = z.object({
   commandPrefix: z.string().min(1).max(4).optional(),
   allowedUserIds: z.array(z.string().min(1).max(160)).max(200).optional(),
   allowedChatIds: z.array(z.string().min(1).max(160)).max(200).optional(),
-  defaultSessionId: z.string().min(1).max(160).optional(),
+  defaultSessionId: z.string().min(1).max(160).nullable().optional(),
+  allowSharedSession: z.boolean().optional(),
+  defaultWorkspaceId: z.string().min(1).max(160).optional(),
   defaultProviderProfileId: z.string().min(1).max(160).optional(),
   defaultModelId: z.string().min(1).max(200).optional(),
   defaultAgentId: z.string().min(1).max(160).optional(),
+  defaultPermissionMode: SessionPermissionModeSchema.optional(),
+  defaultReasoningEffort: SessionReasoningEffortSchema.optional(),
   telegramCommands: z.array(z.string().min(1).max(80)).max(80).optional(),
   capabilities: RemoteCapabilitiesSchema.optional(),
 })
@@ -180,6 +189,11 @@ export const TeamModeConfigSchema = z.object({
    *  调大可让成员一次看到更多历史正文（代价是每次执行吃更多上下文）；全文始终可用
    *  team_thread_read 工具按需读取，故预算只影响「默认注入多少」。 */
   threadContextTokenBudget: z.number().int().min(500).max(40000).optional(),
+  /** 单次 dispatch 超时（毫秒）。缺省 600_000（10 分钟），上限 1_800_000（与
+   *  agent-runtime 的 MAX_DISPATCH_TIMEOUT_MS 对齐）。Host 在 task.timeoutMs 中可
+   *  按任务覆盖（仍受上限约束）。会话级字段（sessions.metadata.team），无 UI 入口，
+   *  需在 team:list-members 回显时透传以避免提交回写时丢失。 */
+  dispatchTimeoutMs: z.number().int().min(10_000).max(1_800_000).optional(),
 })
 
 // ── 长期团队定义（agent_teams）CRUD 请求 ────────────────────────────────────
@@ -261,6 +275,7 @@ export const SessionCreateRequestSchema = z.object({
   cliSparkOverride: CliSparkOverrideSchema.nullable().optional(),
   title: z.string().max(200).optional(),
   workspaceId: z.string().uuid().optional(),
+  workflowBinding: SessionWorkflowBindingCreateSchema.optional(),
 })
 
 export const SessionSendTurnRequestSchema = z.object({
@@ -1077,8 +1092,10 @@ export const IpcSchemaRegistry = {
   ...CustomToolsIpcSchemaRegistry,
   ...ToolPackagesIpcSchemaRegistry,
   ...NotificationsIpcSchemaRegistry,
+  ...HookV2IpcSchemaRegistry,
   ...AccountSyncIpcSchemaRegistry,
   ...WorkflowBundleIpcSchemaRegistry,
+  ...SessionWorkflowBindingIpcSchemaRegistry,
   'provider:update': ProviderUpdateRequestSchema,
   'provider:delete': ProviderDeleteRequestSchema,
   'provider:test-connection': ProviderConnectionTestRequestSchema,

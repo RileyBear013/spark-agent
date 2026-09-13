@@ -118,8 +118,11 @@ import type { SubAppJob, SubAppV2IpcChannelMap } from '../sub-app-v2.js'
 import type { CustomToolsIpcChannelMap } from '../custom-tools.js'
 import type { ToolPackageRuntimeEvent, ToolPackagesIpcChannelMap } from '../tool-package.js'
 import type { NotificationsIpcChannelMap } from '../notifications.js'
+import type { HookV2IpcChannelMap } from '../hooks-v2.js'
 import type { AccountSyncIpcChannelMap } from '../account-sync.js'
 import type { WorkflowBundleIpcChannelMap } from '../workflow-bundle-ipc.js'
+import type { SessionWorkflowBindingIpcChannelMap } from '../session-workflow-binding.js'
+import type { SessionWorkflowBindingCreate } from '../session-workflow-binding.js'
 import type { NotificationChangedEvent } from '../notifications.js'
 import type { ComputerUseEvent } from '../computer-use/events.js'
 import type { AppControlCommandRequest } from '../computer-use/action.js'
@@ -312,6 +315,8 @@ export interface SessionCreateRequest {
   title?: string
   /** 关联的 Workspace ID（可选）*/
   workspaceId?: string
+  /** Atomically persisted only when the trusted write feature flag is enabled. */
+  workflowBinding?: SessionWorkflowBindingCreate
 }
 
 export interface SessionCreateResponse {
@@ -3562,8 +3567,26 @@ export interface WorkflowDeleteRequest {
   id: string
 }
 
+export interface WorkflowDeleteBlockedReason {
+  code:
+    | 'workflow_referenced_by_agents'
+    | 'workflow_referenced_by_bindings'
+    | 'workflow_run_resumable'
+    | 'workflow_in_installed_bundle'
+  /** workflow_referenced_by_agents：仍绑定该工作流的 Agent。 */
+  agentIds?: string[]
+  /** workflow_referenced_by_bindings：仍挂载该工作流的会话，供 UI 列出。 */
+  sessionIds?: string[]
+  /** workflow_run_resumable：仍可恢复的 Run。 */
+  runIds?: string[]
+  /** workflow_in_installed_bundle：所属 Bundle，删除须走卸载流程。 */
+  bundleId?: string
+}
+
 export interface WorkflowDeleteResponse {
   deleted: boolean
+  /** 删除被引用守卫拦截时的结构化原因；renderer 本地化展示。 */
+  blockedReason?: WorkflowDeleteBlockedReason | null
 }
 
 // ─── App Info Channels ──────────────────────────────────────────────────────
@@ -5820,6 +5843,23 @@ export interface RemoteConnectionCapabilities {
   dangerousActions: boolean
 }
 
+/** Commands shown in Telegram's native bot command menu for new connections. */
+export const DEFAULT_TELEGRAM_REMOTE_COMMANDS = [
+  'help',
+  'status',
+  'projects',
+  'sessions',
+  'new-session',
+  'channels',
+  'models',
+  'agents',
+  'reasoning',
+  'permissions',
+  'progress',
+  'queue',
+  'cancel',
+] as const
+
 export interface RemotePairedDevice {
   id: string
   remoteUserId: string
@@ -5847,9 +5887,15 @@ export interface RemoteConnectionConfig {
   allowedUserIds: string[]
   allowedChatIds: string[]
   defaultSessionId?: string
+  /** Allow multiple remote connections to intentionally share one session and its runtime state. */
+  allowSharedSession?: boolean
+  /** Remote project used when creating the next session. */
+  defaultWorkspaceId?: string
   defaultProviderProfileId?: string
   defaultModelId?: string
   defaultAgentId?: string
+  defaultPermissionMode?: SessionPermissionMode
+  defaultReasoningEffort?: SessionReasoningEffort
   telegramCommands: string[]
   capabilities: RemoteConnectionCapabilities
   pairing?: RemotePairingChallenge
@@ -5884,7 +5930,10 @@ export interface RemoteListResponse {
 }
 
 export interface RemoteSaveRequest {
-  connection: Partial<RemoteConnectionConfig> & Pick<RemoteConnectionConfig, 'channel' | 'name'>
+  connection: Omit<Partial<RemoteConnectionConfig>, 'defaultSessionId'> &
+    Pick<RemoteConnectionConfig, 'channel' | 'name'> & {
+      defaultSessionId?: string | null
+    }
 }
 export interface RemoteSaveResponse {
   connection: RemoteConnectionConfig
@@ -5972,7 +6021,7 @@ export interface RemoteRuntimeStatusResponse {
   }>
   longConnections: Array<{
     connectionId: string
-    channel: 'feishu'
+    channel: 'feishu' | 'qq'
     running: boolean
     lastError?: string
   }>
@@ -6042,7 +6091,7 @@ export interface HookTriggerRequest {
   body?: string
 }
 
-export type SystemNotificationNavigateReason = HookNode | 'plan_approval'
+export type SystemNotificationNavigateReason = HookNode | 'plan_approval' | 'hook'
 
 export type SystemNotificationViewTarget =
   | 'chat'
@@ -6803,8 +6852,10 @@ export interface IpcChannelMap
     CustomToolsIpcChannelMap,
     ToolPackagesIpcChannelMap,
     NotificationsIpcChannelMap,
+    HookV2IpcChannelMap,
     AccountSyncIpcChannelMap,
-    WorkflowBundleIpcChannelMap {
+    WorkflowBundleIpcChannelMap,
+    SessionWorkflowBindingIpcChannelMap {
   // Session
   'session:create': [SessionCreateRequest, SessionCreateResponse]
   'session:send-turn': [SessionSendTurnRequest, SessionSendTurnResponse]
@@ -7663,6 +7714,12 @@ export interface IpcStreamChannelMap {
     sessionId: string
     /** Optional for compatibility with older main processes. */
     session?: SessionListResponse['sessions'][number]
+  }
+  /** Session-scoped workflow binding changed; active Chat views should reload the summary. */
+  'stream:session:config-changed': {
+    sessionId: string
+    bindingInstanceId: string
+    kind: 'workflow-binding'
   }
   /** 用户问题请求（AskUserQuestion 工具，主进程推送，渲染进程显示选择界面）*/
   'stream:session:user-question': UserQuestionRequest

@@ -50,6 +50,7 @@ import { countExistingMembers } from '../../teamMembership'
 import { normalizeEduAssetUrl, resolveModelContextWindowForProvider } from '@spark/shared'
 import { getLastAssistantMessageMarkdown, isLocalCopySlashCommand } from '../chat-copy'
 import { projectQueuedTurnsForDisplay } from './internal-turn-message-visibility'
+import { SessionWorkflowPicker } from './workflow/SessionWorkflowPicker'
 import {
   CLAUDE_AUTO_ROUTER_PROVIDER_ID,
   CLAUDE_AUTO_ROUTER_PROVIDER_NAME,
@@ -854,6 +855,7 @@ export function ComposerV2({
   onRevisionConsumed?: () => void
   onRevisionApplied?: (result: {
     sessionId: string
+    turnId: string
     turnCount: number
     logicalMessageCount: number
   }) => void
@@ -1665,7 +1667,9 @@ export function ComposerV2({
             reference.sourceSessionId,
           ...(reference.snapshotSeq !== undefined ? { snapshotSeq: reference.snapshotSeq } : {}),
         })),
-        editable: turn.userMessageVisibility !== 'hidden',
+        editable:
+          turn.userMessageVisibility !== 'hidden' &&
+          (turn.turnSource == null || turn.turnSource === 'user'),
         ...(turn.runtime != null ? { runtime: turn.runtime } : {}),
       })),
     [sessions],
@@ -4522,6 +4526,16 @@ export function ComposerV2({
                   onChange={handleProviderModelChange}
                 />
               )}
+              <SessionWorkflowPicker
+                sessionId={session?.id ?? null}
+                disabled={sending || isWorking}
+                mentionActive={
+                  teamConfig.enabled &&
+                  pendingMention != null &&
+                  value.includes(`@${pendingMention.name}`) &&
+                  pendingMention.agentId !== effectiveHostAgentId
+                }
+              />
               {showProjectPicker && (
                 <ProjectPicker
                   workspaces={workspaces}

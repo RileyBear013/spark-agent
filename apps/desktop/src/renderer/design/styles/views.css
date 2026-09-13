@@ -1116,7 +1116,7 @@ body.sidebar-resizing {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 0 0;
+  padding: 6px 0 0;
   opacity: 0;
   transition: opacity 0.15s ease;
   pointer-events: none;
@@ -2333,7 +2333,8 @@ body.sidebar-resizing {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 600;
-  font-family: var(--font-mono, 'Geist Mono', ui-monospace, monospace);
+  /* 工具动作名是界面文案；使用 UI 字体，避免 Windows 为等宽字体回退中文时字面异常放大。 */
+  font-family: var(--font-sans);
 }
 .tool-log-entry-subtitle {
   flex: 0 0 auto;
@@ -8431,6 +8432,14 @@ body.inspector-resizing {
 }
 .goal-iteration-divider-next {
   color: color-mix(in srgb, var(--text-muted) 75%, transparent);
+}
+/* ── 定时任务唤醒分割线（scheduled-wake-divider）── 复用 goal-iteration-divider 结构 */
+.scheduled-wake-divider-clock {
+  color: var(--primary);
+}
+.scheduled-wake-divider-time {
+  color: color-mix(in srgb, var(--text-muted) 80%, transparent);
+  font-weight: 500;
 }
 .team-discussion-status {
   display: inline-flex;

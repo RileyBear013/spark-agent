@@ -39,6 +39,7 @@ describe('getLastEditableUserMessageId', () => {
     expect(
       getLastEditableUserMessageId([message({ turnSource: 'scheduled_task' })], false),
     ).toBeNull()
+    expect(getLastEditableUserMessageId([message({ turnSource: 'remote_user' })], false)).toBeNull()
     expect(getLastEditableUserMessageId([message({ status: 'streaming' })], false)).toBeNull()
   })
 
@@ -57,4 +58,32 @@ describe('getLastEditableUserMessageId', () => {
       ),
     ).toBe('message-1')
   })
+
+  it('allows a latest optimistic message cancelled before its user event was persisted', () => {
+    expect(
+      getLastEditableUserMessageId(
+        [
+          message({
+            id: 'optimistic-cancelled',
+            eventIds: [],
+            clientId: 'client-cancelled',
+            deliveryState: 'cancelled',
+          }),
+        ],
+        false,
+      ),
+    ).toBe('optimistic-cancelled')
+  })
+
+  it.each(['submitting', 'queued', 'accepted', 'failed'] as const)(
+    'still rejects an optimistic message in %s state',
+    (deliveryState) => {
+      expect(
+        getLastEditableUserMessageId(
+          [message({ eventIds: [], clientId: 'client-pending', deliveryState })],
+          false,
+        ),
+      ).toBeNull()
+    },
+  )
 })
