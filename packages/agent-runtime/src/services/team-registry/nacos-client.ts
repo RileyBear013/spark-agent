@@ -26,7 +26,7 @@ import type { McpPublishDraftFields } from './mcp-mapping.js'
 export const TEAM_NACOS_GROUP = 'SPARK_TEAM'
 
 export interface NacosClientOptions {
-  /** 控制台地址，如 http://192.168.163.174:8080 */
+  /** 控制台地址，如 http://<nacos-host>:8080 */
   serverUrl: string
   /** 命名空间 id，如 public */
   namespace: string

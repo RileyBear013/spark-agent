@@ -264,7 +264,8 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       } as unknown as McpServerRepository
       const pins = makePinsStub()
       const mcpService = new TeamMcpService(configStore, repoStub, pins)
-      const row = repoStub.create({
+      // 桩直存 DB 行形状（config_json），绕开 McpServerRepository 的类型化 create
+      const row = (repoStub as unknown as { create: (fields: Record<string, unknown>) => Record<string, unknown> }).create({
         scope: 'user',
         name: slug,
         config_json: '{"command":"echo","args":["probe"],"env":{}}',

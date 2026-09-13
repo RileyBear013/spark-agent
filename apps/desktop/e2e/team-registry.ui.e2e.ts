@@ -98,7 +98,7 @@ test.describe.serial('Team registry UI walkthrough', () => {
     await page.getByRole('button', { name: '团队注册中心' }).click()
     await expect(page.locator('.team-registry-section h2')).toHaveText('团队注册中心')
     await expect(page.getByText(/未配置/)).toBeVisible()
-    await expect(page.getByPlaceholder('http://192.168.163.174:8080')).toBeVisible()
+    await expect(page.getByPlaceholder('http://<nacos-host>:8080')).toBeVisible()
     await expect(page.getByPlaceholder('public')).toBeVisible()
     await expect(page.getByPlaceholder('Nacos 控制台账号')).toBeVisible()
     // 密码框占位符随 hasPassword 变化（钥匙串是机器级，非 profile 级），按结构定位
@@ -111,7 +111,7 @@ test.describe.serial('Team registry UI walkthrough', () => {
 
   test('saves config and passes live connection test', async () => {
     test.setTimeout(120_000)
-    await page.getByPlaceholder('http://192.168.163.174:8080').fill(TEST_REGISTRY.baseUrl)
+    await page.getByPlaceholder('http://<nacos-host>:8080').fill(TEST_REGISTRY.baseUrl)
     await page.getByPlaceholder('public').fill(TEST_REGISTRY.namespace)
     await page.getByPlaceholder('Nacos 控制台账号').fill(TEST_REGISTRY.username)
     await page

@@ -142,7 +142,7 @@ export function TeamRegistrySection() {
           <Input
             value={form.serverUrl}
             onChange={(e) => updateField('serverUrl')(e.target.value)}
-            placeholder="http://192.168.163.174:8080"
+            placeholder="http://<nacos-host>:8080"
             autoComplete="off"
           />
         </label>
