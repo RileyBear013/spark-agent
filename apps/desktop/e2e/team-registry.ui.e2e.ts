@@ -4,8 +4,8 @@
  * 覆盖（隔离 userData 的生产模式实例，真实点击导航）：
  * 1. 设置 → 团队注册中心分区渲染（未配置降级态、四个输入框、操作按钮）
  * 2. 真实保存配置 + 连接测试（直连团队 Nacos 测试机）
- * 3. 技能商店 → 团队源 Tab（配置后的空态，不再是"尚未配置"）
- * 4. MCP 管理 → 团队 MCP 区块（配置后的空态）
+ * 3. 团队商店：分类页签 + 共享资产卡片 + 详情抽屉（配置后）
+ * 4. 团队商店「上传共享」面板：三类页签 + 本地资产列表（行/空态）
  *
  * 测试机是团队测试环境（Nacos 默认账号），不涉及生产数据。
  */
@@ -124,25 +124,45 @@ test.describe.serial('Team registry UI walkthrough', () => {
     await expect(page.getByText(/未配置/)).toHaveCount(0)
   })
 
-  test('skill store team tab shows configured empty state', async () => {
+  test('team store lists shared assets with category tabs', async () => {
     test.setTimeout(120_000)
     // 设置页是全屏视图，先返回工作台主壳层，浮动侧边栏才可见
     await page.getByRole('button', { name: '返回工作台' }).click()
     await expect(page.locator('.floating-sidebar')).toBeVisible()
-    await page.locator('.floating-sidebar').getByRole('button', { name: /^技\s*能/ }).click()
-    await page.locator('.skill-store-tab', { hasText: '团队源' }).click()
-    await expect(page.getByText('团队源尚未配置')).toHaveCount(0)
-    await expect(page.getByText(/团队源还没有共享技能/)).toBeVisible({ timeout: 15_000 })
+    await page.locator('.floating-sidebar').getByRole('button', { name: '团队商店' }).click()
+    await expect(page.locator('.team-store-header h2')).toContainText('团队商店')
+    // 分类页签齐全
+    for (const tab of ['全部', '应用', '工作流', '助手', '技能', 'MCP']) {
+      await expect(page.locator('.team-store-cat', { hasText: tab }).first()).toBeVisible()
+    }
+    // 注册中心已有共享资产（团队测试库），等待首张卡片渲染
+    await expect(page.locator('article.team-store-card').first()).toBeVisible({ timeout: 15_000 })
+    // 详情抽屉：点首张卡片出元数据与操作区
+    await page.locator('article.team-store-card').first().click()
+    await expect(page.locator('.team-store-detail')).toBeVisible()
+    await expect(page.getByRole('button', { name: /版本历史/ })).toBeVisible()
+    await page.keyboard.press('Escape')
   })
 
-  test('mcp page team block shows configured empty state', async () => {
+  test('team store upload panel lists local assets for publishing', async () => {
     test.setTimeout(120_000)
-    await page.locator('.floating-sidebar').getByRole('button', { name: '扩展中心' }).first().click()
-    await expect(page.getByRole('button', { name: /团队 MCP/ })).toBeVisible()
-    await expect(page.getByText(/团队 MCP 未启用/)).toHaveCount(0)
-    // 区块默认折叠（折叠态显示共享计数），先展开再断言空态
-    await page.getByRole('button', { name: /团队 MCP/ }).click()
-    await expect(page.getByText(/还没有共享 MCP/)).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('.team-store-header')).toBeVisible()
+    await page.getByRole('button', { name: '上传共享' }).click()
+    await expect(page.getByText('上传共享到团队')).toBeVisible()
+    // 三类页签齐全，默认工作流
+    for (const tab of ['工作流', '应用', '助手']) {
+      await expect(page.getByRole('tab', { name: tab })).toBeVisible()
+    }
+    // 隔离 profile 本地资产数不确定：等待行列表或空态二选一出现
+    await expect(
+      page.locator('.team-store-pub-row').first().or(page.locator('.team-store-pub-empty')),
+    ).toBeVisible({ timeout: 15_000 })
+    // 切到「应用」页签同样能加载（行或空态）
+    await page.getByRole('tab', { name: '应用' }).click()
+    await expect(
+      page.locator('.team-store-pub-row').first().or(page.locator('.team-store-pub-empty')),
+    ).toBeVisible({ timeout: 15_000 })
+    await page.keyboard.press('Escape')
     expect(pageErrors).toEqual([])
   })
 })
