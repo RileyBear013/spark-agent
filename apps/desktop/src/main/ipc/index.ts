@@ -58,6 +58,7 @@ import {
 } from './canvas-task-lifecycle-log.js'
 import { resolveTelemetryLogLevel } from './telemetry-settings.js'
 import { PendingUserQuestionStore } from './user-question-store.js'
+import { RemoteUserQuestionBridge } from './remote-user-question-bridge.js'
 import {
   buildDetachedQuestionContinuationMessage,
   recoverDetachedQuestionAttachments,
@@ -238,6 +239,7 @@ import type {
   MediaCapabilityId,
   SessionId,
   RemoteConnectionConfig,
+  UserQuestionRequest,
 } from '@spark/protocol'
 import type {
   CanvasAssetDownloadBatchResultItem,
@@ -2335,6 +2337,7 @@ const pendingUserQuestions = new PendingUserQuestionStore({
       })
       throw error
     }
+    forwardUserQuestionToRemote(request)
   },
   onClose: (request, reason) => {
     log.info('[QUESTION-DIAG] push stream:session:user-question-closed', {
@@ -2357,6 +2360,7 @@ const pendingUserQuestions = new PendingUserQuestionStore({
         stack: error instanceof Error ? error.stack : undefined,
       })
     }
+    remoteQuestionBridge.notifyClosed(request, reason)
   },
   onDetachedAnswer: async (request, answers, context) => {
     const message = buildDetachedQuestionContinuationMessage(request, answers)
@@ -2377,6 +2381,60 @@ const pendingUserQuestions = new PendingUserQuestionStore({
     })
   },
 })
+
+// ── 远程问答桥 ────────────────────────────────────────────────────────────────
+// AskUserQuestion 触发的问题原本只推给本机渲染端；远程连接发起的回合会卡在
+// 待答状态且远程端毫不知情。这里把问题转发到发起该回合的远程连接，并把远程
+// 回复路由回 resolveUserQuestion，让回合继续（详见 remote-user-question-bridge.ts）。
+const REMOTE_QUESTION_TARGET_TTL_MS = 30 * 60 * 1000
+const lastRemoteTurnTargets = new Map<
+  string,
+  { connectionId: string; externalId: string; at: number }
+>()
+const remoteQuestionBridge = new RemoteUserQuestionBridge({
+  resolveQuestion: (sessionId, questionId, answers) =>
+    pendingUserQuestions.resolve(sessionId, questionId, answers),
+  sendReply: async (target, text) => {
+    await getRemoteConnectionService().sendReply(target.connectionId, target.externalId, text)
+  },
+})
+
+function forwardUserQuestionToRemote(request: UserQuestionRequest): void {
+  try {
+    const target = lastRemoteTurnTargets.get(request.sessionId)
+    if (target == null || Date.now() - target.at > REMOTE_QUESTION_TARGET_TTL_MS) return
+    remoteQuestionBridge.forwardQuestion(request, {
+      connectionId: target.connectionId,
+      externalId: target.externalId,
+    })
+  } catch (error) {
+    // 远程转发失败绝不能影响本地问答流程，否则会把本地弹卡也拖挂。
+    log.warn('Failed to forward user question to remote connection', {
+      sessionId: request.sessionId,
+      questionId: request.questionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+function rememberRemoteTurnTarget(sessionId: string, target: {
+  connectionId: string
+  externalId: string
+}): void {
+  lastRemoteTurnTargets.set(sessionId, { ...target, at: Date.now() })
+  if (lastRemoteTurnTargets.size <= 100) return
+  let oldestKey: string | undefined
+  let oldestAt = Number.POSITIVE_INFINITY
+  for (const [key, value] of lastRemoteTurnTargets) {
+    if (value.at < oldestAt) {
+      oldestAt = value.at
+      oldestKey = key
+    }
+  }
+  if (oldestKey != null) lastRemoteTurnTargets.delete(oldestKey)
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 const remoteTurnTargets = new Map<
   string,
   { connectionId: string; externalId: string; attachments: SessionAttachment[] }
@@ -4077,6 +4135,16 @@ async function handleRemoteInboundMessage(
     effectiveSessionId = (await createRemoteSession(message.connection.id)).sessionId
   }
   const isCommandMessage = trimmedText.startsWith(prefix)
+  // 远程问答桥：会话挂起待答问题时，非命令消息优先当作问题回答路由，
+  // 避免远程发起的回合卡在 AskUserQuestion 上永久挂起。
+  if (
+    !isCommandMessage &&
+    effectiveSessionId != null &&
+    message.connection.capabilities.sendMessages &&
+    (await remoteQuestionBridge.consumeInbound(effectiveSessionId, trimmedText))
+  ) {
+    return undefined
+  }
   const activeSelectionKind =
     !isCommandMessage && /^\d+$/.test(trimmedText)
       ? getActiveRemoteSelectionKind(message.connection.id)
@@ -4163,6 +4231,7 @@ async function handleRemoteInboundMessage(
     externalId: message.externalId,
   }
   const storedTarget = registerRemoteTurn(result.turnId, target)
+  rememberRemoteTurnTarget(sessionId, target)
   void sendRemoteTurnReplyFromHistory(sessionId, result.turnId, storedTarget).catch((err) => {
     log.warn(`Failed to send remote reply from history: ${String(err)}`)
     if (!remoteTurnTargets.has(result.turnId)) return
