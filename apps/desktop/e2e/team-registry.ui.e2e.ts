@@ -24,7 +24,8 @@ const DESKTOP_ROOT = resolve(__dirname, '..')
 const MAIN_ENTRY = join(DESKTOP_ROOT, 'out/main/index.js')
 
 const TEST_REGISTRY = {
-  baseUrl: 'http://192.168.163.174:8080',
+  // 本地 Docker 补丁容器（与团队测试库同源 MySQL）；如需直连远程机可经环境变量覆盖
+  baseUrl: process.env.TEAM_REGISTRY_E2E_URL ?? 'http://127.0.0.1:8080',
   namespace: 'public',
   username: 'nacos',
   password: 'nacos',
@@ -149,16 +150,16 @@ test.describe.serial('Team registry UI walkthrough', () => {
     await expect(page.locator('.team-store-header')).toBeVisible()
     await page.getByRole('button', { name: '上传共享' }).click()
     await expect(page.getByText('上传共享到团队')).toBeVisible()
-    // 三类页签齐全，默认工作流
+    // 三类页签齐全，默认工作流（用面板专属 class 定位，避免与商店分类页签歧义）
     for (const tab of ['工作流', '应用', '助手']) {
-      await expect(page.getByRole('tab', { name: tab })).toBeVisible()
+      await expect(page.locator('.team-store-pub-tab', { hasText: tab })).toBeVisible()
     }
     // 隔离 profile 本地资产数不确定：等待行列表或空态二选一出现
     await expect(
       page.locator('.team-store-pub-row').first().or(page.locator('.team-store-pub-empty')),
     ).toBeVisible({ timeout: 15_000 })
     // 切到「应用」页签同样能加载（行或空态）
-    await page.getByRole('tab', { name: '应用' }).click()
+    await page.locator('.team-store-pub-tab', { hasText: '应用' }).click()
     await expect(
       page.locator('.team-store-pub-row').first().or(page.locator('.team-store-pub-empty')),
     ).toBeVisible({ timeout: 15_000 })
