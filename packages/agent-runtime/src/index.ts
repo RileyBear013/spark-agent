@@ -377,17 +377,22 @@ export { HookService } from './services/hook.service.js'
 export {
   HookActionExecutor,
   HookActionError,
+  HookCompensator,
   HookDispatcher,
   HookEventEmitter,
+  HookLegacyMigrationService,
   HookLifecycleBridge,
   HookManagementService,
   HookWorker,
 } from './services/hooks/index.js'
 export type {
+  CompensatorSweepResult,
   HookBuiltinActionHandlers,
   HookExecutionOutcome,
+  HookOwnership,
   HookToolGateway,
   HookWorkerOptions,
+  LegacyMigrationResult,
 } from './services/hooks/index.js'
 export type { HookErrorCodeV1 } from '@spark/protocol'
 export {

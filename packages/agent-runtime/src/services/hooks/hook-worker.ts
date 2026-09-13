@@ -50,6 +50,8 @@ const DEFAULT_LEASE_MS = 5 * 60_000
 const DEFAULT_POLL_INTERVAL_MS = 2_000
 /** 单个运行连续失败自动暂停阈值（连续 blocked/failed 后进入 needs_review 提示）。 */
 const CONSECUTIVE_FAILURE_PAUSE_THRESHOLD = 5
+/** 周期租约恢复最小间隔：崩溃后在租约窗口内重启的僵尸 running/resolving 由此兜底回收。 */
+const RECOVERY_MIN_INTERVAL_MS = 30_000
 
 export class HookWorker {
   private readonly runs: HookRunRepository
@@ -66,6 +68,8 @@ export class HookWorker {
   private readonly onRunFinished: ((runId: string, status: string) => void) | undefined
   private timer: ReturnType<typeof setInterval> | null = null
   private busy = false
+  private stopped = false
+  private lastRecoveryAt = 0
   private readonly runningRuns = new Map<string, AbortController>()
 
   constructor(
@@ -86,8 +90,26 @@ export class HookWorker {
     this.executor = new HookActionExecutor(options.builtins, options.toolGateway)
   }
 
-  /** 应用启动时的崩溃恢复：事件租约回 pending，过期 running 进入 outcome_unknown。 */
+  /**
+   * 应用启动时的崩溃恢复：事件租约回 pending，过期 running 进入 outcome_unknown。
+   * 崩溃后若在租约窗口内重启，此时租约尚未过期、恢复不到的僵尸由 tickLoop 的
+   * 周期恢复（recoverExpiredLeasesNow）兜底，否则僵尸 running 会永久阻塞
+   * serial_per_session 队列的后续领取。
+   */
   recoverOnStartup(): { requeuedEvents: number; unknownRuns: number } {
+    return this.recoverExpiredLeasesNow()
+  }
+
+  /**
+   * 回收过期的 resolving 事件与 running 运行租约。
+   * 先为本进程正在执行的运行续租，保证批量回收（按「租约已过期 = 无人持有」判定）
+   * 不会误伤活跃执行——即使宿主把 leaseMs 配置得小于动作 timeoutMs 也能安全工作。
+   */
+  recoverExpiredLeasesNow(): { requeuedEvents: number; unknownRuns: number } {
+    this.lastRecoveryAt = Date.now()
+    for (const runId of this.runningRuns.keys()) {
+      this.runs.renewLease(runId, this.owner, this.leaseMs)
+    }
     return {
       requeuedEvents: this.events.requeueExpiredLeases(),
       unknownRuns: this.runs.recoverExpiredLeasesToOutcomeUnknown(),
@@ -96,6 +118,7 @@ export class HookWorker {
 
   start(): void {
     if (this.timer != null) return
+    this.stopped = false
     this.timer = setInterval(() => {
       void this.tickLoop()
     }, this.pollIntervalMs)
@@ -104,6 +127,7 @@ export class HookWorker {
   }
 
   stop(): void {
+    this.stopped = true
     if (this.timer != null) {
       clearInterval(this.timer)
       this.timer = null
@@ -118,9 +142,12 @@ export class HookWorker {
     if (this.busy) return
     this.busy = true
     try {
-      for (let i = 0; i < 16; i += 1) {
+      for (let i = 0; i < 16 && !this.stopped; i += 1) {
         const processed = await this.tickOnce()
         if (!processed) break
+      }
+      if (!this.stopped && Date.now() - this.lastRecoveryAt >= RECOVERY_MIN_INTERVAL_MS) {
+        this.recoverExpiredLeasesNow()
       }
     } finally {
       this.busy = false
@@ -129,7 +156,7 @@ export class HookWorker {
 
   /** 领取并执行一条运行。返回是否处理了运行（false = 没有可执行任务）。 */
   async tickOnce(): Promise<boolean> {
-    if (!this.isEnabled()) return false
+    if (this.stopped || !this.isEnabled()) return false
     const run = this.runs.claimNextRunnable(this.owner, this.leaseMs)
     if (run == null) return false
 

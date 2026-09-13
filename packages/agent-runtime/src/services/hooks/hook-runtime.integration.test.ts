@@ -5,14 +5,18 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HookEventEnvelopeV1 } from '@spark/protocol'
 import {
+  AgentRepository,
   HookEventRepository,
   SessionRepository,
+  SettingsRepository,
   SparkDatabase,
   WorkspaceRepository,
 } from '@spark/storage'
 import { HookDispatcher } from './hook-dispatcher.js'
 import { HookLifecycleBridge } from './hook-lifecycle-bridge.js'
 import { HookManagementService } from './hook-definition-service.js'
+import { HookCompensator } from './hook-compensator.js'
+import { HookLegacyMigrationService } from './hook-legacy-migration.js'
 import { type HookBuiltinActionHandlers, type HookToolGateway } from './hook-action-executor.js'
 import { HookWorker } from './hook-worker.js'
 import { deriveEventId } from './hook-expression.js'
@@ -1222,5 +1226,316 @@ describe('Hook 运行时全管线', () => {
     })
     expect(updated.retryPolicy).toEqual({ mode: 'safe', maxAttempts: 3, backoffMs: 1000 })
     expect(updated.executionHash).toBe(definition.executionHash)
+  })
+
+  it('租约窗口内重启的僵尸 running 运行由周期恢复回收，不永久阻塞串行队列', async () => {
+    const management = new HookManagementService({ db })
+    const definition = management.createDefinition({
+      name: '僵尸租约恢复',
+      eventName: 'response.committed',
+      action: { type: 'builtin.sound' },
+      inputMapping: {},
+    })
+    management.upsertBinding({
+      hookId: definition.id,
+      scopeKind: 'application',
+      enabled: true,
+      authorizeExecutionHash: definition.executionHash,
+    })
+
+    const bridge = new HookLifecycleBridge(db)
+    const dispatcher = new HookDispatcher(db, {
+      owner: 'test-dispatcher',
+      isEnabled: alwaysEnabled,
+    })
+    const builtins = makeBuiltins()
+    const worker = new HookWorker(db, {
+      owner: 'test-worker',
+      builtins,
+      toolGateway: makeToolGateway(),
+      isEnabled: alwaysEnabled,
+    })
+
+    bridge.responseCommitted('session-1', 'turn-30', 'msg-30', '回答')
+    await dispatcher.dispatchPending()
+    const zombieRun = management.listRuns({ hookId: definition.id })[0]
+    expect(zombieRun?.status).toBe('queued')
+
+    // 模拟崩溃：运行被领取进入 running，随后应用在租约窗口内重启（租约未过期）
+    db.raw
+      .prepare(
+        `UPDATE hook_runs SET status = 'running', lease_owner = 'dead-worker',
+         lease_expires_at = ?, started_at = ? WHERE id = ?`,
+      )
+      .run(
+        new Date(Date.now() + 10 * 60_000).toISOString(),
+        new Date().toISOString(),
+        zombieRun?.id,
+      )
+    // 启动恢复看不到未过期租约，僵尸仍然 running
+    expect(worker.recoverOnStartup().unknownRuns).toBe(0)
+    expect(management.getRun(zombieRun?.id as string)?.status).toBe('running')
+
+    // 僵尸 running 阻塞同 Hook 同会话的后续领取（serial_per_session blocker）
+    bridge.responseCommitted('session-1', 'turn-31', 'msg-31', '回答')
+    await dispatcher.dispatchPending()
+    expect(await worker.tickOnce()).toBe(false)
+    expect(builtins.calls).toHaveLength(0)
+
+    // 时间流逝租约过期后，周期恢复回收僵尸 → outcome_unknown（不自动重投）
+    db.raw
+      .prepare(`UPDATE hook_runs SET lease_expires_at = ? WHERE id = ?`)
+      .run(new Date(Date.now() - 1000).toISOString(), zombieRun?.id)
+    const recovery = worker.recoverExpiredLeasesNow()
+    expect(recovery.unknownRuns).toBe(1)
+    expect(management.getRun(zombieRun?.id as string)?.status).toBe('outcome_unknown')
+
+    // 队列解除阻塞，后续运行可正常领取执行
+    expect(await worker.tickOnce()).toBe(true)
+    expect(builtins.calls).toHaveLength(1)
+  })
+
+  it('stop() 后 tickOnce 不再领取新运行', async () => {
+    const management = new HookManagementService({ db })
+    const definition = management.createDefinition({
+      name: '停止语义',
+      eventName: 'response.committed',
+      action: { type: 'builtin.sound' },
+      inputMapping: {},
+    })
+    management.upsertBinding({
+      hookId: definition.id,
+      scopeKind: 'application',
+      enabled: true,
+      authorizeExecutionHash: definition.executionHash,
+    })
+
+    const bridge = new HookLifecycleBridge(db)
+    const dispatcher = new HookDispatcher(db, {
+      owner: 'test-dispatcher',
+      isEnabled: alwaysEnabled,
+    })
+    const builtins = makeBuiltins()
+    const worker = new HookWorker(db, {
+      owner: 'test-worker',
+      builtins,
+      toolGateway: makeToolGateway(),
+      isEnabled: alwaysEnabled,
+    })
+
+    bridge.responseCommitted('session-1', 'turn-40', 'msg-40', '回答')
+    await dispatcher.dispatchPending()
+    expect(management.listRuns({ hookId: definition.id })).toHaveLength(1)
+
+    worker.stop()
+    expect(await worker.tickOnce()).toBe(false)
+    expect(builtins.calls).toHaveLength(0)
+    expect(management.listRuns({ hookId: definition.id })[0]?.status).toBe('queued')
+
+    // 重新启动后恢复领取（start() 立即触发一轮 tickLoop）
+    worker.start()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(builtins.calls).toHaveLength(1)
+    worker.stop()
+  })
+
+  it('租约窗口内重启滞留的 resolving 事件由周期扫描回收重派', async () => {
+    const management = new HookManagementService({ db })
+    const definition = management.createDefinition({
+      name: '事件租约恢复',
+      eventName: 'response.committed',
+      action: { type: 'builtin.sound' },
+      inputMapping: {},
+    })
+    management.upsertBinding({
+      hookId: definition.id,
+      scopeKind: 'application',
+      enabled: true,
+      authorizeExecutionHash: definition.executionHash,
+    })
+
+    const bridge = new HookLifecycleBridge(db)
+    const events = new HookEventRepository(db)
+    const dispatcher = new HookDispatcher(db, {
+      owner: 'test-dispatcher',
+      isEnabled: alwaysEnabled,
+    })
+    bridge.responseCommitted('session-1', 'turn-50', 'msg-50', '回答')
+    const eventId = deriveEventId('response.committed', 'msg-50')
+
+    // 模拟派发中途崩溃：事件滞留 resolving 且租约未过期，启动恢复回收不到
+    db.raw
+      .prepare(
+        `UPDATE hook_events SET status = 'resolving', lease_owner = 'dead-dispatcher',
+         lease_expires_at = ? WHERE event_id = ?`,
+      )
+      .run(new Date(Date.now() + 10 * 60_000).toISOString(), eventId)
+    expect(events.requeueExpiredLeases()).toBe(0)
+    await dispatcher.sweepOnce()
+    expect(events.get(eventId)?.status).toBe('resolving')
+
+    // 时间流逝租约过期后，sweepOnce 回收并当轮派发
+    db.raw
+      .prepare(`UPDATE hook_events SET lease_expires_at = ? WHERE event_id = ?`)
+      .run(new Date(Date.now() - 1000).toISOString(), eventId)
+    const swept = await dispatcher.sweepOnce()
+    expect(swept.requeuedLeases).toBe(1)
+    expect(swept.dispatched).toBe(1)
+    expect(events.get(eventId)?.status).toBe('resolved')
+    expect(management.listRuns({ hookId: definition.id })).toHaveLength(1)
+  })
+
+  it('§16 旧配置迁移：内置定义 + application/agent 绑定 + 所有权切换幂等', () => {
+    const agents = new AgentRepository(db)
+    agents.create({
+      id: 'agent-1',
+      name: '配置过的 Agent',
+      hookConfig: {
+        enabled: true,
+        nodes: { session_end: { sound: false, notification: false } },
+      },
+    })
+    agents.create({ id: 'agent-2', name: '未配置 Agent' })
+    new SessionRepository(db).create({
+      id: 'session-2',
+      kind: 'chat',
+      title: '会话二',
+      status: 'idle',
+      projectId: 'ws-1',
+      workspaceIds: ['ws-1'],
+      agentId: 'agent-2',
+    })
+    // legacy 应用配置：session_end 双开、session_fail 仅通知
+    new SettingsRepository(db).set('hooks', 'data', {
+      enabled: true,
+      nodes: {
+        session_end: { sound: true, notification: true },
+        session_fail: { sound: false, notification: true },
+      },
+    })
+
+    const migration = new HookLegacyMigrationService(db)
+    const result = migration.migrate()
+    expect(result.skipped).toBe(false)
+    expect(result.ownership).toBe('v2')
+    // session_end 双开 → sound+notification 两定义；session_fail → failed+cancelled 通知两定义
+    expect(result.createdDefinitionIds).toHaveLength(4)
+    expect(migration.getOwnership()).toBe('v2')
+
+    const management = new HookManagementService({ db })
+    const endSound = management
+      .listDefinitions()
+      .find((d) => d.id === 'builtin-legacy-session-end-sound')
+    expect(endSound?.eventName).toBe('turn.completed')
+    expect(endSound?.action.type).toBe('builtin.sound')
+
+    // application 绑定 active 且授权哈希匹配
+    const appBindings = management.listBindings({
+      hookId: 'builtin-legacy-session-end-notification',
+      scopeKind: 'application',
+    })
+    expect(appBindings).toHaveLength(1)
+    expect(appBindings[0]?.state).toBe('active')
+    expect(appBindings[0]?.scopeKind).toBe('application')
+
+    // agent-1 显式停用 session_end（覆盖应用级）；agent-2 无绑定继承应用级
+    const agent1Bindings = management.listBindings({ scopeKind: 'agent', scopeId: 'agent-1' })
+    expect(agent1Bindings.length).toBeGreaterThanOrEqual(2)
+    for (const binding of agent1Bindings) {
+      if (binding.hookId.startsWith('builtin-legacy-session-end')) {
+        expect(binding.enabled).toBe(false)
+        expect(binding.state).toBe('disabled')
+      }
+    }
+    const agent2Bindings = management.listBindings({ scopeKind: 'agent', scopeId: 'agent-2' })
+    expect(agent2Bindings).toHaveLength(0)
+
+    // 幂等：再次迁移整体跳过，不重复创建
+    const again = migration.migrate()
+    expect(again.skipped).toBe(true)
+    expect(
+      management.listDefinitions().filter((d) => d.id.startsWith('builtin-legacy-')),
+    ).toHaveLength(4)
+
+    // 事件链路：agent-2 会话（application 生效）产生运行；agent-1 会话被显式停用覆盖
+    const bridge = new HookLifecycleBridge(db)
+    const dispatcher = new HookDispatcher(db, {
+      owner: 'test-dispatcher',
+      isEnabled: alwaysEnabled,
+    })
+    bridge.turnTerminal('session-2', 'turn-a', 'completed')
+    bridge.turnTerminal('session-1', 'turn-b', 'completed')
+    void dispatcher.dispatchPending()
+    const runs2 = management.listRuns({ sessionId: 'session-2' })
+    expect(
+      runs2.filter((r) => r.hookId === 'builtin-legacy-session-end-notification'),
+    ).toHaveLength(1)
+    const runs1 = management.listRuns({ sessionId: 'session-1' })
+    expect(
+      runs1.filter((r) => r.hookId === 'builtin-legacy-session-end-notification'),
+    ).toHaveLength(0)
+  })
+
+  it('§13.2 补偿扫描器：崩溃窗口内丢失的事件按稳定事实源补发且幂等', async () => {
+    const management = new HookManagementService({ db })
+    const completed = management.createDefinition({
+      name: '补偿-完成',
+      eventName: 'turn.completed',
+      action: { type: 'builtin.sound' },
+      inputMapping: {},
+    })
+    const response = management.createDefinition({
+      name: '补偿-回答',
+      eventName: 'response.committed',
+      action: { type: 'builtin.sound' },
+      inputMapping: {},
+    })
+    for (const definition of [completed, response]) {
+      management.upsertBinding({
+        hookId: definition.id,
+        scopeKind: 'application',
+        enabled: true,
+        authorizeExecutionHash: definition.executionHash,
+      })
+    }
+
+    const bridge = new HookLifecycleBridge(db)
+    const compensator = new HookCompensator(db, bridge)
+    // 首轮仅初始化游标（不回溯历史）
+    expect(compensator.sweepOnce()).toEqual({ turnFacts: 0, responseFacts: 0 })
+
+    const now = new Date().toISOString()
+    // 模拟崩溃窗口：turn 与最终 assistant message 已持久化，但事件未发射
+    db.raw
+      .prepare(
+        `INSERT INTO turn_requests (id, session_id, payload_json, status, created_at, updated_at)
+         VALUES (?, ?, '{}', 'completed', ?, ?)`,
+      )
+      .run('turn-comp-1', 'session-1', now, now)
+    db.raw
+      .prepare(
+        `INSERT INTO agent_events (id, session_id, turn_id, event_type, event_json, created_at)
+         VALUES (?, ?, ?, 'assistant_message', ?, ?)`,
+      )
+      .run(
+        'msg-comp-1',
+        'session-1',
+        'turn-comp-1',
+        JSON.stringify({ mode: 'complete', isFinal: true, content: '最终回答' }),
+        now,
+      )
+
+    const events = new HookEventRepository(db)
+    const first = compensator.sweepOnce()
+    expect(first.turnFacts).toBe(1)
+    expect(first.responseFacts).toBe(1)
+    // turn.started 无启用定义 → bridge 零写入短路（未使用的 Hook 不产生事件）
+    expect(events.get(deriveEventId('turn.started', 'turn-comp-1'))).toBeNull()
+    expect(events.get(deriveEventId('turn.completed', 'turn-comp-1'))).not.toBeNull()
+    expect(events.get(deriveEventId('response.committed', 'msg-comp-1'))).not.toBeNull()
+
+    // 幂等：overlap 窗口会重扫同一行，但 eventId 确定性去重不产生重复事件
+    compensator.sweepOnce()
+    expect(events.countByStatus('pending')).toBe(2)
   })
 })
