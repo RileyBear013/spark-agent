@@ -4,7 +4,7 @@ import path from 'node:path'
 import { URL } from 'node:url'
 import type { SettingsService } from '@spark/agent-runtime'
 import { createLogger } from '@spark/shared'
-import { DEFAULT_TELEGRAM_REMOTE_COMMANDS } from '@spark/protocol'
+import { DEFAULT_QQ_REMOTE_COMMANDS, DEFAULT_TELEGRAM_REMOTE_COMMANDS } from '@spark/protocol'
 import type {
   RemoteChannelType,
   RemoteCommandDefinition,
@@ -188,6 +188,7 @@ const DEFAULT_CAPABILITIES: RemoteConnectionCapabilities = {
 }
 
 const COMMAND_CATALOG: RemoteCommandDefinition[] = [
+  { name: 'start', usage: '/start', description: '使用引导与常用命令', capability: 'system' },
   { name: 'help', usage: '/help', description: '查看远程可用命令', capability: 'system' },
   {
     name: 'sessions',
@@ -423,6 +424,7 @@ const CHANNEL_META: Record<
       '复制机器人 AppID 和 AppSecret 到连接配置。',
       'SparkWork 通过 QQ 官方 WebSocket 长连接接收消息，无需公网地址。',
       '单聊：在 QQ 里搜索机器人加好友即可直接私聊；群聊：把机器人拉进群后 @机器人 发消息。',
+      '保存后命令会自动注册为 QQ「指令面板」，在单聊/群聊输入框点击即可快捷填充。',
       '生成配对码后在 QQ 里发送 /bind <配对码> 完成绑定。',
     ],
   },
@@ -486,6 +488,10 @@ function defaultTelegramCommands(): string[] {
   return [...DEFAULT_TELEGRAM_REMOTE_COMMANDS]
 }
 
+function defaultQqCommands(): string[] {
+  return [...DEFAULT_QQ_REMOTE_COMMANDS]
+}
+
 export function buildTelegramBotCommands(
   connection: Pick<RemoteConnectionConfig, 'telegramCommands' | 'capabilities'>,
 ): Array<{ command: string; description: string }> {
@@ -510,6 +516,56 @@ export function buildTelegramBotCommands(
   }
 
   return commands
+}
+
+// QQ 指令面板对元素名称限制 14 字符（约 7 个汉字）、描述限制 30 字符（约 15 个汉字），
+// 均按 UTF-16 码元计。名称超出会破坏命令可执行性，直接跳过；描述仅展示用，超长截断。
+const QQ_COMMAND_NAME_MAX = 14
+const QQ_COMMAND_DESC_MAX = 30
+
+// 标记 SparkWork 创建的指令面板，便于同步时识别自有面板，不碰用户在开放平台手动创建的面板。
+const QQ_COMMAND_PANEL_REMARK = 'sparkwork-remote-commands'
+
+// 指令面板生效场景：单聊（c2c）与群聊（group）均支持全局配置；频道/私信场景机器人
+// 权限要求不同，第一版不对接。
+const QQ_COMMAND_PANEL_SCOPES = ['c2c', 'group'] as const
+
+export type QqCommandPanelItem = {
+  type: 'command'
+  name: string
+  desc: string
+}
+
+export function buildQqCommandPanelItems(
+  connection: Pick<RemoteConnectionConfig, 'qqCommands' | 'capabilities' | 'commandPrefix'>,
+): QqCommandPanelItem[] {
+  const catalog = new Map(COMMAND_CATALOG.map((cmd) => [cmd.name, cmd]))
+  const seen = new Set<string>()
+  const items: QqCommandPanelItem[] = []
+
+  for (const configuredName of connection.qqCommands) {
+    const canonicalName = configuredName.trim().replace(/^\/+/, '').toLowerCase().replace(/_/g, '-')
+    const definition = catalog.get(canonicalName)
+    if (definition == null) continue
+    if (
+      definition.capability !== 'system' &&
+      connection.capabilities[definition.capability] !== true
+    ) {
+      continue
+    }
+    if (seen.has(definition.name)) continue
+    seen.add(definition.name)
+    const prefix = connection.commandPrefix.trim() || '/'
+    const name = `${prefix}${definition.name}`
+    if (name.length > QQ_COMMAND_NAME_MAX) continue
+    items.push({
+      type: 'command',
+      name,
+      desc: definition.description.slice(0, QQ_COMMAND_DESC_MAX),
+    })
+  }
+
+  return items
 }
 
 function createPairingPayload(
@@ -808,6 +864,10 @@ function sanitizeConnection(input: unknown): RemoteConnectionConfig | null {
       normalizeStringArray(input.telegramCommands).length > 0
         ? normalizeStringArray(input.telegramCommands)
         : defaultTelegramCommands(),
+    qqCommands:
+      normalizeStringArray(input.qqCommands).length > 0
+        ? normalizeStringArray(input.qqCommands)
+        : defaultQqCommands(),
     capabilities: isRecord(input.capabilities)
       ? { ...DEFAULT_CAPABILITIES, ...input.capabilities }
       : { ...DEFAULT_CAPABILITIES },
@@ -836,6 +896,7 @@ export class RemoteConnectionService {
   private processedMessages = new Set<string>()
   private tokenCache = new Map<string, TokenCacheEntry>()
   private telegramCommandSignatures = new Map<string, string>()
+  private qqCommandSignatures = new Map<string, string>()
   private telegramCallbackActions = new Map<
     string,
     { connectionId: string; command: string; expiresAt: number }
@@ -924,6 +985,7 @@ export class RemoteConnectionService {
       allowedUserIds: [],
       allowedChatIds: [],
       telegramCommands: defaultTelegramCommands(),
+      qqCommands: defaultQqCommands(),
       capabilities: { ...DEFAULT_CAPABILITIES },
       pairedDevices: [],
       createdAt: timestamp,
@@ -937,6 +999,7 @@ export class RemoteConnectionService {
       allowedUserIds: patch.allowedUserIds ?? base.allowedUserIds,
       allowedChatIds: patch.allowedChatIds ?? base.allowedChatIds,
       telegramCommands: patch.telegramCommands ?? base.telegramCommands,
+      qqCommands: patch.qqCommands ?? base.qqCommands,
       status: patch.enabled === false ? 'disabled' : (patch.status ?? base.status),
       updatedAt: timestamp,
     }
@@ -1180,6 +1243,7 @@ export class RemoteConnectionService {
       this.stopQqGateway(connectionId)
     }
     this.telegramCommandSignatures.clear()
+    this.qqCommandSignatures.clear()
     if (this.server == null) return
     const server = this.server
     this.server = null
@@ -1219,6 +1283,7 @@ export class RemoteConnectionService {
         if (appId == null || clientSecret == null) continue
         activeQqIds.add(connection.id)
         this.startQqGateway(connection, appId, clientSecret)
+        this.queueQqCommandSync(connection, appId, clientSecret)
       }
     }
 
@@ -1786,6 +1851,7 @@ export class RemoteConnectionService {
     const gateway = this.qqGateways.get(connectionId)
     gateway?.stop()
     this.qqGateways.delete(connectionId)
+    this.qqCommandSignatures.delete(connectionId)
   }
 
   private async handleQqInbound(connectionId: string, message: QqInboundMessage): Promise<void> {
@@ -1924,6 +1990,137 @@ export class RemoteConnectionService {
       if (response.ok) this.telegramCommandSignatures.set(connection.id, signature)
     } catch {
       // 命令同步失败不影响消息桥接。
+    }
+  }
+
+  /**
+   * 配置有变化时才同步 QQ 指令面板：先比对签名，命中则直接跳过，
+   * 避免每次 syncRuntime 都消耗指令面板接口的频率配额（10 QPM）。
+   */
+  private queueQqCommandSync(
+    connection: RemoteConnectionConfig,
+    appId: string,
+    clientSecret: string,
+  ): void {
+    const signature = JSON.stringify({
+      commands: connection.qqCommands,
+      capabilities: connection.capabilities,
+      prefix: connection.commandPrefix,
+    })
+    if (this.qqCommandSignatures.get(connection.id) === signature) return
+    void this.getQqToken(connection.id, appId, clientSecret)
+      .then((token) => this.syncQqCommandPanels(connection, token))
+      .catch((err: unknown) => {
+        log.warn(`QQ 指令面板同步失败: ${err instanceof Error ? err.message : String(err)}`)
+      })
+  }
+
+  /**
+   * 将命令注册为 QQ 机器人「指令面板」（对齐 Telegram setMyCommands）。
+   * 单聊/群聊各维护一个带 remark 标记的全局面板；命令清空时删除面板。
+   * 只增删改带标记的自有面板，不碰用户在开放平台手动创建的面板。
+   */
+  private async syncQqCommandPanels(
+    connection: RemoteConnectionConfig,
+    token: string,
+  ): Promise<void> {
+    const signature = JSON.stringify({
+      commands: connection.qqCommands,
+      capabilities: connection.capabilities,
+      prefix: connection.commandPrefix,
+    })
+    if (this.qqCommandSignatures.get(connection.id) === signature) return
+    const items = buildQqCommandPanelItems(connection)
+    try {
+      const panels = await this.listQqCommandPanels(token)
+      for (const scope of QQ_COMMAND_PANEL_SCOPES) {
+        const existing = panels.find((panel) => panel.scope === scope)
+        if (items.length === 0) {
+          if (existing != null) {
+            await this.requestQqOpenApi(
+              token,
+              `/v2/panels/${encodeURIComponent(existing.panelId)}`,
+              { method: 'DELETE' },
+            )
+          }
+          continue
+        }
+        if (existing == null) {
+          await this.requestQqOpenApi(token, '/v2/panels', {
+            method: 'POST',
+            body: JSON.stringify({
+              scope,
+              target_type: 'all',
+              panel: { items, remark: QQ_COMMAND_PANEL_REMARK },
+            }),
+          })
+        } else {
+          await this.requestQqOpenApi(token, `/v2/panels/${encodeURIComponent(existing.panelId)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ panel: { items, remark: QQ_COMMAND_PANEL_REMARK } }),
+          })
+        }
+      }
+      this.qqCommandSignatures.set(connection.id, signature)
+    } catch (err) {
+      log.warn(
+        `QQ 指令面板同步失败: ${err instanceof Error ? err.message : String(err)}（不影响消息收发）`,
+      )
+    }
+  }
+
+  /** 拉取 c2c/group 两个场景下带 SparkWork 标记的面板（单页 limit=50 足够，机器人上限 20 个面板）。 */
+  private async listQqCommandPanels(
+    token: string,
+  ): Promise<Array<{ panelId: string; scope: string }>> {
+    const panels: Array<{ panelId: string; scope: string }> = []
+    for (const scope of QQ_COMMAND_PANEL_SCOPES) {
+      const data = (await this.requestQqOpenApi(token, `/v2/panels?scope=${scope}&limit=50`, {
+        method: 'GET',
+      })) as { records?: unknown }
+      if (!Array.isArray(data.records)) continue
+      for (const record of data.records) {
+        if (!isRecord(record)) continue
+        const panelId = readString(record.panel_id)
+        const panel = isRecord(record.panel) ? record.panel : undefined
+        if (panelId == null || panel?.remark !== QQ_COMMAND_PANEL_REMARK) continue
+        panels.push({ panelId, scope })
+      }
+    }
+    return panels
+  }
+
+  /** QQ OpenAPI 通用请求；成功返回业务数据，失败抛出带 err_code/message 的错误。 */
+  private async requestQqOpenApi(
+    token: string,
+    path: string,
+    init: { method: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: string },
+  ): Promise<unknown> {
+    const response = await fetch(`https://api.bot.qq.com${path}`, {
+      method: init.method,
+      headers: {
+        Authorization: `QQBot ${token}`,
+        ...(init.body != null ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(init.body != null ? { body: init.body } : {}),
+    })
+    const text = await response.text().catch(() => '')
+    if (!response.ok) {
+      let message = text.slice(0, 200)
+      try {
+        const parsed = JSON.parse(text) as { message?: unknown }
+        if (typeof parsed.message === 'string' && parsed.message.length > 0)
+          message = parsed.message
+      } catch {
+        // 非 JSON 响应体保留原文。
+      }
+      throw new Error(`${init.method} ${path} → HTTP ${response.status} ${message}`)
+    }
+    if (text.length === 0) return {}
+    try {
+      return JSON.parse(text)
+    } catch {
+      return {}
     }
   }
 

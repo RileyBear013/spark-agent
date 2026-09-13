@@ -168,6 +168,7 @@ const RemoteConnectionPatchSchema = z.object({
   defaultPermissionMode: SessionPermissionModeSchema.optional(),
   defaultReasoningEffort: SessionReasoningEffortSchema.optional(),
   telegramCommands: z.array(z.string().min(1).max(80)).max(80).optional(),
+  qqCommands: z.array(z.string().min(1).max(80)).max(80).optional(),
   capabilities: RemoteCapabilitiesSchema.optional(),
 })
 

@@ -25,6 +25,7 @@ function connection(
     defaultSessionId: sessionId,
     allowSharedSession,
     telegramCommands: [],
+    qqCommands: [],
     capabilities: {
       sendMessages: true,
       switchModel: true,

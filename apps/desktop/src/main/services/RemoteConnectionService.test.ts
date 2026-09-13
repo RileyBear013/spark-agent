@@ -1,9 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { RemoteConnectionConfig } from '@spark/protocol'
+import {
+  DEFAULT_QQ_REMOTE_COMMANDS,
+  DEFAULT_TELEGRAM_REMOTE_COMMANDS,
+  type RemoteConnectionConfig,
+} from '@spark/protocol'
 
 import {
   RemoteConnectionService,
   buildFeishuCard,
+  buildQqCommandPanelItems,
   buildTelegramBotCommands,
   parseWebhookBody,
 } from './RemoteConnectionService.js'
@@ -418,6 +423,86 @@ describe('remote command coverage', () => {
     })
 
     expect(commands.map((command) => command.command)).toEqual(['new_session'])
+  })
+
+  it('builds a QQ command panel with capability and 14-char name limits applied', () => {
+    const items = buildQqCommandPanelItems({
+      commandPrefix: '/',
+      qqCommands: ['help', 'use_model', 'use-model', 'use-permission', 'use-reasoning', 'missing'],
+      capabilities: {
+        sendMessages: true,
+        switchModel: true,
+        switchSession: true,
+        switchAgent: true,
+        manageWorkspace: true,
+        runCommands: true,
+        approvePermissions: true,
+        observeDesktop: true,
+        controlDesktop: false,
+        useInternalBrowser: true,
+        transferFiles: true,
+        manageRuntime: true,
+        dangerousActions: false,
+      },
+    })
+
+    // use-permission 展开后 15 字符超出面板名称上限被跳过；use_model 与 use-model 去重。
+    expect(items.map((item) => item.name)).toEqual(['/help', '/use-model', '/use-reasoning'])
+    for (const item of items) {
+      expect(item.type).toBe('command')
+      expect(item.name.length).toBeLessThanOrEqual(14)
+      expect(item.desc.length).toBeLessThanOrEqual(30)
+    }
+  })
+
+  it('keeps default QQ commands within the panel name limit with all capabilities on', () => {
+    const items = buildQqCommandPanelItems({
+      commandPrefix: '/',
+      qqCommands: [...DEFAULT_QQ_REMOTE_COMMANDS],
+      capabilities: {
+        sendMessages: true,
+        switchModel: true,
+        switchSession: true,
+        switchAgent: true,
+        manageWorkspace: true,
+        runCommands: true,
+        approvePermissions: true,
+        observeDesktop: true,
+        controlDesktop: true,
+        useInternalBrowser: true,
+        transferFiles: true,
+        manageRuntime: true,
+        dangerousActions: true,
+      },
+    })
+
+    expect(items.length).toBe(DEFAULT_QQ_REMOTE_COMMANDS.length)
+    for (const item of items) expect(item.name.length).toBeLessThanOrEqual(14)
+  })
+
+  it('registers /start as the first native-menu command for new connections', () => {
+    expect(DEFAULT_QQ_REMOTE_COMMANDS[0]).toBe('start')
+    expect(DEFAULT_TELEGRAM_REMOTE_COMMANDS[0]).toBe('start')
+    const items = buildQqCommandPanelItems({
+      commandPrefix: '/',
+      qqCommands: [...DEFAULT_QQ_REMOTE_COMMANDS],
+      capabilities: {
+        sendMessages: true,
+        switchModel: true,
+        switchSession: true,
+        switchAgent: true,
+        manageWorkspace: true,
+        runCommands: true,
+        approvePermissions: true,
+        observeDesktop: true,
+        controlDesktop: true,
+        useInternalBrowser: true,
+        transferFiles: true,
+        manageRuntime: true,
+        dangerousActions: true,
+      },
+    })
+    expect(items.slice(0, 2).map((item) => item.name)).toEqual(['/start', '/help'])
   })
 
   it('covers project, session, channel, model, reasoning, and permission workflows', () => {

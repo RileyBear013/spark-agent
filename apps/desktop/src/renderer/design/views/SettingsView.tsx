@@ -45,7 +45,7 @@ import { useIpcInvoke } from '../hooks/useIpc'
 import { useToast } from '../components/Toast'
 import { filterProvidersForVisibleUi } from '../utils/auto-router-ui'
 import { estimateTokens, ModelCapabilityRegistry } from '@spark/shared'
-import { DEFAULT_TELEGRAM_REMOTE_COMMANDS } from '@spark/protocol'
+import { DEFAULT_QQ_REMOTE_COMMANDS, DEFAULT_TELEGRAM_REMOTE_COMMANDS } from '@spark/protocol'
 import { PlaywrightStatusCard } from './PlaywrightStatusCard'
 import { FfmpegStatusCard } from './FfmpegStatusCard'
 import { VoiceIntegritySettingsItem } from '../voice/VoiceIntegritySettingsItem'
@@ -788,6 +788,7 @@ function createRemoteDraft(channel: RemoteChannelType): RemoteConnectionConfig {
     allowedUserIds: [],
     allowedChatIds: [],
     telegramCommands: [...DEFAULT_TELEGRAM_REMOTE_COMMANDS],
+    qqCommands: [...DEFAULT_QQ_REMOTE_COMMANDS],
     capabilities: { ...DEFAULT_REMOTE_CAPABILITIES },
     pairedDevices: [],
     createdAt: now,
@@ -1571,6 +1572,20 @@ function RemoteConnectionsSection() {
                   rows={5}
                   placeholder="help&#10;sessions&#10;models&#10;agents"
                 />
+              )}
+              {draft.channel === 'qq' && (
+                <>
+                  <TextArea
+                    value={draft.qqCommands.join('\n')}
+                    onChange={(e) => updateDraft({ qqCommands: splitCsv(e.target.value) })}
+                    rows={5}
+                    placeholder="help&#10;sessions&#10;models&#10;agents"
+                  />
+                  <div className="remote-muted-box">
+                    保存并启用后自动注册为 QQ「指令面板」，单聊/群聊输入框上方可快捷点击；
+                    命令名超出 14 字符的面板项会被跳过。
+                  </div>
+                </>
               )}
               <div className="remote-command-list">
                 {commands.map((cmd) => (

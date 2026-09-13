@@ -3196,6 +3196,45 @@ async function executeRemoteCommand(
     return { ok: false, title: '功能未授权', text: `该连接没有启用 ${capability} 能力。\n${hint}` }
   }
 
+  if (command.name === 'start') {
+    const byName = new Map(remoteService.getCommandCatalog().map((cmd) => [cmd.name, cmd]))
+    const commonNames = [
+      'sessions',
+      'new-session',
+      'projects',
+      'channels',
+      'models',
+      'agents',
+      'status',
+      'help',
+    ] as const
+    // 引导语只展示当前连接已授权的常用命令，保证每一条提示都可直接执行。
+    const enabledLines = commonNames
+      .map((name) => byName.get(name))
+      .filter((cmd): cmd is NonNullable<ReturnType<typeof byName.get>> => cmd != null)
+      .filter((cmd) => cmd.capability === 'system' || connection.capabilities[cmd.capability])
+      .map((cmd) => `· ${formatRemoteCommandUsage(cmd.usage, connection)} - ${cmd.description}`)
+    return {
+      ok: true,
+      title: '欢迎使用 SparkWork 远程助手',
+      text: [
+        '我是 SparkWork 桌面端的远程入口：直接发送文字即可下发任务，也可以用命令管理会话、模型和项目。',
+        `常用命令\n${enabledLines.join('\n')}`,
+        `发送 ${formatRemoteCommand(connection, 'help')} 查看全部命令。`,
+      ].join('\n\n'),
+      ...(connection.capabilities.runCommands
+        ? {
+            actions: [
+              { label: '查看会话', command: formatRemoteCommand(connection, 'sessions') },
+              { label: '新建会话', command: formatRemoteCommand(connection, 'new-session') },
+              { label: '渠道与模型', command: formatRemoteCommand(connection, 'channels') },
+              { label: '全部命令', command: formatRemoteCommand(connection, 'help') },
+            ],
+          }
+        : {}),
+    }
+  }
+
   if (command.name === 'help') {
     const commands = remoteService.getCommandCatalog()
     const grouped = [
@@ -3207,7 +3246,7 @@ async function executeRemoteCommand(
       ['远程桌面', ['screen', 'windows', 'focus', 'click', 'type', 'hotkey']],
       ['运行时', ['progress', 'queue', 'history', 'cancel', 'stop']],
       ['消息', ['send']],
-      ['系统', ['status', 'help']],
+      ['系统', ['start', 'status', 'help']],
     ] as const
     const byName = new Map(commands.map((cmd) => [cmd.name, cmd]))
     return {

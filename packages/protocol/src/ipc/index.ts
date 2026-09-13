@@ -5847,6 +5847,30 @@ export interface RemoteConnectionCapabilities {
 
 /** Commands shown in Telegram's native bot command menu for new connections. */
 export const DEFAULT_TELEGRAM_REMOTE_COMMANDS = [
+  'start',
+  'help',
+  'status',
+  'projects',
+  'sessions',
+  'new-session',
+  'channels',
+  'models',
+  'agents',
+  'reasoning',
+  'permissions',
+  'progress',
+  'queue',
+  'cancel',
+] as const
+
+/**
+ * Commands registered into QQ's native command panel (指令面板) for new connections.
+ * QQ limits each panel item name to 14 characters, so only short commands are
+ * listed by default; longer commands can still be added manually and are
+ * skipped at sync time when they exceed the limit.
+ */
+export const DEFAULT_QQ_REMOTE_COMMANDS = [
+  'start',
   'help',
   'status',
   'projects',
@@ -5899,6 +5923,8 @@ export interface RemoteConnectionConfig {
   defaultPermissionMode?: SessionPermissionMode
   defaultReasoningEffort?: SessionReasoningEffort
   telegramCommands: string[]
+  /** Command names registered into QQ's native command panel (指令面板). */
+  qqCommands: string[]
   capabilities: RemoteConnectionCapabilities
   pairing?: RemotePairingChallenge
   pairedDevices: RemotePairedDevice[]
