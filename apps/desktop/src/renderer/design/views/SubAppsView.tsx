@@ -39,7 +39,7 @@ import { GLOBAL_DIALOG_Z_INDEX } from '../components/dialogZIndex'
 import { useI18n } from '../i18n'
 import { Icons } from '../Icons'
 import './SubAppsView.less'
-import { TeamAssetPublishModal, TeamAssetSection } from './TeamAssetMarket'
+import { TeamAssetPublishModal } from './TeamAssetMarket'
 
 // ─── 状态展示 ────────────────────────────────────────────────────────────────
 
@@ -433,7 +433,6 @@ export function SubAppsView(): React.ReactElement {
         </div>
       </header>
 
-      <TeamAssetSection assetType="app" onInstalled={() => void reload()} />
       <div className="sa-body">
         <div className="sa-toolbar" aria-label="应用筛选">
           <div className="sa-toolbar-start">

@@ -312,6 +312,7 @@ export const TRANSLATIONS: Record<Lang, Record<string, string>> = {
     'nav.board': '任务面板',
     'nav.workflows': '工作流',
     'nav.subApps': '我的应用',
+    'nav.teamStore': '团队商店',
     // 测试期功能小标签：渲染在「我的应用 / 工作流 / 画布工作流」导航文字后
     'nav.betaTag': 'Beta',
     'nav.canvas': '无限画布',
@@ -771,6 +772,7 @@ export const TRANSLATIONS: Record<Lang, Record<string, string>> = {
     'nav.board': 'Board',
     'nav.workflows': 'Workflows',
     'nav.subApps': 'My Apps',
+    'nav.teamStore': 'Team Store',
     'nav.betaTag': 'Beta',
     'nav.canvas': 'Canvas',
     'nav.mode.workbench': 'Workbench',

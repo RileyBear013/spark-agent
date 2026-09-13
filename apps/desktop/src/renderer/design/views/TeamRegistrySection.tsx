@@ -11,6 +11,7 @@ import type { TeamRegistryConfigSnapshotDto } from '@spark/protocol'
 import { useIpcInvoke } from '../hooks/useIpc'
 import type { TeamRegistryAssetTypeDto } from '@spark/protocol'
 import { useToast } from '../components/Toast'
+import { useApp } from '../AppContext'
 import './TeamRegistrySection.less'
 
 type InlineStatus = { tone: 'success' | 'error' | 'info'; message: string } | null
@@ -20,6 +21,7 @@ export function TeamRegistrySection() {
   const { invoke: saveConfig } = useIpcInvoke('team-registry:config-save')
   const { invoke: testConnection } = useIpcInvoke('team-registry:test-connection')
   const { toast } = useToast()
+  const { setTweak } = useApp()
 
   const [form, setForm] = useState({ serverUrl: '', namespace: 'public', username: '', password: '' })
   const [snapshot, setSnapshot] = useState<TeamRegistryConfigSnapshotDto | null>(null)
@@ -126,6 +128,12 @@ export function TeamRegistrySection() {
             ○ 未配置——填写并保存后，技能商店将出现「团队源」
           </span>
         )}
+      </div>
+
+      <div className="team-registry-store-link">
+        <Button size="small" onClick={() => setTweak('view', 'team-store')}>
+          打开团队商店 →
+        </Button>
       </div>
 
       <div className="team-registry-form">

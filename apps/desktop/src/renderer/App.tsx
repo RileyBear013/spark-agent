@@ -12,6 +12,7 @@ import {
   type WorkspaceMode,
 } from './design/AppContext'
 import { SessionSidebarProvider, useSessionSidebar } from './design/SessionSidebarContext'
+import { useTeamStoreBadge } from './design/hooks/useTeamStoreBadge'
 import { CanvasProjectSelectionProvider } from './design/views/canvas/CanvasProjectSelectionContext'
 import { SubAppSurfaceProvider } from './design/sub-app/SubAppSurfaceHost'
 import { subAppClient } from './design/sub-app/subAppClient'
@@ -118,6 +119,9 @@ const McpView = React.lazy(async () => ({
 const SkillStoreView = React.lazy(async () => ({
   default: (await import('./design/views/SkillStoreView')).SkillStoreView,
 }))
+const TeamStoreView = React.lazy(async () => ({
+  default: (await import('./design/views/TeamStoreView')).TeamStoreView,
+}))
 const SettingsView = React.lazy(async () => ({
   default: (await import('./design/views/SettingsView')).SettingsView,
 }))
@@ -212,6 +216,7 @@ const SYSTEM_NOTIFICATION_VIEW_TARGETS = new Set<ViewId>([
   'scheduled-tasks',
   'skills',
   'skill-store',
+  'team-store',
   'mcp',
   'plugins',
   'providers',
@@ -272,6 +277,7 @@ const NAV_ITEMS: Array<{
   { id: 'agents', labelKey: 'nav.agents', icon: Icons.Assistant },
   { id: 'providers', labelKey: 'nav.providers', icon: Icons.Server },
   { id: 'skill-store', labelKey: 'nav.skills', icon: Icons.Skills },
+  { id: 'team-store', labelKey: 'nav.teamStore', icon: Icons.Package },
   { id: 'mcp', labelKey: 'nav.extensions', icon: Icons.MCP },
   { id: 'scheduled-tasks', labelKey: 'nav.tasks', icon: Icons.Clock },
   { id: 'workflows', labelKey: 'nav.workflows', icon: Icons.Workflow },
@@ -289,7 +295,7 @@ const WORKBENCH_TOOL_IDS = ['workflows', 'board', 'scheduled-tasks', 'sub-apps']
 const BETA_NAV_IDS = new Set(['workflows', 'sub-apps'])
 // L3 全局共享资源：常驻底部图标条，永不随模式切换。两边都用，故独立成层。
 // 记忆不在此列——按用户决策，记忆入口收归设置页。
-const SHARED_RESOURCE_IDS = ['agents', 'providers', 'skill-store', 'mcp']
+const SHARED_RESOURCE_IDS = ['agents', 'providers', 'skill-store', 'team-store', 'mcp']
 
 // 按 id 集合从 NAV_ITEMS 取子集，保序
 function pickNavItems(ids: string[]) {
@@ -311,6 +317,9 @@ function FloatingSidebar({ onNewTask }: { onNewTask: () => void }) {
   const { t, setTweak, applySyncedAppearance } = useApp()
   const { t: tr } = useI18n()
   const isCanvasMode = t.workspaceMode === 'canvas'
+
+  // 团队商店侧栏角标（可更新总数；未配置恒为 0）
+  const teamStoreBadge = useTeamStoreBadge()
 
   // 切换侧栏工作模式 = 切换主功能。无条件联动主区 view 到该模式的主视图，
   // 避免「侧栏画布 + 主区聊天」的割裂。切模式意味着用户想换到另一个主功能，
@@ -961,6 +970,11 @@ function FloatingSidebar({ onNewTask }: { onNewTask: () => void }) {
             >
               <item.icon size={16} />
               <span className="shared-resource-btn-label">{tr(item.labelKey)}</span>
+              {item.id === 'team-store' && teamStoreBadge > 0 && (
+                <span className="shared-resource-badge" aria-label={`${teamStoreBadge} 个可更新`}>
+                  {teamStoreBadge > 99 ? '99+' : teamStoreBadge}
+                </span>
+              )}
             </button>
           </Tooltip>
         ))}
@@ -1906,6 +1920,8 @@ function Shell() {
         return <SkillStoreView />
       case 'skill-store':
         return <SkillStoreView />
+      case 'team-store':
+        return <TeamStoreView />
       case 'providers':
         return <ProvidersView />
       case 'mcp':

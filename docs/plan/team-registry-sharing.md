@@ -1,6 +1,6 @@
 # 团队注册中心（Nacos）共享方案 — Skills / MCP / 工作流 / 子应用的推拉与版本管理
 
-> 状态: 实施中 | 最后核对: 2026-09-12
+> 状态: 实施中 | 最后核对: 2026-09-13
 
 ## 背景与目标
 
@@ -507,3 +507,29 @@ HTML 源码扫描发现引用 hq-static-db，自动随包捆绑 1 个脱敏 MCP 
   返回该版本 serverSpecification（安装历史版本的内容源）。
 - **验证**：单测 43/43；真机探针 2/2（工作流四版本发布→指定 0.0.1 安装→remote-newer→
   重装最新 up-to-date；MCP 两版本发布→版本列表→版本详情回读→指定 0.0.1 安装→pins 校验）。
+
+
+## v2.3 团队商店（2026-09-13）
+
+状态行：已落地（typecheck/lint 通过，真机点验待预览实例重建后进行）。
+
+- **动机**：旧入口是「管理视角」的堆叠——工作流/Agent/子应用页顶部折叠区块 +
+  MCP 页区块 + 技能商店第三个 Tab，入口分散、无搜索、无筛选、简介不可读。
+  按用户裁决改为「商店视角」：唯一常驻入口，消费侧聚合。
+- **TeamStoreView**：搜索（防抖，名称/简介/发布者）+ 分类页签（全部/应用/工作流/
+  助手/技能/MCP，带计数）+ 状态筛选 chips（可更新/未安装/已安装/需注意——
+  需注意聚合 local-modified / remote-missing / version-equal-content-differs / local-newer）
+  + 排序（最新/名称）+ 卡片网格（类型彩色图标与徽标、版本、发布者、相对时间、
+  两行简介、MCP 协议、技能下载量）+ 详情抽屉（完整简介、元数据表、
+  安装/重装/版本历史入口）+ 可更新横幅（一键全部更新，逐项容错计数汇报）。
+- **侧栏角标**：useTeamStoreBadge（独立小模块，避免 App 静态拖入 lazy 的商店视图）
+  —— 五类 remote-newer 总数，90s 轮询 + 窗口聚焦刷新，未配置恒为 0。
+- **入口**：侧栏共享资源区「团队商店」（SHARED_RESOURCE_IDS + NAV_ITEMS + ViewId
+  team-store + i18n nav.teamStore）；设置 → 团队注册中心新增「打开团队商店」。
+- **清理**：移除三个管理页的 TeamAssetSection、MCP 页 TeamMcpSection、
+  技能商店「团队源」Tab（TabType/isSkillStoreTab 同步收紧）；发布弹窗
+  （TeamAssetPublishModal / McpTeamPublishModal / PublishSkillToTeamModal）全部保留。
+- **纯 UI 层**：零后端/协议改动；已知限制——卡片不展示捆绑内容计数
+  （list 通道无 bundle 明细，需后续 detail 通道）。
+- **验证**：desktop typecheck 0 错误；改动面 lint 0 errors（18 个 warning 均为
+  仓库既有 react-hooks/set-state-in-effect 风格类）；UI 点验依赖预览实例重建。

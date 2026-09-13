@@ -35,7 +35,7 @@ import { SkillAssignHintModal } from '../components/SkillAssignHintModal'
 import { getAgentAvatarConfig, resolveAvatarSrc } from '../avatar'
 import { AGENTS_OPEN_DETAIL_EVENT, AGENTS_OPEN_DETAIL_STORAGE_KEY } from './AgentsView'
 import { MarkdownText } from './ChatView'
-import { TeamMarketTab, PublishSkillToTeamModal } from './SkillTeamMarket'
+import { PublishSkillToTeamModal } from './SkillTeamMarket'
 import {
   useSkills,
   useInstallableCatalog,
@@ -56,7 +56,7 @@ import { useToast } from '../components/Toast'
 import './SkillStoreView.less'
 
 // ─── Main View ────────────────────────────────────────────────────────
-type TabType = 'installed' | 'create' | 'installable' | 'skillhub' | 'team'
+type TabType = 'installed' | 'create' | 'installable' | 'skillhub'
 type SkillInstallProgress = { downloaded: number; total: number }
 export const SKILL_STORE_TARGET_TAB_EVENT = 'spark-agent:skill-store-target-tab'
 export const SKILL_STORE_TARGET_TAB_STORAGE_KEY = 'spark-agent:skill-store-target-tab'
@@ -69,7 +69,6 @@ function isSkillStoreTab(value: unknown): value is TabType {
   return (
     value === 'installed' ||
     value === 'create' ||
-    value === 'team' ||
     value === 'installable' ||
     value === 'skillhub'
   )
@@ -327,7 +326,7 @@ export function SkillStoreView() {
     <div className="view-body" style={{ position: 'relative' }}>
       <div className="skills-view">
         <div className="skill-store-tabs">
-          {(['skillhub', 'team', 'installable', 'installed', 'create'] as const).map((tab) => (
+          {(['skillhub', 'installable', 'installed', 'create'] as const).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -340,9 +339,7 @@ export function SkillStoreView() {
                   ? '精选推荐'
                   : tab === 'skillhub'
                     ? '在线市场'
-                    : tab === 'team'
-                      ? '团队源'
-                      : '创建'}
+                    : '创建'}
             </button>
           ))}
         </div>
@@ -371,8 +368,6 @@ export function SkillStoreView() {
             progress={installProgress}
             setProgress={setInstallProgress}
           />
-        ) : activeTab === 'team' ? (
-          <TeamMarketTab key="team" onInstalled={handleRefresh} />
         ) : (
           <CreateTab
             key={`create-${refreshKey}`}

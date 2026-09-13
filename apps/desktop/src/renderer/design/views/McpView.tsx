@@ -28,7 +28,7 @@ import { useRefreshable } from '../hooks/useRefreshable'
 import { useApp } from '../AppContext'
 import './McpView.less'
 import { McpFilterPopover, SCOPES, type StatusFilter } from './McpFilterPopover'
-import { McpTeamPublishModal, TeamMcpSection } from './McpTeamMarket'
+import { McpTeamPublishModal } from './McpTeamMarket'
 import { PluginMarketplaceView } from './PluginMarketplaceView'
 import { CustomToolsSection } from './CustomToolsSection'
 import {
@@ -562,7 +562,6 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
           <CustomToolsSection />
         ) : (
           <>
-            <TeamMcpSection onInstalled={refresh} />
             {/* ── 卡片网格 ─────────────────────────────────────────────── */}
             <div className="mv_grid_wrap">
               {loading && derived.length === 0 ? (

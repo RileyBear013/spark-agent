@@ -78,7 +78,7 @@ import type { WorkflowTemplate } from './workflow/workflow-templates'
 import { WorkflowBundleImportButton } from './workflow/WorkflowBundleImportButton'
 import { WorkflowBundlePanelButton } from './workflow/WorkflowBundlePanelButton'
 import { WorkflowExportModal } from './workflow/WorkflowExportModal'
-import { TeamAssetPublishModal, TeamAssetSection } from './TeamAssetMarket'
+import { TeamAssetPublishModal } from './TeamAssetMarket'
 import {
   Button,
   Dropdown,
@@ -952,7 +952,6 @@ function WorkflowViewInner() {
             </Button>
           </div>
         </div>
-        <TeamAssetSection assetType="workflow" onInstalled={() => void refresh()} />
         {workflows.length > 0 ? (
           <>
             {selectionMode && visibleSelectedIds.size > 0 && (

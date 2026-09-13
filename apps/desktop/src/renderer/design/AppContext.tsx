@@ -47,6 +47,7 @@ export type ViewId =
   | 'scheduled-tasks'
   | 'skills'
   | 'skill-store'
+  | 'team-store'
   | 'mcp'
   | 'plugins'
   | 'providers'

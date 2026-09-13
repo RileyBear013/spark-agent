@@ -22,7 +22,7 @@ import { SkillsPickerModal } from '../components/SkillsPickerModal'
 import { getAgentAvatarConfig, resolveAvatarSrc, type SparkAvatarConfig } from '../avatar'
 import { DEFAULT_AGENT_AVATAR_ID } from '../builtinAvatars'
 import { TeamsPanel } from './TeamsPanel'
-import { TeamAssetPublishModal, TeamAssetSection } from './TeamAssetMarket'
+import { TeamAssetPublishModal } from './TeamAssetMarket'
 import {
   AGENTS_TARGET_TAB_EVENT,
   AGENTS_TARGET_TAB_STORAGE_KEY,
@@ -1030,7 +1030,6 @@ function AgentsTabContent({
             </div>
           </div>
 
-          <TeamAssetSection assetType="agent" onInstalled={() => void refresh()} />
           <div className="agents-home-filterbar">
             <div className="agents-home-tabs" role="tablist">
               {FILTER_TABS.map((tab) => {
