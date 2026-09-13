@@ -533,3 +533,39 @@ HTML 源码扫描发现引用 hq-static-db，自动随包捆绑 1 个脱敏 MCP 
   （list 通道无 bundle 明细，需后续 detail 通道）。
 - **验证**：desktop typecheck 0 错误；改动面 lint 0 errors（18 个 warning 均为
   仓库既有 react-hooks/set-state-in-effect 风格类）；UI 点验依赖预览实例重建。
+
+## 连接方式：纯配置驱动，应用零内嵌（2026-09-13 固化）
+
+**团队注册中心的连接完全由用户配置决定，应用内不内嵌任何 Nacos 环境地址。**
+
+- 配置入口：设置 → 团队注册中心，四项——注册中心地址 / 命名空间 / 账号 / 密码；
+  密码存本机系统钥匙串（服务 `spark-agent`，键 `team-registry-nacos-password`），不落盘、不进配置文件。
+- 默认态：未配置时 `serverUrl` 为空串，全部团队功能（商店、发布、角标）降级为「未配置」
+  空态，不发起任何网络请求；换环境（本机 Docker / 测试机 / 生产机）只改配置，不改代码。
+- 代码约束：`apps/desktop` 与 `packages/agent-runtime` 的运行时代码不出现任何具体环境
+  地址；示例一律用 `http://<nacos-host>:8080` 占位。仓库中仅存的两类具体地址均非应用运行时：
+  ① `*.live.test.ts` 真机探针的默认值（`TEAM_REGISTRY_LIVE` 门控 + `TEAM_REGISTRY_URL`
+  环境变量可覆盖，测试基建不进产物）；② 本机各实例数据库里的用户配置数据（属数据非代码）。
+- 环境实例现状：本地 Docker 补丁版 Nacos（`127.0.0.1:8080`，见下节）与远程测试机
+  （`192.168.163.174:8080`）共用同一 MySQL，数据同源；Spark 各实例指向哪个，由该实例
+  设置页的配置决定。
+
+## Nacos 改造版本保留清单（2026-09-13 固化）
+
+控制台补丁（分类展示 + 文件查看器修复）的产物保全位置——**均为持久资产，禁止丢失**：
+
+| 产物 | 位置 | 恢复 / 用途 |
+|---|---|---|
+| 补丁源码 | fork 仓库 `D:\harness平台\nacos-console-fork\nacos`，分支 `spark-team-console-patch`：`ab30b8b`（补丁本体）→ `57ec60b`（runbook+打包脚本）→ `24992dd`（部署包入库+保全清单） | 基线 `3.3.0-beta-develop`（`35790e5`，与服务器 SNAPSHOT 同代） |
+| 部署包 | fork 仓库根 `spark-console-next-patch.zip`（已 git 入库）+ `.sha256` 校验文件 | sha256 `4aa8cbcd…da95e`（全值见 `.sha256`） |
+| 补丁版镜像 | 本机 Docker `nacos-server:3.3.0-SNAPSHOT-patched`（容器 `nacos-standalone` 运行中，127.0.0.1:8080） | 现行联调环境 |
+| 镜像离线备份 | `nacos-console-fork/image-backup/nacos-3.3.0-SNAPSHOT-patched.tar.gz`（565MB，docker save 导出，gitignore） | `docker load -i` 一键恢复，防 docker rmi / 换机 |
+| 原始镜像 | 本机 Docker `nacos-server:3.3.0-SNAPSHOT-local`（875MB） | 未打补丁基座，回滚用 |
+| 容器配置备份 | `nacos-console-fork/deploy-backup/container-inspect-backup.json` | 替换容器前的 inspect 快照（端口/MySQL 挂载/网络/重启策略） |
+
+- 重打包铁律：fat jar 内嵌套 console jar 的替换**必须用 JDK 原生 `jar` 工具链**，且嵌套
+  jar 条目在 fat jar 中必须 STORE——PowerShell .NET zip 的结构 Spring Boot loader 不认
+  （症状：启动报 `Unknown nacos start up phase console`）。全过程见 fork 仓库
+  `DEPLOY-RUNBOOK.md`「产物保留清单」节。
+- 远程服务器 `192.168.163.174` 尚未部署补丁（22/2375 不通，等访问方式）；本地容器与它
+  共用同一 MySQL，因此控制台数据一致，仅 UI 补丁差异。
