@@ -2571,6 +2571,282 @@ export interface SkillRegistryCategoriesResponse {
   categories: SkillRegistryCategoryItem[]
 }
 
+// ─── 团队注册中心（Team Nacos Registry） ─────────────────────────────────
+// 信封/推拉领域类型在 @spark/agent-runtime（protocol 不依赖 runtime），
+// 这里只定义 IPC 传输形状；handler 负责领域对象 → DTO 的映射。
+
+export interface TeamRegistryConfigSnapshotDto {
+  /** 三要素齐备（地址/账号/密码）才算已配置，团队功能才启用 */
+  configured: boolean
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 密码只回布尔，明文永不跨 IPC */
+  hasPassword: boolean
+}
+
+export interface TeamRegistryHealthDto {
+  healthy: boolean
+  latencyMs: number
+  error?: string
+}
+
+export interface TeamRegistryConfigGetRequest {}
+
+export interface TeamRegistryConfigGetResponse {
+  snapshot: TeamRegistryConfigSnapshotDto
+}
+
+export interface TeamRegistryConfigSaveRequest {
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 不传 = 保留旧密码；传空串 = 清除密码 */
+  password?: string
+}
+
+export interface TeamRegistryConfigSaveResponse {
+  snapshot: TeamRegistryConfigSnapshotDto
+  healthCheck: TeamRegistryHealthDto
+}
+
+export interface TeamRegistryTestConnectionRequest {
+  serverUrl: string
+  namespace: string
+  username: string
+  /** 测试连接是「未保存表单」的预检，必须带密码 */
+  password: string
+}
+
+export interface TeamRegistryTestConnectionResponse {
+  health: TeamRegistryHealthDto
+}
+
+export interface TeamRegistryPublishSkillRequest {
+  localSkillId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishSkillResponse {
+  slug: string
+  version: string
+  /** 服务端确认的技能名（= slug） */
+  skillName: string
+  fileCount: number
+  checksum: string
+  /** 发布前远端已有版本（null = 首发） */
+  previousRemoteVersion: string | null
+  /** 发布时被跳过的文件（二进制/超限/忽略规则） */
+  skipped: Array<{ path: string; reason: string }>
+  /** 非阻断告警（online 降级 / scope 设置失败等） */
+  warnings: string[]
+}
+
+export interface TeamRegistryInstallSkillRequest {
+  slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
+}
+
+export interface TeamRegistryInstallSkillResponse {
+  skill: SkillItem
+}
+
+export interface TeamRegistryUpdateItemDto {
+  slug: string
+  localSkillId: string
+  name: string
+  localVersion: string
+  remoteVersion: string
+  remoteUpdatedAt: string
+  /**
+   * not-installed | up-to-date | remote-newer | local-newer | local-modified |
+   * version-equal-content-differs | remote-missing
+   */
+  state: string
+}
+
+export interface TeamRegistryListUpdatesRequest {}
+
+export interface TeamRegistryListUpdatesResponse {
+  updates: TeamRegistryUpdateItemDto[]
+}
+
+export interface TeamRegistryConfigHistoryRequest {
+  slug: string
+}
+
+export interface TeamRegistryConfigHistoryResponse {
+  /** Nacos 原生配置历史（倒序，最新在前），无历史返回空数组 */
+  history: Array<{ modifiedAt?: number; md5?: string }>
+}
+
+// ─── Team Registry MCP（团队 MCP 推拉，M2） ─────────────────────────────
+
+export interface TeamRegistryMcpListItemDto {
+  slug: string
+  name: string
+  description: string
+  version: string
+  protocol: string
+}
+
+export interface TeamRegistryListMcpRequest {}
+
+export interface TeamRegistryListMcpResponse {
+  servers: TeamRegistryMcpListItemDto[]
+}
+
+export interface TeamRegistryPublishMcpRequest {
+  mcpServerId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishMcpResponse {
+  slug: string
+  version: string
+  /** spec 里携带的敏感命名变量键（env/headers；只报键名不报值） */
+  sensitiveKeys: string[]
+  previousRemoteVersion: string | null
+}
+
+export interface TeamRegistryInstallMcpRequest {
+  slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
+}
+
+export interface TeamRegistryInstallMcpResponse {
+  slug: string
+  version: string
+  localServerId: string
+  updatedExisting: boolean
+  requiresRestart: boolean
+}
+
+export interface TeamRegistryMcpUpdateItemDto {
+  slug: string
+  localServerId: string | null
+  name: string
+  localVersion: string | null
+  remoteVersion: string
+  /** not-installed | up-to-date | remote-newer | local-newer | version-equal-content-differs | remote-missing */
+  state: string
+}
+
+export interface TeamRegistryListMcpUpdatesRequest {}
+
+export interface TeamRegistryListMcpUpdatesResponse {
+  updates: TeamRegistryMcpUpdateItemDto[]
+}
+
+// ─── Team Registry 信封资产（工作流/平台 Agent/子应用 推拉，M3/M4） ────────
+
+/** 信封型团队资产类型（skill/mcp 走 Nacos 原生资源，不经此组通道） */
+export type TeamRegistryAssetTypeDto = 'workflow' | 'agent' | 'app'
+
+export interface TeamRegistryAssetListItemDto {
+  slug: string
+  name: string
+  description: string
+  version: string
+  author: string
+  updatedAt: string
+}
+
+export interface TeamRegistryListAssetsRequest {
+  assetType: TeamRegistryAssetTypeDto
+}
+
+export interface TeamRegistryListAssetsResponse {
+  items: TeamRegistryAssetListItemDto[]
+}
+
+export interface TeamRegistryPublishAssetRequest {
+  assetType: TeamRegistryAssetTypeDto
+  /** 本地实体 id（工作流 id / agent id / 子应用 id） */
+  localId: string
+  /** 显式版本号；不传则远端已有版本 patch+1，首发为 1.0.0 */
+  version?: string
+}
+
+export interface TeamRegistryPublishAssetResponse {
+  slug: string
+  name: string
+  version: string
+  previousRemoteVersion: string | null
+  /** 发布确认提示（引用为机器本地 id、V2 限制等） */
+  warnings: string[]
+}
+
+export interface TeamRegistryInstallAssetRequest {
+  assetType: TeamRegistryAssetTypeDto
+  slug: string
+  /** 指定安装版本（历史版本/回滚）；缺省为最新已发布版本 */
+  version?: string
+}
+
+export interface TeamRegistryInstallAssetResponse {
+  slug: string
+  name: string
+  version: string
+  localId: string
+  updatedExisting: boolean
+  /** 自包含捆绑物化提示（MCP 待补密钥/捆绑 Agent 停用态/unresolved 项） */
+  warnings?: string[]
+}
+
+export interface TeamRegistryAssetUpdateItemDto {
+  slug: string
+  name: string
+  localId: string | null
+  localVersion: string | null
+  remoteVersion: string
+  /** not-installed | up-to-date | remote-newer | local-newer | local-modified | version-equal-content-differs | remote-missing */
+  state: string
+}
+
+export interface TeamRegistryListAssetUpdatesRequest {
+  assetType: TeamRegistryAssetTypeDto
+}
+
+export interface TeamRegistryListAssetUpdatesResponse {
+  updates: TeamRegistryAssetUpdateItemDto[]
+}
+/** 团队资产版本行（安装历史版本 / 回滚选择；仅含已发布可安装版本） */
+export interface TeamRegistryVersionItemDto {
+  version: string
+  status: string
+  author: string | null
+}
+
+export interface TeamRegistryListAssetVersionsRequest {
+  assetType: TeamRegistryAssetTypeDto
+  slug: string
+}
+
+export interface TeamRegistryListAssetVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
+}
+
+export interface TeamRegistryListSkillVersionsRequest {
+  slug: string
+}
+
+export interface TeamRegistryListSkillVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
+}
+
+export interface TeamRegistryListMcpVersionsRequest {
+  slug: string
+}
+
+export interface TeamRegistryListMcpVersionsResponse {
+  versions: TeamRegistryVersionItemDto[]
+}
+
 // ─── Installable Skill Catalog（内置可安装技能卡片） ─────────────────────
 
 /** 可安装技能的来源（与 InstallableSkillSource 运行时定义对齐） */
@@ -3515,6 +3791,32 @@ export interface SettingsGetAllRequest {}
 
 export interface SettingsGetAllResponse {
   settings: Record<string, Record<string, unknown>>
+}
+
+// ─── Data（dev 实例继承安装版数据库） ─────────────────────────────────────────
+
+export interface DataGetInheritInfoRequest {}
+
+export interface DataGetInheritInfoResponse {
+  /** 当前实例处于 dev 沙箱（userData 为 -dev 后缀）且安装版数据库存在时为 true */
+  available: boolean
+  /** 当前是否运行在 dev 沙箱目录 */
+  currentIsDev: boolean
+  /** 安装版 spark.db 绝对路径（存在时返回） */
+  productionDbPath?: string
+  /** 安装版 spark.db 大小（字节，存在时返回） */
+  productionDbSizeBytes?: number
+  /** available=false 时的原因说明（用于 UI 提示） */
+  reason?: string
+}
+
+export interface DataInheritProductionDbRequest {}
+
+export interface DataInheritProductionDbResponse {
+  /** 快照已暂存，应用即将 relaunch 重启生效 */
+  restarting: boolean
+  /** 快照文件大小（字节） */
+  incomingBytes?: number
 }
 
 // ─── Prompt Library Package（无限画布 · 全局提示词库文件夹包） ────────────────
@@ -6839,6 +7141,61 @@ export interface IpcChannelMap
   'skill:install-status': [SkillInstallStatusRequest, SkillInstallStatusResponse]
   'skill:uninstall-catalog': [SkillUninstallCatalogRequest, SkillUninstallCatalogResponse]
   'skill:install-remote': [SkillInstallRemoteRequest, SkillInstallRemoteResponse]
+  // Team Registry（团队 Nacos 注册中心）
+  'team-registry:config-get': [TeamRegistryConfigGetRequest, TeamRegistryConfigGetResponse]
+  'team-registry:config-save': [TeamRegistryConfigSaveRequest, TeamRegistryConfigSaveResponse]
+  'team-registry:test-connection': [
+    TeamRegistryTestConnectionRequest,
+    TeamRegistryTestConnectionResponse,
+  ]
+  'team-registry:publish-skill': [
+    TeamRegistryPublishSkillRequest,
+    TeamRegistryPublishSkillResponse,
+  ]
+  'team-registry:install-skill': [
+    TeamRegistryInstallSkillRequest,
+    TeamRegistryInstallSkillResponse,
+  ]
+  'team-registry:list-updates': [TeamRegistryListUpdatesRequest, TeamRegistryListUpdatesResponse]
+  'team-registry:list-mcp': [TeamRegistryListMcpRequest, TeamRegistryListMcpResponse]
+  'team-registry:publish-mcp': [TeamRegistryPublishMcpRequest, TeamRegistryPublishMcpResponse]
+  'team-registry:install-mcp': [TeamRegistryInstallMcpRequest, TeamRegistryInstallMcpResponse]
+  'team-registry:list-mcp-updates': [
+    TeamRegistryListMcpUpdatesRequest,
+    TeamRegistryListMcpUpdatesResponse
+  ]
+  'team-registry:list-asset-versions': [
+    TeamRegistryListAssetVersionsRequest,
+    TeamRegistryListAssetVersionsResponse
+  ]
+  'team-registry:list-skill-versions': [
+    TeamRegistryListSkillVersionsRequest,
+    TeamRegistryListSkillVersionsResponse
+  ]
+  'team-registry:list-mcp-versions': [
+    TeamRegistryListMcpVersionsRequest,
+    TeamRegistryListMcpVersionsResponse
+  ]
+  'team-registry:list-assets': [
+    TeamRegistryListAssetsRequest,
+    TeamRegistryListAssetsResponse
+  ],
+  'team-registry:publish-asset': [
+    TeamRegistryPublishAssetRequest,
+    TeamRegistryPublishAssetResponse
+  ],
+  'team-registry:install-asset': [
+    TeamRegistryInstallAssetRequest,
+    TeamRegistryInstallAssetResponse
+  ],
+  'team-registry:list-asset-updates': [
+    TeamRegistryListAssetUpdatesRequest,
+    TeamRegistryListAssetUpdatesResponse
+  ],
+  'team-registry:config-history': [
+    TeamRegistryConfigHistoryRequest,
+    TeamRegistryConfigHistoryResponse,
+  ]
 
   // External Tools (IDE / Terminal)
   'tool:detect': [ToolDetectRequest, ToolDetectResponse]
@@ -6876,6 +7233,10 @@ export interface IpcChannelMap
   'settings:set': [SettingsSetRequest, SettingsSetResponse]
   'settings:get-category': [SettingsGetCategoryRequest, SettingsGetCategoryResponse]
   'settings:get-all': [SettingsGetAllRequest, SettingsGetAllResponse]
+
+  // dev 实例继承安装版数据库（快照导入 + 重启生效）
+  'data:get-inherit-info': [DataGetInheritInfoRequest, DataGetInheritInfoResponse]
+  'data:inherit-production-db': [DataInheritProductionDbRequest, DataInheritProductionDbResponse]
 
   // 无限画布 · 全局提示词库文件夹包导入导出（prompt-library.json + covers/）
   'prompt-library:export-package': [

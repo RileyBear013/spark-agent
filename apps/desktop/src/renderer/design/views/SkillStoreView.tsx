@@ -35,6 +35,7 @@ import { SkillAssignHintModal } from '../components/SkillAssignHintModal'
 import { getAgentAvatarConfig, resolveAvatarSrc } from '../avatar'
 import { AGENTS_OPEN_DETAIL_EVENT, AGENTS_OPEN_DETAIL_STORAGE_KEY } from './AgentsView'
 import { MarkdownText } from './ChatView'
+import { PublishSkillToTeamModal } from './SkillTeamMarket'
 import {
   useSkills,
   useInstallableCatalog,
@@ -430,6 +431,7 @@ function InstalledTab({
     error: '',
   })
   const [detailOpen, setDetailOpen] = useState(false)
+  const [publishSkill, setPublishSkill] = useState<SkillItem | null>(null)
   const { toast } = useToast()
 
   const dedupedSkills = useMemo(() => deduplicateSkills(skills), [skills])
@@ -694,6 +696,11 @@ function InstalledTab({
           {total} 个已安装 · {enabledCount} 个已启用
         </div>
       </div>
+      <PublishSkillToTeamModal
+        open={publishSkill != null}
+        skill={publishSkill}
+        onClose={() => setPublishSkill(null)}
+      />
       <Modal
         className="skill-detail-modal"
         open={detailOpen}
@@ -720,6 +727,15 @@ function InstalledTab({
               )}
             </div>
             <div className="skill-detail-modal-footer-right">
+              {selectedSkill && !selectedSkill.id.startsWith('builtin:') && (
+                <Button
+                  size="small"
+                  icon={<Icons.Users size={14} />}
+                  onClick={() => selectedSkill && setPublishSkill(selectedSkill)}
+                >
+                  发布到团队
+                </Button>
+              )}
               <Button
                 size="small"
                 type="primary"

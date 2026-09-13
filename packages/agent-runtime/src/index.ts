@@ -542,3 +542,45 @@ export type {
 } from './services/workflow-executor.js'
 export { WorkflowBundleService } from './services/workflow-bundle/index.js'
 export type { ActivateMcpResult } from './services/workflow-bundle/index.js'
+
+// ─── Team Registry（团队 Nacos 注册中心：技能/MCP/信封资产推拉） ─────
+export { TeamRegistryService, collectSkillFiles } from './services/team-registry/index.js'
+export { TeamMcpService, mcpSlugOf, pickLatestTeamVersion, listInstallableTeamVersions, toVersionInfos } from './services/team-registry/index.js'
+export {
+  TeamAssetService,
+  slugifyAssetName,
+  type TeamAssetPort,
+  type TeamAssetBuildResult,
+  type TeamAssetListItem,
+  type TeamAssetUpdateInfo,
+  type TeamAssetPublishResult,
+  type TeamAssetInstallResult,
+  type EnvelopeAssetType,
+} from './services/team-registry/index.js'
+export type {
+  TeamMcpInstallResult,
+  TeamMcpListItem,
+  TeamMcpPublishResult,
+  TeamMcpUpdateInfo,
+} from './services/team-registry/index.js'
+export {
+  TeamBundleInstaller,
+  bundlePublishWarnings,
+  collectTeamBundle,
+  isBundleEmpty,
+  type TeamBundleCollectorDeps,
+  type TeamBundleInstallDeps,
+  type TeamBundleMeta,
+  type TeamBundleMaterializeResult,
+} from './services/team-registry/index.js'
+export type {
+  TeamAssetEnvelope,
+  TeamBundleSpec,
+  TeamBundleUnresolved,
+} from './services/team-registry/index.js'
+export { computeNormalizedPayloadChecksum, computePayloadChecksum } from './services/team-registry/types.js'
+export { TeamRegistryConfigStore } from './services/team-registry/team-registry-config.js'
+export type { TeamRegistryConfigInput, TeamRegistryConfigSnapshot } from './services/team-registry/team-registry-config.js'
+
+export type { TeamSkillPublishResult, TeamSkillUpdateInfo } from './services/skill-registry/index.js'
+export { collectGraphDependencies, rewriteGraphReferences } from './services/workflow-bundle/index.js'

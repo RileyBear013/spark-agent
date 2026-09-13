@@ -63,6 +63,7 @@ describe('IPC handler registration completeness', () => {
     const namespaces = [...new Set(definedChannels.map((ch) => ch.split(':')[0]))]
     expect(namespaces.sort()).toEqual(
       [
+        'account-sync',
         'agent',
         'app',
         'app-snapshot',
@@ -78,6 +79,7 @@ describe('IPC handler registration completeness', () => {
         'computer-use',
         'context',
         'custom-tools',
+        'data',
         'deliberation',
         'dialog',
         'env',
@@ -90,6 +92,7 @@ describe('IPC handler registration completeness', () => {
         'history-import',
         'hook',
         'html',
+        'image',
         'log',
         'mcp',
         'memory',
@@ -123,8 +126,10 @@ describe('IPC handler registration completeness', () => {
         'task-execution',
         'task-graph',
         'team',
+        'team-registry',
         'terminal',
         'tool',
+        'tool-packages',
         'update',
         'usage',
         'video',
@@ -132,6 +137,7 @@ describe('IPC handler registration completeness', () => {
         'voice',
         'window',
         'workflow',
+        'workflow-bundle',
         'workspace',
         'workspace-search',
       ].sort(),

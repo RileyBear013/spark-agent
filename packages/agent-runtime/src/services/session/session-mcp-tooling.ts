@@ -171,9 +171,12 @@ export class SessionMcpTooling {
       })
     await pluginManager.initialize()
     const skillLoader = new SkillLoader(skillRepo)
+    const { TeamRegistryConfigStore, TeamRegistryService } = await import('../team-registry/index.js')
     const skillRegistryService = new SkillRegistryService(
       this.db,
       this.host.getUserSkillsDir() ?? undefined,
+      undefined,
+      new TeamRegistryService(new TeamRegistryConfigStore(this.db)),
     )
 
     // Initialize skill registry adapters (loads marketplace sources)

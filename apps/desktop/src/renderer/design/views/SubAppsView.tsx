@@ -39,6 +39,7 @@ import { GLOBAL_DIALOG_Z_INDEX } from '../components/dialogZIndex'
 import { useI18n } from '../i18n'
 import { Icons } from '../Icons'
 import './SubAppsView.less'
+import { TeamAssetPublishModal } from './TeamAssetMarket'
 
 // ─── 状态展示 ────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,7 @@ export function SubAppsView(): React.ReactElement {
 
   // 分享 / 导入
   const [exportFor, setExportFor] = useState<SubAppSummary | null>(null)
+  const [teamPublishFor, setTeamPublishFor] = useState<SubAppSummary | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [operationsFor, setOperationsFor] = useState<SubAppSummary | null>(null)
 
@@ -587,6 +589,15 @@ export function SubAppsView(): React.ReactElement {
                     ),
                     onClick: () => setExportFor(app),
                   },
+                  {
+                    key: 'team-publish',
+                    label: (
+                      <span className="sa-card-menu-item">
+                        <Icons.Users size={14} /> 发布到团队
+                      </span>
+                    ),
+                    onClick: () => setTeamPublishFor(app),
+                  },
                   { type: 'divider' as const },
                   ...(app.publicationStatus === 'archived'
                     ? []
@@ -824,6 +835,21 @@ export function SubAppsView(): React.ReactElement {
         key={exportFor?.id ?? 'closed'}
         app={exportFor}
         onClose={() => setExportFor(null)}
+      />
+
+      {/* key 随目标应用变化：切换应用时弹窗重挂载，版本输入与结果状态自然复位。 */}
+      <TeamAssetPublishModal
+        key={teamPublishFor?.id ?? 'closed'}
+        open={teamPublishFor != null}
+        assetType="app"
+        localId={teamPublishFor?.id ?? null}
+        localName={teamPublishFor?.name ?? ''}
+        hint={teamPublishFor?.format === 'v2' ? '注意：V2 多文件应用暂不支持发布到团队。' : undefined}
+        onClose={() => setTeamPublishFor(null)}
+        onPublished={() => {
+          notifySubAppDirectoryChanged()
+          void reload()
+        }}
       />
 
       <SubAppImportModal

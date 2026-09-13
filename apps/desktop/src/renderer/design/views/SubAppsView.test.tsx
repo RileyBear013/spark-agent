@@ -162,7 +162,12 @@ vi.mock('antd', async () => {
       onChange: (e) => onChange?.(e.target.checked),
     })
   const message = { success: vi.fn(), error: vi.fn() }
-  const Modal = { confirm: vi.fn() }
+  // TeamAssetPublishModal 渲染 <Modal open=...>，需可调用组件；旧的 confirm 用法保留
+  const Modal = Object.assign(
+    ({ children, open }: { children?: React.ReactNode; open?: boolean }) =>
+      ReactActual.createElement('div', { 'data-modal-open': String(open) }, children),
+    { confirm: vi.fn() },
+  )
   const Typography = {
     Text: ({ children }: { children?: React.ReactNode }) =>
       ReactActual.createElement('span', null, children),
@@ -270,8 +275,14 @@ describe('SubAppsView', () => {
   async function renderView(): Promise<void> {
     await act(async () => {
       const { SubAppSurfaceProvider } = await import('../sub-app/SubAppSurfaceHost')
+      const { ToastProvider } = await import('../components/Toast')
+      // v2.4 起视图内挂 TeamAssetPublishModal（useToast），测试需包 ToastProvider
       root?.render(
-        React.createElement(SubAppSurfaceProvider, null, React.createElement(SubAppsView)),
+        React.createElement(
+          SubAppSurfaceProvider,
+          null,
+          React.createElement(ToastProvider, null, React.createElement(SubAppsView)),
+        ),
       )
     })
   }

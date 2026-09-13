@@ -114,6 +114,7 @@ import {
   PermissionProfileRepository,
   ModelProfileRepository,
   McpServerRepository,
+  TeamAssetPinsRepository,
   SkillRepository,
   SettingsRepository,
   UsageLedgerRepository,
@@ -151,6 +152,9 @@ import {
   McpService,
   SkillService,
   SkillRegistryService,
+  TeamRegistryConfigStore,
+  TeamRegistryService,
+  TeamMcpService,
   SettingsService,
   UsageLedgerService,
   RuntimeCompositionService,
@@ -305,6 +309,8 @@ import { registerFilePreviewIpc } from './registerFilePreviewIpc.js'
 import { registerFileOperationsIpc } from './registerFileOperationsIpc.js'
 import { registerPromptLibraryPackageIpc } from './registerPromptLibraryPackageIpc.js'
 import { registerWorkflowBundleIpc } from './registerWorkflowBundleIpc.js'
+import { registerTeamAssetIpc } from './registerTeamAssetIpc.js'
+import { registerTeamRegistryIpc } from './registerTeamRegistryIpc.js'
 import { registerPastedTextIpc } from './registerPastedTextIpc.js'
 import { registerSessionImageOptimizerIpc } from './registerSessionImageOptimizerIpc.js'
 import { registerSessionWorkflowBindingIpc } from './registerSessionWorkflowBindingIpc.js'
@@ -1855,6 +1861,26 @@ function getUsageLedgerService(): UsageLedgerService {
   return _usageLedgerService
 }
 
+let _teamRegistryService: TeamRegistryService | null = null
+function getTeamRegistryService(): TeamRegistryService {
+  if (_teamRegistryService == null) {
+    _teamRegistryService = new TeamRegistryService(new TeamRegistryConfigStore(getDatabase()))
+  }
+  return _teamRegistryService
+}
+
+let _teamMcpService: TeamMcpService | null = null
+function getTeamMcpService(): TeamMcpService {
+  if (_teamMcpService == null) {
+    _teamMcpService = new TeamMcpService(
+      new TeamRegistryConfigStore(getDatabase()),
+      new McpServerRepository(getDatabase()),
+      new TeamAssetPinsRepository(getDatabase()),
+    )
+  }
+  return _teamMcpService
+}
+
 let _skillRegistryService: SkillRegistryService | null = null
 function getSkillRegistryService(): SkillRegistryService {
   if (_skillRegistryService == null) {
@@ -1863,6 +1889,7 @@ function getSkillRegistryService(): SkillRegistryService {
       getDatabase(),
       getAppSkillsManager().userDir,
       binaryDir,
+      getTeamRegistryService(),
     )
     _skillRegistryService.initialize()
   }
@@ -8338,6 +8365,32 @@ export function registerAllIpcHandlers(): void {
     return { categories }
   })
 
+  // ─── Team Registry Handlers（团队 Nacos 注册中心：配置 + 技能/MCP 推拉，M1/M2） ─────
+  // 领域通道在 registerTeamRegistryIpc.ts（本文件超 3000 行红线，不再内联加码）；
+  // 服务单例留在本文件（getSkillRegistryService 也被技能市场等其他通道复用）。
+  registerTeamRegistryIpc({
+    getTeamRegistryService,
+    getSkillRegistryService,
+    getTeamMcpService,
+  })
+
+
+
+  // ─── Team Registry 信封资产（工作流/Agent/子应用 推拉，M3/M4） ──────────
+  // 放在 team-registry handler 块之后：依赖上方声明的 assertWorkflowGraphValid 闭包
+  registerTeamAssetIpc({
+    assertWorkflowGraphValid,
+    refreshAgentRuntime: (agentId, prompt, skillIds, disabledSkillIds) => {
+      const composition = getRuntimeCompositionService()
+      if (prompt.trim().length > 0) {
+        composition.updatePromptConfig('agent', agentId, { enabled: true, content: prompt })
+      }
+      if (skillIds.length > 0 || disabledSkillIds.length > 0) {
+        composition.updateSkillConfig('agent', agentId, skillIds, disabledSkillIds)
+      }
+    },
+    pushConfigChanged,
+  })
   // ─── Installable Skill Catalog（内置可安装技能卡片） ───────────────────
 
   typedIpcHandle('skill:list-installable', async () => {

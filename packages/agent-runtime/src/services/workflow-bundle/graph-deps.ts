@@ -54,6 +54,9 @@ function rewriteConfig(config: WorkflowNodeConfig, mapping: RewriteMapping): Wor
   if (Array.isArray(config.mcpServerIds)) {
     next.mcpServerIds = config.mcpServerIds.map((id) => mapping.mcpServerIdMap.get(id) ?? id)
   }
+  if (mapping.agentIdMap != null && typeof config.agentId === 'string' && config.agentId) {
+    next.agentId = mapping.agentIdMap.get(config.agentId) ?? config.agentId
+  }
   if (config.body != null) {
     next.body = rewriteGraphReferences(config.body, mapping)
   }
@@ -65,6 +68,8 @@ export interface RewriteMapping {
   skillIdMap: Map<string, string>
   /** 原 MCP 服务器 ID → 新 mcp_servers 行 ID */
   mcpServerIdMap: Map<string, string>
+  /** 原 Agent ID → 新 agents 行 ID（团队自包含包用；可选，缺省不改写） */
+  agentIdMap?: Map<string, string>
 }
 
 /** 返回改写后的图(深拷贝变化部分;不动原对象)。 */

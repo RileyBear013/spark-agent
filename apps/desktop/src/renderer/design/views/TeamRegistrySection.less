@@ -1,0 +1,136 @@
+// TeamRegistrySection — 设置 → 团队注册中心
+// 复用全局 settings-section 骨架，本文件只补表单/状态/动作区的私有样式。
+
+.team-registry-section {
+  max-width: 640px;
+}
+
+.team-registry-status {
+  margin: 4px 0 16px;
+}
+
+.team-registry-status__item {
+  font-size: var(--font-sm, 12px);
+  color: var(--text-muted);
+}
+
+.team-registry-status__item--ok {
+  color: var(--primary);
+}
+
+.team-registry-status__item--muted {
+  color: var(--text-faint);
+}
+
+.team-registry-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.team-registry-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.team-registry-field__label {
+  font-size: var(--font-sm, 12px);
+  color: var(--text-muted);
+}
+
+.team-registry-inline-status {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 6px);
+  font-size: var(--font-sm, 12px);
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.team-registry-inline-status--success {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.team-registry-inline-status--error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.team-registry-inline-status--info {
+  color: var(--text-muted);
+  background: var(--bg-soft, rgba(128, 128, 128, 0.08));
+}
+
+.team-registry-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.team-registry-note {
+  margin-top: 16px;
+  font-size: var(--font-sm, 12px);
+  color: var(--text-faint);
+  line-height: 1.7;
+}
+
+// 窄屏：表单两列收一列
+@media (max-width: 720px) {
+  .team-registry-form {
+    grid-template-columns: 1fr;
+  }
+}
+
+// ─── 团队资产总览（五类资产可更新计数） ─────────────────────────────────
+
+.team-registry-overview {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.team-registry-overview__title {
+  font-size: var(--font-sm, 12px);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-right: 4px;
+}
+
+.team-registry-overview__chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--font-xs, 11px);
+  border: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.team-registry-overview__chip.is-updatable {
+  border-color: var(--warning-color, #d97706);
+  color: var(--warning-color, #d97706);
+  background: color-mix(in srgb, var(--warning-color, #d97706) 10%, transparent);
+}
+
+.team-registry-overview__chip.is-clear {
+  color: var(--text-faint);
+}
+
+.team-registry-overview__hint {
+  flex-basis: 100%;
+  font-size: var(--font-xs, 11px);
+  color: var(--text-faint);
+}
+
+@media (max-width: 720px) {
+  .team-registry-overview__hint {
+    display: none;
+  }
+}

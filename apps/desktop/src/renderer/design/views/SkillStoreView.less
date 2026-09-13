@@ -1321,3 +1321,135 @@
   overflow-x: auto;
   margin: 0;
 }
+
+// ─── 团队源（TeamMarketTab / PublishSkillToTeamModal） ───────────────────
+
+.team-market-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.team-market-search {
+  width: 260px;
+  max-width: 100%;
+}
+
+.team-market-count {
+  font-size: var(--font-sm, 12px);
+  color: var(--text-faint);
+}
+
+.team-market-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: var(--r-xs, 4px);
+  font-size: 11px;
+  vertical-align: 1px;
+}
+
+.team-market-badge--update {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.team-market-badge--warn {
+  color: var(--warning, #d97706);
+  background: color-mix(in srgb, var(--warning, #d97706) 12%, transparent);
+}
+
+.team-market-badge--muted {
+  color: var(--text-faint);
+  background: var(--bg-soft, rgba(128, 128, 128, 0.1));
+}
+
+.team-market-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.team-publish-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.team-publish-hint {
+  margin: 0;
+  font-size: var(--font-sm, 12px);
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+.team-publish-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--font-sm, 12px);
+  color: var(--text-muted);
+}
+
+.team-publish-error {
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 6px);
+  font-size: var(--font-sm, 12px);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  word-break: break-all;
+}
+
+.team-publish-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.team-publish-result-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--font-sm, 12px);
+
+  span {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+
+  b {
+    color: var(--text-strong);
+    word-break: break-all;
+    text-align: right;
+  }
+}
+
+.team-publish-checksum {
+  font-family: var(--font-mono, monospace);
+}
+
+.team-publish-skipped {
+  margin-top: 4px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm, 6px);
+  background: var(--bg-soft, rgba(128, 128, 128, 0.08));
+  font-size: var(--font-sm, 12px);
+  color: var(--text-muted);
+
+  ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
+  }
+
+  li {
+    line-height: 1.8;
+    word-break: break-all;
+  }
+}
+
+.team-publish-skipped-title {
+  color: var(--warning, #d97706);
+}
