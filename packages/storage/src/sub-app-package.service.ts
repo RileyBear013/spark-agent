@@ -299,6 +299,46 @@ export class SubAppPackageService {
     }
   }
 
+  /**
+   * 以 CAS 方式把传入的完整 V2 项目文件替换为当前草稿项目（写入新项目
+   * revision 并同步草稿 manifest）。只动草稿项目与草稿元数据；发布版本、
+   * 制品与连接槽绑定一律不触碰——团队商店「更新」路径据此保留本地运行
+   * 状态（与 V1 updateDraft 语义对齐）。行元数据（名称/入口等）以包内
+   * spark-app.json 校验结果为准。返回替换后的项目 revision 与草稿 revision。
+   */
+  async replaceDraftProject(
+    appId: string,
+    files: SubAppShareV2FileEntry[],
+    expectedDraftRevision: number,
+  ): Promise<{ projectRevision: number; draftRevision: number }> {
+    const decoded = this.decodeV2ShareFiles(files)
+    const validation = validatePackageFiles(decoded)
+    if (validation.manifest == null) {
+      throw new SubAppStateError('传入的 V2 项目文件无效，无法替换草稿。')
+    }
+    const current = this.platform.getDraftFormat(appId)
+    if (current.format !== 'v2' || current.projectRevision == null) {
+      throw new SubAppStateError('目标应用不是 V2 多文件项目，无法替换草稿项目。')
+    }
+    const projectRevision = current.projectRevision + 1
+    await this.writeRevision(appId, projectRevision, decoded)
+    try {
+      const draftRevision = this.platform.markDraftAsV2(
+        appId,
+        expectedDraftRevision,
+        projectRevision,
+        validation.manifest,
+      )
+      return { projectRevision, draftRevision }
+    } catch (error) {
+      // CAS 冲突等失败：不留孤儿 revision 目录。
+      await fs
+        .rm(this.projectRevisionRoot(appId, projectRevision), { recursive: true, force: true })
+        .catch(() => {})
+      throw error
+    }
+  }
+
   /** 项目/制品文件 → 分享包条目（base64），带数量与单文件体积上限。 */
   private async collectV2ShareFiles(
     files: Map<string, Buffer>,

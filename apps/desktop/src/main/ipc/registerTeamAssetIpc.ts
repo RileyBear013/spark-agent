@@ -43,6 +43,7 @@ import {
   AgentRepository,
   McpServerRepository,
   SkillRepository,
+  SubAppPackageService,
   SubAppRepository,
   TeamAssetPinsRepository,
   WorkflowBundleRepository,
@@ -117,6 +118,18 @@ function getInstaller(): TeamBundleInstaller {
     })
   }
   return _installer
+}
+
+let _subAppPackages: SubAppPackageService | null = null
+/**
+ * V2 子应用项目/制品存储（rootDir 由 DB 路径派生，与 SubAppBackend 的实例
+ * 指向同一存储目录，多实例无共享可变状态）。
+ */
+function getSubAppPackages(): SubAppPackageService {
+  if (_subAppPackages == null) {
+    _subAppPackages = new SubAppPackageService(getDatabase())
+  }
+  return _subAppPackages
 }
 
 /** 信封 → 捆绑物化（空捆绑返回 null，不产生任何落位） */
@@ -395,15 +408,51 @@ function createAppPort(): TeamAssetPort {
     async buildPayload(localId) {
       const details = repo().get(localId)
       if (!details) return null
+      const collector = makeCollectorDeps()
       if (details.draft.format === 'v2') {
-        throw new Error('V2 多文件子应用暂不支持发布到团队（当前支持 V1 单文件应用）')
+        // V2 受管项目：草稿项目文件随包（base64 保真，可含二进制资源）；
+        // MCP 引用按名称扫描项目文本（与 V1 同一启发式，误报仅多携带一个
+        // 禁用配置）。发布版本/制品与连接槽绑定不随团队分享（跨机器无意义，
+        // 接收方安装后自行发布与绑定），走 warnings 显式可见。
+        const state = await getSubAppPackages().exportV2State(localId)
+        if (state == null) {
+          throw new Error(`V2 子应用缺少项目文件，无法发布：${localId}`)
+        }
+        const scanText = state.draftFiles
+          .map((f) => Buffer.from(f.content, 'base64').toString('utf-8'))
+          .join('\n')
+        const referenced = collector
+          .listMcpNames()
+          .filter((m) => m.name && m.name.length >= 3 && scanText.includes(m.name))
+        const bundle = await collectTeamBundle({
+          deps: collector,
+          mcpOriginIds: referenced.map((m) => m.id),
+        })
+        return {
+          name: details.name,
+          description: details.description,
+          payload: {
+            kind: 'app-release',
+            // V1 入口文件内容对 V2 应用不适用，留空使旧版接收端在安装时
+            // 显式失败（而非静默装出无法运行的半成品草稿）
+            files: [],
+            entry: details.draft.manifest.entry || 'index.html',
+            manifest: { ...details.draft.manifest },
+            v2: { draftFiles: state.draftFiles },
+            bundle,
+          },
+          warnings: [
+            'V2 子应用在对方机器以「新草稿」安装（完整草稿项目文件），需对方确认并发布后才会出现在应用入口。',
+            '连接槽绑定与发布版本不随团队分享迁移，对方安装后需自行绑定连接并发布。',
+            ...bundlePublishWarnings(bundle),
+          ],
+        }
       }
       const manifest = details.draft.manifest
       const entry = manifest.entry || 'index.html'
       const source = details.draft.source
-      // 应用源码按名称扫描本地 MCP 引用（V1 应用无正式 MCP 绑定面，名称
+      // V1 应用源码按名称扫描本地 MCP 引用（V1 应用无正式 MCP 绑定面，名称
       // 字符串匹配是可移植引用的唯一可靠信号；误报仅多携带一个禁用配置）
-      const collector = makeCollectorDeps()
       const referenced = collector
         .listMcpNames()
         .filter((m) => m.name && m.name.length >= 3 && source.includes(m.name))
@@ -435,10 +484,84 @@ function createAppPort(): TeamAssetPort {
     },
     async installFromPayload(envelope, existingLocalId) {
       if (envelope.payload.kind !== 'app-release') throw new Error('信封载荷不是子应用类型')
-      const { files, entry } = envelope.payload
+      const payload = envelope.payload
+      const raw = (payload.manifest ?? {}) as Record<string, unknown>
+      if (payload.v2 != null) {
+        // V2 接收路径：发布版本/制品/连接槽绑定/运行状态保留策略见各分支注释。
+        const mat = await materializeBundle(envelope)
+        try {
+          if (existingLocalId != null) {
+            const details = repo().get(existingLocalId)
+            if (!details) throw new Error(`本地子应用不存在，无法更新：${existingLocalId}`)
+            if (details.draft.format !== 'v2') {
+              throw new SparkError(
+                'VALIDATION_FAILED',
+                '本地应用为 V1 单文件草稿，无法直接更新为 V2 多文件项目：请先在应用管理中迁移为 V2，或删除后重新安装。',
+              )
+            }
+            // 「更新」= CAS 替换草稿项目；发布版本、制品、连接槽绑定与本地
+            // 运行状态全部保留（与 V1 updateDraft 只覆盖内容字段对齐）
+            await getSubAppPackages().replaceDraftProject(
+              existingLocalId,
+              payload.v2.draftFiles,
+              details.draft.revision,
+            )
+            return {
+              localId: existingLocalId,
+              updatedExisting: true,
+              ...(await installedLocalChecksumOf(self, existingLocalId)),
+              ...(mat?.createdAgentIds.length ? { createdAgentIds: mat.createdAgentIds } : {}),
+              ...(mat?.warnings.length ? { warnings: mat.warnings } : {}),
+            }
+          }
+          // 「新建」= importApp 建草稿行（行元数据为信封视角的占位，随后被
+          // 包内 spark-app.json 校验结果同步）→ 从 revision 1 重建项目
+          const manifest: SubAppManifest = {
+            name: envelope.name,
+            description: envelope.description,
+            icon: typeof raw.icon === 'string' ? raw.icon : null,
+            entry: typeof raw.entry === 'string' && raw.entry ? raw.entry : 'index.html',
+            surface: (typeof raw.surface === 'string'
+              ? raw.surface
+              : 'content') as SubAppManifest['surface'],
+            permissions: Array.isArray(raw.permissions) ? (raw.permissions as string[]) : [],
+          }
+          const created = repo().importApp({
+            id: randomUUID(),
+            manifest,
+            draft: { source: '', config: {} },
+            releases: [],
+            publishedVersion: null,
+            data: [],
+          })
+          try {
+            await getSubAppPackages().importV2State(created.id, {
+              projectRevision: 1,
+              draftFiles: payload.v2.draftFiles,
+              releases: [],
+              bindings: [],
+            })
+          } catch (err) {
+            // 新建导入半成品清理：DB 行 + 项目/制品目录（对齐分享包导入路径）
+            repo().delete(created.id)
+            await getSubAppPackages().cleanupDeletedApp(created.id).catch(() => {})
+            throw err
+          }
+          return {
+            localId: created.id,
+            updatedExisting: false,
+            ...(await installedLocalChecksumOf(self, created.id)),
+            ...(mat?.createdAgentIds.length ? { createdAgentIds: mat.createdAgentIds } : {}),
+            ...(mat?.warnings.length ? { warnings: mat.warnings } : {}),
+          }
+        } catch (err) {
+          if (mat) await getInstaller().rollback(mat)
+          throw err
+        }
+      }
+      const { files, entry } = payload
       const source = files.find((f) => f.path === entry) ?? files[0]
       if (!source) throw new Error(`子应用信封缺少入口文件内容：${envelope.slug}`)
-      const raw = (envelope.payload.manifest ?? {}) as Record<string, unknown>
       const draftConfig =
         raw.draftConfig != null && typeof raw.draftConfig === 'object'
           ? (raw.draftConfig as Record<string, unknown>)
@@ -456,6 +579,12 @@ function createAppPort(): TeamAssetPort {
         if (existingLocalId != null) {
           const details = repo().get(existingLocalId)
           if (!details) throw new Error(`本地子应用不存在，无法更新：${existingLocalId}`)
+          if (details.draft.format === 'v2') {
+            throw new SparkError(
+              'VALIDATION_FAILED',
+              '本地应用已是 V2 多文件项目，无法用 V1 单文件包更新：请删除后重新安装，或由发布方升级为 V2 后再更新。',
+            )
+          }
           const patched = repo().updateDraft(existingLocalId, details.draft.revision, {
             name: manifest.name,
             description: manifest.description,

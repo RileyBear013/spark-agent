@@ -10,6 +10,8 @@
 
 import crypto from 'node:crypto'
 
+import type { SubAppShareV2FileEntry } from '@spark/protocol'
+
 export const TEAM_ASSET_SCHEMA = 'spark.team.asset.v1' as const
 
 /**
@@ -136,6 +138,16 @@ export interface TeamAgentPayload {
   bundle?: TeamBundleSpec
 }
 
+/**
+ * 子应用 V2 受管项目的团队分享段（2026-09-14）：草稿项目文件（base64，可含
+ * 二进制资源）。发布版本/制品与连接槽绑定不随团队分享——制品属发布方本地
+ * 历史应由接收方自行发布产生，连接槽绑定指向本机连接/Provider（跨机器
+ * 无意义，同工作流 bundle 密钥脱敏的边界）；接收方安装后自行发布与绑定。
+ */
+export interface TeamAppV2State {
+  draftFiles: SubAppShareV2FileEntry[]
+}
+
 /** 子应用载荷：源码文件树 + 入口 + manifest 摘要（M4） */
 export interface TeamAppPayload {
   kind: 'app-release'
@@ -144,6 +156,8 @@ export interface TeamAppPayload {
   manifest?: Record<string, unknown>
   /** 应用源码内引用的 MCP 随包（发布侧按名称扫描发现；2026-09-12 v2） */
   bundle?: TeamBundleSpec
+  /** V2 受管多文件应用的项目文件段；V1 单文件应用无此字段（2026-09-14 起） */
+  v2?: TeamAppV2State
 }
 
 export type TeamAssetPayload =

@@ -70,11 +70,12 @@ interface TeamAssetInstallSideEffects {
  * 信封型资产的本地侧端口。desktop 主进程为每类资产提供实现：
  *   - workflow：WorkflowRepository（graph + 元数据）
  *   - agent：AgentRepository（AgentExportPayload 形状，与文件导入互认）
- *   - app：SubAppRepository（V1 单文件草稿快照）
+ *   - app：SubAppRepository（V1 单文件草稿快照；V2 多文件项目走载荷 v2 段，
+ *     2026-09-14 起支持发布与安装）
  */
 export interface TeamAssetPort {
   /**
-   * 本地实体 → 信封载荷；null = 实体不存在或不可发布（如 V2 多文件应用）。
+   * 本地实体 → 信封载荷；null = 实体不存在或不可发布（如已归档应用）。
    * v2 起为异步：自包含捆绑需要读技能目录（collectDirectory）。
    */
   buildPayload(localId: string): Promise<TeamAssetBuildResult | null>

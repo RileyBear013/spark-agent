@@ -338,7 +338,11 @@ export interface SubAppShareV2Binding {
 export interface SubAppShareV2State {
   /** 导出时草稿的项目 revision（导入端从 1 重建，仅作展示参考）。 */
   projectRevision: number
-  draftManifest: SubAppPackageManifest
+  /**
+   * 导出时草稿的包 manifest（信息字段）。导入端不消费它：真实 manifest 以
+   * 包内 spark-app.json 的校验结果为准（团队分享等轻量载荷可缺省此字段）。
+   */
+  draftManifest?: SubAppPackageManifest
   draftFiles: SubAppShareV2FileEntry[]
   releases: SubAppShareV2Release[]
   bindings: SubAppShareV2Binding[]
