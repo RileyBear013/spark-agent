@@ -41,6 +41,7 @@ export type ViewId =
   | 'canvas'
   | 'canvas-workflows'
   | 'canvas-prompts'
+  | 'quick-create'
   | 'canvas-video-tasks'
   | 'sub-apps'
   | 'sub-app'

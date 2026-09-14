@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 import type { RemoteConnectionConfig } from '@spark/protocol'
 import {
   canShareRemoteSession,
+  canBindRemoteRouteSession,
   canUseConfiguredRemoteSession,
   remoteConnectionsForSession,
   remoteRouteKey,
+  remoteRouteSessionOwners,
+  resolveScheduledRemoteRoute,
+  withRemoteRouteDefaults,
 } from './remoteSessionIsolation.js'
 
 function connection(
@@ -76,5 +80,50 @@ describe('remote session isolation', () => {
     expect(remoteRouteKey('bot-a', 'qq-user:same')).not.toBe(
       remoteRouteKey('bot-b', 'qq-user:same'),
     )
+    expect(remoteRouteKey('bot-a', 'chat-a')).not.toBe(remoteRouteKey('bot-a', 'chat-b'))
+  })
+
+  it('keeps independent chats on one bot from binding the same session', () => {
+    const bot = connection('tg', 'legacy')
+    bot.routeBindings = [
+      { externalId: 'chat-a', defaultSessionId: 'session-a', defaultModelId: 'model-a' },
+      {
+        externalId: 'chat-b',
+        defaultSessionId: 'session-b',
+        defaultModelId: 'model-b',
+        defaultReasoningEffort: 'high',
+      },
+    ]
+    expect(canBindRemoteRouteSession([bot], bot, 'chat-b', 'session-a')).toBe(false)
+    expect(remoteRouteSessionOwners([bot], 'session-a')).toMatchObject([
+      { route: { externalId: 'chat-a' } },
+    ])
+    expect(
+      withRemoteRouteDefaults(bot, bot.routeBindings[1] ?? { externalId: 'chat-b' }).defaultModelId,
+    ).toBe('model-b')
+    expect(
+      withRemoteRouteDefaults(bot, bot.routeBindings[1] ?? { externalId: 'chat-b' })
+        .defaultReasoningEffort,
+    ).toBe('high')
+    expect(withRemoteRouteDefaults(bot, { externalId: 'chat-c' }).defaultSessionId).toBeUndefined()
+  })
+
+  it('delivers scheduled turns only when exactly one enabled chat owns the session', () => {
+    const bot = connection('tg', 'legacy')
+    bot.routeBindings = [
+      { externalId: 'chat-a', defaultSessionId: 'session-a' },
+      { externalId: 'chat-b', defaultSessionId: 'session-b' },
+    ]
+    expect(resolveScheduledRemoteRoute([bot], 'session-a')).toEqual({
+      connectionId: 'tg',
+      externalId: 'chat-a',
+    })
+    expect(resolveScheduledRemoteRoute([bot], 'legacy')).toBeNull()
+    const second = bot.routeBindings[1]
+    if (second == null) throw new Error('Missing second route')
+    second.defaultSessionId = 'session-a'
+    expect(resolveScheduledRemoteRoute([bot], 'session-a')).toBeNull()
+    bot.enabled = false
+    expect(resolveScheduledRemoteRoute([bot], 'session-a')).toBeNull()
   })
 })

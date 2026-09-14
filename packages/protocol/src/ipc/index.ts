@@ -5410,6 +5410,19 @@ export interface FilePrepareImagePreviewResponse {
   fileUrl: string
 }
 
+/** 把用户通过原生文件选择器选中的媒体复制到应用安全目录，供媒体任务输入使用。 */
+export interface FilePrepareMediaInputRequest {
+  sourcePath: string
+  kind: 'image' | 'video'
+}
+
+export interface FilePrepareMediaInputResponse {
+  filePath: string
+  fileName: string
+  fileUrl: string
+  sizeBytes: number
+}
+
 export type SessionImageOptimizationStatus = 'original' | 'optimized' | 'fallback'
 export type SessionImageOptimizationReason =
   | 'below_threshold'
@@ -5895,6 +5908,18 @@ export interface RemotePairedDevice {
   lastSeenAt?: string
 }
 
+/** Runtime defaults belong to one remote chat, not to the bot credential. */
+export interface RemoteRouteBinding {
+  externalId: string
+  defaultSessionId?: string
+  defaultWorkspaceId?: string
+  defaultProviderProfileId?: string
+  defaultModelId?: string
+  defaultAgentId?: string
+  defaultPermissionMode?: SessionPermissionMode
+  defaultReasoningEffort?: SessionReasoningEffort
+}
+
 export interface RemotePairingChallenge {
   code: string
   mode: RemotePairingMode
@@ -5912,6 +5937,7 @@ export interface RemoteConnectionConfig {
   commandPrefix: string
   allowedUserIds: string[]
   allowedChatIds: string[]
+  routeBindings?: RemoteRouteBinding[]
   defaultSessionId?: string
   /** Allow multiple remote connections to intentionally share one session and its runtime state. */
   allowSharedSession?: boolean
@@ -7368,6 +7394,7 @@ export interface IpcChannelMap
   'file:save-pasted-media': [FileSavePastedMediaRequest, FileSavePastedMediaResponse]
   'file:save-canvas-annotation': [FileSaveCanvasAnnotationRequest, FileSaveCanvasAnnotationResponse]
   'file:prepare-image-preview': [FilePrepareImagePreviewRequest, FilePrepareImagePreviewResponse]
+  'file:prepare-media-input': [FilePrepareMediaInputRequest, FilePrepareMediaInputResponse]
   'file:prepare-session-images': [FilePrepareSessionImagesRequest, FilePrepareSessionImagesResponse]
   'file:stat-kind': [FileStatKindRequest, FileStatKindResponse]
   // File Operations — 文件树资源管理器（删除到回收站 / 新建 / 移动 / 复制）
@@ -7806,6 +7833,7 @@ export interface IpcStreamChannelMap {
       | 'rule'
       | 'prompt'
       | 'scheduled-task'
+      | 'settings'
     action:
       | 'create'
       | 'update'

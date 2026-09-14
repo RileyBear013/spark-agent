@@ -30,18 +30,30 @@ export function isRenderHtmlTool(toolName: string): boolean {
   return toolName.trim().toLowerCase() === RENDER_HTML_TOOL_NAME
 }
 
+export function normalizeHtmlRenderHeight(value: unknown): number {
+  const numericValue =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\s*\d+(?:\.\d+)?(?:px)?\s*$/i.test(value)
+        ? Number.parseFloat(value)
+        : Number.NaN
+
+  if (!Number.isFinite(numericValue)) return DEFAULT_HTML_RENDER_HEIGHT
+  return Math.min(
+    MAX_HTML_RENDER_HEIGHT,
+    Math.max(MIN_HTML_RENDER_HEIGHT, Math.round(numericValue)),
+  )
+}
+
 export function parseRenderHtmlInput(input: unknown): RenderHtmlInput | null {
   if (input == null || typeof input !== 'object' || Array.isArray(input)) return null
   const record = input as Record<string, unknown>
   if (typeof record.html !== 'string' || record.html.trim().length === 0) return null
   const title = typeof record.title === 'string' ? record.title.trim() : 'HTML 内容'
-  const height = typeof record.height === 'number' ? record.height : DEFAULT_HTML_RENDER_HEIGHT
   return {
     html: record.html,
     title: title.slice(0, MAX_HTML_RENDER_TITLE_LENGTH) || 'HTML 内容',
-    height: Number.isInteger(height)
-      ? Math.min(MAX_HTML_RENDER_HEIGHT, Math.max(MIN_HTML_RENDER_HEIGHT, height))
-      : DEFAULT_HTML_RENDER_HEIGHT,
+    height: normalizeHtmlRenderHeight(record.height),
   }
 }
 
@@ -63,7 +75,9 @@ export function parseRenderHtmlResult(output: unknown): RenderHtmlResult | null 
         accepted: record.accepted,
         ...(typeof record.html === 'string' ? { html: record.html } : {}),
         ...(typeof record.title === 'string' ? { title: record.title } : {}),
-        ...(typeof record.height === 'number' ? { height: record.height } : {}),
+        ...(record.height !== undefined
+          ? { height: normalizeHtmlRenderHeight(record.height) }
+          : {}),
         ...(Array.isArray(record.warnings)
           ? { warnings: record.warnings.filter((item): item is string => typeof item === 'string') }
           : {}),

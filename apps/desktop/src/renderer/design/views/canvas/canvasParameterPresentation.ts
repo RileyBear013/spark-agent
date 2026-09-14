@@ -215,6 +215,28 @@ export function isAspectRatioValue(value: string): boolean {
   return isRatioValue(value)
 }
 
+/**
+ * 把比例/尺寸枚举值约简成短标签（1024x1024 → "1:1"、auto → "自适应"），
+ * 用于横排比例按钮；无法可靠约简（小数、超宽画幅比）时返回 null，
+ * 调用方回退显示完整枚举值。
+ */
+export function aspectRatioShortLabel(value: string): string | null {
+  const normalized = value.trim().toLowerCase()
+  if (['auto', 'adaptive', '智能比例', '自适应'].includes(normalized)) return '自适应'
+  const match = normalized.match(/^(\d+)[x×*](\d+)$/)
+  if (!match) return null
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b))
+  const divisor = gcd(width, height)
+  const ratioWidth = width / divisor
+  const ratioHeight = height / divisor
+  // 超出常见画幅比（>21:9）时约简结果可读性差，回退完整值
+  if (ratioWidth > 21 || ratioHeight > 21) return null
+  return `${ratioWidth}:${ratioHeight}`
+}
+
 export function parameterSummaryValue(item: CanvasParameterPresentation, value: string): string {
   const trimmed = value.trim()
   if (!trimmed) return '默认'

@@ -69,6 +69,7 @@ import { MemoryPanel } from './MemoryPanel'
 import { SettingsLogViewer } from './SettingsLogViewer'
 import { SubAppRuntimeSettingsCard } from '../sub-app/SubAppRuntimeSettingsCard'
 import { TeamRegistrySection } from './TeamRegistrySection'
+import { SessionWorkflowSettingsSection } from './SessionWorkflowSettingsSection'
 import { UsageHeatmap } from './UsageHeatmap'
 import { ModelUsageTrendCard } from './ModelUsageTrendCard'
 import { needsSdkInstallAction } from './sdkIntegrityPresentation'
@@ -405,6 +406,12 @@ export function SettingsView({ initialSection }: { initialSection?: string } = {
           label: '记忆',
           keywords: ['长期记忆', '记忆库', '记住'],
         },
+        {
+          id: 'session-workflow',
+          icon: <Icons.Workflow size={13} />,
+          label: '会话工作流',
+          keywords: ['工作流', '挂载', '编排', '灰度', '会话工作流'],
+        },
       ],
     },
     {
@@ -526,6 +533,7 @@ export function SettingsView({ initialSection }: { initialSection?: string } = {
     rules: RulesSection,
     'custom-commands': CustomCommandsSection,
     permissions: PermissionsSection,
+    'session-workflow': SessionWorkflowSettingsSection,
     // MCP 设置暂未完全实现，隐藏
     // 'mcp-settings': McpSection,
     'remote-connections': RemoteConnectionsSection,
@@ -1123,7 +1131,7 @@ function RemoteConnectionsSection() {
           <strong>{runtimeStatus.localBaseUrl ?? '本地 webhook 服务未启动'}</strong>
           <span>
             {enabledCount > 0
-              ? `${enabledCount} 个渠道已启用，远程消息会按各平台运行时进入默认会话`
+              ? `${enabledCount} 个渠道已启用，远程消息会进入各聊天独立绑定的会话`
               : '启用任一渠道后，远程消息才会被接收'}
           </span>
         </div>
@@ -1335,7 +1343,10 @@ function RemoteConnectionsSection() {
                 />
 
                 <label>
-                  默认会话<span className="sub">普通远程消息会投递到这里</span>
+                  默认会话
+                  <span className="sub">
+                    仅供新的、唯一可识别的聊天首次绑定；已有聊天使用各自的会话
+                  </span>
                 </label>
                 <Select
                   value={draft.defaultSessionId ?? ''}
@@ -1620,7 +1631,7 @@ const REMOTE_CAPABILITY_LABELS: Record<keyof RemoteConnectionCapabilities, strin
 }
 
 const REMOTE_CAPABILITY_DESCS: Record<keyof RemoteConnectionCapabilities, string> = {
-  sendMessages: '允许远程端向默认会话提交 /send 或普通消息',
+  sendMessages: '允许远程端向当前聊天绑定的会话提交 /send 或普通消息',
   switchModel: '允许 /models、/providers、/use-model、/use-provider',
   switchSession: '允许 /sessions 与 /use-session',
   switchAgent: '允许 /agents 与 /use-agent',
@@ -4162,9 +4173,9 @@ function StorageSection() {
   const { invoke: setSetting } = useIpcInvoke('settings:set')
   const { invoke: getInheritInfo } = useIpcInvoke('data:get-inherit-info')
   const { invoke: inheritProductionDb } = useIpcInvoke('data:inherit-production-db')
-  const [inheritInfo, setInheritInfo] = useState<
-    Awaited<ReturnType<typeof getInheritInfo>> | null
-  >(null)
+  const [inheritInfo, setInheritInfo] = useState<Awaited<ReturnType<typeof getInheritInfo>> | null>(
+    null,
+  )
   const [inheriting, setInheriting] = useState(false)
 
   useEffect(() => {

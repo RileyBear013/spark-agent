@@ -374,9 +374,13 @@ import { resolveStandaloneNodeRuntimePath } from '../services/StandaloneNodeRunt
 import { RemoteConnectionService } from '../services/RemoteConnectionService.js'
 import { deliverRemoteTurnReply } from '../services/remoteTurnReply.js'
 import {
+  canBindRemoteRouteSession,
   canShareRemoteSession,
-  canUseConfiguredRemoteSession,
   remoteConnectionsForSession,
+  remoteRouteKey,
+  remoteRouteSessionOwners,
+  resolveScheduledRemoteRoute,
+  withRemoteRouteDefaults,
 } from '../services/remoteSessionIsolation.js'
 import { createRemoteUserTurn, extractExplicitRemoteImageSendPath } from './remote-user-turn.js'
 import type {
@@ -471,7 +475,11 @@ const browserAutomationMcpProvider: BrowserAutomationMcpProvider = async (
 ) => {
   const remoteConnections = getRemoteConnectionService()
     .list()
-    .connections.filter((connection) => connection.defaultSessionId === sessionId)
+    .connections.filter(
+      (connection) =>
+        connection.defaultSessionId === sessionId ||
+        connection.routeBindings?.some((route) => route.defaultSessionId === sessionId),
+    )
   const browserBlockedBy = remoteConnections.filter(
     (connection) => connection.capabilities.useInternalBrowser !== true,
   )
@@ -2063,22 +2071,19 @@ const scheduledTaskExecutor: TaskExecutorFn = async (params) => {
   const sessionRepo = new SessionRepository(getDatabase())
 
   const registerScheduledRemoteTurn = (sessionId: string, turnId: string): void => {
-    const remotes = getRemoteConnectionService()
-      .list()
-      .connections.filter((connection) => connection.defaultSessionId === sessionId)
-    if (remotes.length > 1) {
+    const connections = getRemoteConnectionService().list().connections
+    const target = resolveScheduledRemoteRoute(connections, sessionId)
+    if (target == null) {
+      const routeCount = remoteRouteSessionOwners(connections, sessionId).filter(
+        ({ connection }) => connection.enabled,
+      ).length
+      if (routeCount === 0) return
       log.warn(
-        `Skipping scheduled remote delivery for shared session=${sessionId}; no originating remote route is available`,
+        `Skipping scheduled remote delivery for session=${sessionId}; ${routeCount} remote routes are bound`,
       )
       return
     }
-    const remote = remotes[0]
-    const externalId =
-      remote?.allowedChatIds[0] ??
-      remote?.pairedDevices[0]?.channelThreadId ??
-      remote?.pairedDevices[0]?.remoteUserId
-    if (remote == null || externalId == null) return
-    registerRemoteTurn(turnId, { connectionId: remote.id, externalId })
+    registerRemoteTurn(turnId, target)
   }
 
   if (params.sessionId != null) {
@@ -2417,10 +2422,13 @@ function forwardUserQuestionToRemote(request: UserQuestionRequest): void {
   }
 }
 
-function rememberRemoteTurnTarget(sessionId: string, target: {
-  connectionId: string
-  externalId: string
-}): void {
+function rememberRemoteTurnTarget(
+  sessionId: string,
+  target: {
+    connectionId: string
+    externalId: string
+  },
+): void {
   lastRemoteTurnTargets.set(sessionId, { ...target, at: Date.now() })
   if (lastRemoteTurnTargets.size <= 100) return
   let oldestKey: string | undefined
@@ -3065,10 +3073,15 @@ function appendRemoteAudit(entry: Omit<(typeof remoteAuditLog)[number], 'at'>): 
 async function createRemoteSession(
   connectionId: string,
   workspaceId?: string,
+  externalId?: string,
 ): Promise<{ sessionId: string; connectionName: string }> {
   const remoteService = getRemoteConnectionService()
-  const connection = remoteService.list().connections.find((item) => item.id === connectionId)
-  if (connection == null) throw new Error('远程连接不存在')
+  const base = remoteService.list().connections.find((item) => item.id === connectionId)
+  if (base == null) throw new Error('远程连接不存在')
+  const connection =
+    externalId == null
+      ? base
+      : withRemoteRouteDefaults(base, remoteService.ensureRouteBinding(connectionId, externalId))
   const providers = await getProviderService().listProviders()
   const provider =
     connection.defaultProviderProfileId != null
@@ -3116,12 +3129,14 @@ async function createRemoteSession(
     sessionId: created.sessionId,
     session: created.session,
   })
-  remoteService.updateConnectionDefaults(connection.id, {
+  const nextDefaults = {
     defaultSessionId: created.sessionId,
     defaultProviderProfileId: provider.id,
     ...(effectiveModelId.length > 0 ? { defaultModelId: effectiveModelId } : {}),
     ...(effectiveWorkspaceId != null ? { defaultWorkspaceId: effectiveWorkspaceId } : {}),
-  })
+  }
+  if (externalId == null) remoteService.updateConnectionDefaults(connection.id, nextDefaults)
+  else remoteService.updateRouteDefaults(connection.id, externalId, nextDefaults)
   return { sessionId: created.sessionId, connectionName: connection.name }
 }
 
@@ -3174,11 +3189,15 @@ async function getRemoteSession(
 async function resolveRemoteContextSummary(
   connectionId: string,
   preferredSessionId?: string,
+  externalId?: string,
 ): Promise<RemoteContextSummary> {
-  const connection = getRemoteConnectionService()
-    .list()
-    .connections.find((item) => item.id === connectionId)
-  if (connection == null) return {}
+  const service = getRemoteConnectionService()
+  const base = service.list().connections.find((item) => item.id === connectionId)
+  if (base == null) return {}
+  const connection =
+    externalId == null
+      ? base
+      : withRemoteRouteDefaults(base, service.ensureRouteBinding(connectionId, externalId))
   const session = await getRemoteSession(preferredSessionId ?? connection.defaultSessionId)
   const providers = await getProviderService().listProviders()
   const providerId = session?.providerProfileId ?? connection.defaultProviderProfileId
@@ -3196,7 +3215,10 @@ async function resolveRemoteContextSummary(
   }
 }
 
-async function listRemoteSessionRows(status?: RemoteSessionStatus): Promise<{
+async function listRemoteSessionRows(
+  status?: RemoteSessionStatus,
+  route?: { connection: RemoteConnectionConfig; externalId: string },
+): Promise<{
   rows: RemoteSelectionRow[]
   total: number
 }> {
@@ -3205,9 +3227,16 @@ async function listRemoteSessionRows(status?: RemoteSessionStatus): Promise<{
     limit: REMOTE_SESSION_QUERY_LIMIT,
     ...(status != null ? { status } : {}),
   })
+  const connections = route == null ? [] : getRemoteConnectionService().list().connections
+  const visibleSessions =
+    route == null
+      ? result.sessions
+      : result.sessions.filter((item) =>
+          canBindRemoteRouteSession(connections, route.connection, route.externalId, item.id),
+        )
   return {
-    total: result.total,
-    rows: result.sessions.map((item) => ({
+    total: route == null ? result.total : visibleSessions.length,
+    rows: visibleSessions.map((item) => ({
       id: item.id,
       label: item.title || '新会话',
       meta: `${formatRemoteSessionStatus(item.status)} · ${item.messageCount} 条消息`,
@@ -3219,13 +3248,26 @@ async function executeRemoteCommand(
   connectionId: string,
   message: string,
   explicitSessionId?: string,
+  externalId?: string,
 ): Promise<{ ok: boolean } & RemoteInboundResponse> {
   const remoteService = getRemoteConnectionService()
   const store = remoteService.list()
-  const connection = store.connections.find((item) => item.id === connectionId)
-  if (connection == null)
-    return { ok: false, title: '连接不存在', text: '请先在设置中创建远程连接。' }
+  const base = store.connections.find((item) => item.id === connectionId)
+  if (base == null) return { ok: false, title: '连接不存在', text: '请先在设置中创建远程连接。' }
+  const connection =
+    externalId == null
+      ? base
+      : withRemoteRouteDefaults(base, remoteService.ensureRouteBinding(connectionId, externalId))
   if (!connection.enabled) return { ok: false, title: '连接未启用', text: '请先启用该远程连接。' }
+
+  const selectionScope =
+    externalId == null ? connectionId : remoteRouteKey(connectionId, externalId)
+  const updateDefaults = (
+    patch: Parameters<typeof remoteService.updateConnectionDefaults>[1],
+  ): void => {
+    if (externalId == null) remoteService.updateConnectionDefaults(connectionId, patch)
+    else remoteService.updateRouteDefaults(connectionId, externalId, patch)
+  }
 
   const parsedCommand = parseRemoteCommand(message, connection.commandPrefix)
   const commandAliases: Record<string, string> = {
@@ -3350,11 +3392,12 @@ async function executeRemoteCommand(
     const workspace = listRemoteWorkspaceRows().find((item) => item.id === workspaceId)
     const agent =
       connection.defaultAgentId != null ? getAgentRepository().get(connection.defaultAgentId) : null
-    const otherSessionBindings = remoteConnectionsForSession(
-      store.connections,
-      sessionId,
-      connection.id,
-    )
+    const otherSessionBindings =
+      externalId == null
+        ? remoteConnectionsForSession(store.connections, sessionId, connection.id)
+        : remoteRouteSessionOwners(store.connections, sessionId, { connectionId, externalId }).map(
+            (item) => item.connection,
+          )
     const intentionallyShared =
       otherSessionBindings.length > 0 && canShareRemoteSession(connection, otherSessionBindings)
     return {
@@ -3395,9 +3438,12 @@ async function executeRemoteCommand(
         text: `${filter.error}\n可用状态：all、idle、running、error。`,
       }
     }
-    const result = await listRemoteSessionRows(filter.status)
+    const result = await listRemoteSessionRows(
+      filter.status,
+      externalId == null ? undefined : { connection: base, externalId },
+    )
     const page = paginateRemoteSelection(result.rows, filter.page)
-    cacheRemoteSelection(connection.id, 'sessions', page.rows)
+    cacheRemoteSelection(selectionScope, 'sessions', page.rows)
     const statusText = filter.status == null ? '全部状态' : formatRemoteSessionStatus(filter.status)
     const interactive = supportsRemoteInteractiveLists(connection)
     return {
@@ -3430,24 +3476,41 @@ async function executeRemoteCommand(
         text: `用法：${formatRemoteCommand(connection, 'use-session', '<序号|名称|sessionId>')}。请先发送 ${formatRemoteCommand(connection, 'sessions')} 查看会话。`,
       }
     }
-    const result = await listRemoteSessionRows()
+    const result = await listRemoteSessionRows(
+      undefined,
+      externalId == null ? undefined : { connection: base, externalId },
+    )
     const rows = result.rows
     const resolved = resolveRemoteSelection(target, rows, {
       kindLabel: '会话',
       listCommand: formatRemoteCommand(connection, 'sessions'),
-      cachedRows: getCachedRemoteSelection(connection.id, 'sessions'),
+      cachedRows: getCachedRemoteSelection(selectionScope, 'sessions'),
     })
     if (!resolved.ok) return resolved
+    if (
+      externalId != null &&
+      !canBindRemoteRouteSession(store.connections, base, externalId, resolved.row.id)
+    ) {
+      return {
+        ok: false,
+        title: '会话已绑定到其他远程聊天',
+        text: '请选择独立会话，或新建会话后重试。',
+      }
+    }
     const conflicts = remoteConnectionsForSession(store.connections, resolved.row.id, connection.id)
-    if (conflicts.length > 0 && !canShareRemoteSession(connection, conflicts)) {
+    if (
+      externalId == null &&
+      conflicts.length > 0 &&
+      !canShareRemoteSession(connection, conflicts)
+    ) {
       return {
         ok: false,
         title: '会话已被其他远程连接占用',
         text: `该会话绑定到“${conflicts.map((item) => item.name).join('、')}”。请选择其他会话；如确需共享，请先在所有相关连接中开启“跨连接共享会话”。`,
       }
     }
-    remoteService.updateConnectionDefaults(connection.id, { defaultSessionId: resolved.row.id })
-    const context = await resolveRemoteContextSummary(connection.id, resolved.row.id)
+    updateDefaults({ defaultSessionId: resolved.row.id })
+    const context = await resolveRemoteContextSummary(connection.id, resolved.row.id, externalId)
     return {
       ok: true,
       title: '已切换默认会话',
@@ -3481,7 +3544,7 @@ async function executeRemoteCommand(
       currentSession?.modelId ?? connection.defaultModelId ?? provider.defaultModel
     const rows = buildRemoteProviderModelRows(provider)
     const page = paginateRemoteSelection(rows, parsedPage.page)
-    cacheRemoteSelection(connection.id, 'models', page.rows)
+    cacheRemoteSelection(selectionScope, 'models', page.rows)
     const interactive = supportsRemoteInteractiveLists(connection)
     return {
       ok: true,
@@ -3514,7 +3577,7 @@ async function executeRemoteCommand(
     const providers = await getProviderService().listProviders()
     const rows = providers.map((item) => ({ id: item.id, label: item.name, meta: item.provider }))
     const page = paginateRemoteSelection(rows, parsedPage.page)
-    cacheRemoteSelection(connection.id, 'providers', page.rows)
+    cacheRemoteSelection(selectionScope, 'providers', page.rows)
     const currentSession = await getRemoteSession(sessionId)
     const selectedProviderId =
       currentSession?.providerProfileId ?? connection.defaultProviderProfileId
@@ -3550,7 +3613,7 @@ async function executeRemoteCommand(
     const agents = getAgentRepository().list({ includeDisabled: false }).map(toManagedAgent)
     const rows = agents.map((item) => ({ id: item.id, label: item.name, meta: item.agentAdapter }))
     const page = paginateRemoteSelection(rows, parsedPage.page)
-    cacheRemoteSelection(connection.id, 'agents', page.rows)
+    cacheRemoteSelection(selectionScope, 'agents', page.rows)
     const interactive = supportsRemoteInteractiveLists(connection)
     return {
       ok: true,
@@ -3582,7 +3645,7 @@ async function executeRemoteCommand(
     if ('error' in parsedPage) return { ok: false, title: '页码无效', text: parsedPage.error }
     const rows = listRemoteWorkspaceRows()
     const page = paginateRemoteSelection(rows, parsedPage.page)
-    cacheRemoteSelection(connection.id, 'workspaces', page.rows)
+    cacheRemoteSelection(selectionScope, 'workspaces', page.rows)
     const interactive = supportsRemoteInteractiveLists(connection)
     const currentSession = await getRemoteSession(sessionId)
     const selectedWorkspaceId = connection.defaultWorkspaceId ?? currentSession?.workspaceIds[0]
@@ -3619,13 +3682,13 @@ async function executeRemoteCommand(
       const resolved = resolveRemoteSelection(workspaceInput, rows, {
         kindLabel: '项目',
         listCommand: formatRemoteCommand(connection, 'projects'),
-        cachedRows: getCachedRemoteSelection(connection.id, 'workspaces'),
+        cachedRows: getCachedRemoteSelection(selectionScope, 'workspaces'),
       })
       if (!resolved.ok) return resolved
       workspaceId = resolved.row.id
     }
-    const created = await createRemoteSession(connection.id, workspaceId)
-    const context = await resolveRemoteContextSummary(connection.id, created.sessionId)
+    const created = await createRemoteSession(connection.id, workspaceId, externalId)
+    const context = await resolveRemoteContextSummary(connection.id, created.sessionId, externalId)
     return {
       ok: true,
       title: '已新建默认会话',
@@ -3647,11 +3710,16 @@ async function executeRemoteCommand(
         connectionId,
         formatRemoteCommand(connection, 'projects'),
         sessionId,
+        externalId,
       )
     if (target.toLocaleLowerCase() === 'none' || target === '不使用项目') {
-      remoteService.updateConnectionDefaults(connection.id, { defaultWorkspaceId: null })
-      const created = await createRemoteSession(connection.id)
-      const context = await resolveRemoteContextSummary(connection.id, created.sessionId)
+      updateDefaults({ defaultWorkspaceId: null })
+      const created = await createRemoteSession(connection.id, undefined, externalId)
+      const context = await resolveRemoteContextSummary(
+        connection.id,
+        created.sessionId,
+        externalId,
+      )
       return {
         ok: true,
         title: '已切换为不使用项目',
@@ -3663,22 +3731,25 @@ async function executeRemoteCommand(
     const resolved = resolveRemoteSelection(target, rows, {
       kindLabel: '项目',
       listCommand: formatRemoteCommand(connection, 'projects'),
-      cachedRows: getCachedRemoteSelection(connection.id, 'workspaces'),
+      cachedRows: getCachedRemoteSelection(selectionScope, 'workspaces'),
     })
     if (!resolved.ok) return resolved
     const sessions = await getSessionService().listSessions({
       includeArchived: false,
       limit: REMOTE_SESSION_QUERY_LIMIT,
     })
-    const latestSession = sessions.sessions.find((item) =>
-      item.workspaceIds.includes(resolved.row.id),
+    const latestSession = sessions.sessions.find(
+      (item) =>
+        item.workspaceIds.includes(resolved.row.id) &&
+        (externalId == null ||
+          canBindRemoteRouteSession(store.connections, base, externalId, item.id)),
     )
     if (latestSession != null) {
-      remoteService.updateConnectionDefaults(connection.id, {
+      updateDefaults({
         defaultWorkspaceId: resolved.row.id,
         defaultSessionId: latestSession.id,
       })
-      const context = await resolveRemoteContextSummary(connection.id, latestSession.id)
+      const context = await resolveRemoteContextSummary(connection.id, latestSession.id, externalId)
       return {
         ok: true,
         title: `已切换项目 · ${resolved.row.label}`,
@@ -3692,8 +3763,8 @@ async function executeRemoteCommand(
         ],
       }
     }
-    const created = await createRemoteSession(connection.id, resolved.row.id)
-    const context = await resolveRemoteContextSummary(connection.id, created.sessionId)
+    const created = await createRemoteSession(connection.id, resolved.row.id, externalId)
+    const context = await resolveRemoteContextSummary(connection.id, created.sessionId, externalId)
     return {
       ok: true,
       title: `已切换项目 · ${resolved.row.label}`,
@@ -3745,7 +3816,7 @@ async function executeRemoteCommand(
           : command.name === 'use-channel'
             ? formatRemoteCommand(connection, 'channels')
             : formatRemoteCommand(connection, 'agents')
-      return executeRemoteCommand(connectionId, listCommand, sessionId)
+      return executeRemoteCommand(connectionId, listCommand, sessionId, externalId)
     }
     let resolved: { ok: true; row: RemoteSelectionRow } | { ok: false; title: string; text: string }
     let selectedProviderDefaultModel: string | undefined
@@ -3759,7 +3830,7 @@ async function executeRemoteCommand(
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: '渠道',
         listCommand: formatRemoteCommand(connection, 'channels'),
-        cachedRows: getCachedRemoteSelection(connection.id, 'providers'),
+        cachedRows: getCachedRemoteSelection(selectionScope, 'providers'),
       })
       if (resolved.ok) {
         const selectedProviderId = resolved.row.id
@@ -3779,7 +3850,7 @@ async function executeRemoteCommand(
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: '模型',
         listCommand: formatRemoteCommand(connection, 'models'),
-        cachedRows: getCachedRemoteSelection(connection.id, 'models'),
+        cachedRows: getCachedRemoteSelection(selectionScope, 'models'),
       })
     } else {
       const agents = getAgentRepository().list({ includeDisabled: false }).map(toManagedAgent)
@@ -3791,7 +3862,7 @@ async function executeRemoteCommand(
       resolved = resolveRemoteSelection(target, rows, {
         kindLabel: 'Agent',
         listCommand: formatRemoteCommand(connection, 'agents'),
-        cachedRows: getCachedRemoteSelection(connection.id, 'agents'),
+        cachedRows: getCachedRemoteSelection(selectionScope, 'agents'),
       })
       if (resolved.ok) {
         const selectedAgentId = resolved.row.id
@@ -3832,7 +3903,7 @@ async function executeRemoteCommand(
           : {}),
       })
     }
-    remoteService.updateConnectionDefaults(connection.id, {
+    updateDefaults({
       ...(command.name === 'use-model' ? { defaultModelId: resolved.row.id } : {}),
       ...(command.name === 'use-channel'
         ? {
@@ -3851,7 +3922,7 @@ async function executeRemoteCommand(
           }
         : {}),
     })
-    const context = await resolveRemoteContextSummary(connection.id, sessionId)
+    const context = await resolveRemoteContextSummary(connection.id, sessionId, externalId)
     const resultText =
       command.name === 'use-channel' && selectedProviderDefaultModel != null
         ? `${resolved.row.label}\n已同步切换为渠道默认模型：${selectedProviderDefaultModel}`
@@ -3877,7 +3948,7 @@ async function executeRemoteCommand(
     if (blocked != null) return blocked
     const currentSession = await getRemoteSession(sessionId)
     if (command.name === 'reasoning' || command.args.length === 0) {
-      cacheRemoteSelection(connection.id, 'reasoning', REMOTE_REASONING_ROWS)
+      cacheRemoteSelection(selectionScope, 'reasoning', REMOTE_REASONING_ROWS)
       return {
         ok: true,
         title: '推理强度',
@@ -3899,15 +3970,15 @@ async function executeRemoteCommand(
     const resolved = resolveRemoteSelection(command.args.join(' '), REMOTE_REASONING_ROWS, {
       kindLabel: '推理强度',
       listCommand: formatRemoteCommand(connection, 'reasoning'),
-      cachedRows: getCachedRemoteSelection(connection.id, 'reasoning'),
+      cachedRows: getCachedRemoteSelection(selectionScope, 'reasoning'),
     })
     if (!resolved.ok) return resolved
     const reasoningEffort = resolved.row.id as SessionReasoningEffort
     if (sessionId != null) await getSessionService().updateSession({ sessionId, reasoningEffort })
-    remoteService.updateConnectionDefaults(connection.id, {
+    updateDefaults({
       defaultReasoningEffort: reasoningEffort,
     })
-    const context = await resolveRemoteContextSummary(connection.id, sessionId)
+    const context = await resolveRemoteContextSummary(connection.id, sessionId, externalId)
     return {
       ok: true,
       title: '已切换推理强度',
@@ -3923,7 +3994,7 @@ async function executeRemoteCommand(
     const adapter = currentSession?.agentAdapter ?? getRuntimePermissionDefaults().agentAdapter
     const rows = getRemotePermissionRows(adapter)
     if (command.name === 'permissions' || command.args.length === 0) {
-      cacheRemoteSelection(connection.id, 'permissions', rows)
+      cacheRemoteSelection(selectionScope, 'permissions', rows)
       const actions = buildRemoteSelectionActions(rows, {
         selectCommand: formatRemoteCommand(connection, 'use-permission'),
         listCommand: formatRemoteCommand(connection, 'permissions'),
@@ -3951,7 +4022,7 @@ async function executeRemoteCommand(
     const resolved = resolveRemoteSelection(normalizedTarget, rows, {
       kindLabel: '权限模式',
       listCommand: formatRemoteCommand(connection, 'permissions'),
-      cachedRows: getCachedRemoteSelection(connection.id, 'permissions'),
+      cachedRows: getCachedRemoteSelection(selectionScope, 'permissions'),
     })
     if (!resolved.ok) return resolved
     if (
@@ -3966,8 +4037,8 @@ async function executeRemoteCommand(
     }
     const permissionMode = resolved.row.id as SessionPermissionMode
     if (sessionId != null) await getSessionService().updateSession({ sessionId, permissionMode })
-    remoteService.updateConnectionDefaults(connection.id, { defaultPermissionMode: permissionMode })
-    const context = await resolveRemoteContextSummary(connection.id, sessionId)
+    updateDefaults({ defaultPermissionMode: permissionMode })
+    const context = await resolveRemoteContextSummary(connection.id, sessionId, externalId)
     return {
       ok: true,
       title: '已切换权限模式',
@@ -4034,7 +4105,7 @@ async function executeRemoteCommand(
               meta: mainWindow.isFocused() ? 'focused' : 'background',
             },
           ]
-    cacheRemoteSelection(connection.id, 'windows', rows)
+    cacheRemoteSelection(selectionScope, 'windows', rows)
     return {
       ok: true,
       title: command.name === 'screen' ? '屏幕概览' : '窗口列表',
@@ -4126,13 +4197,22 @@ async function handleRemoteInboundMessage(
 ): Promise<RemoteInboundResponse | void> {
   const prefix = message.connection.commandPrefix.trim() || '/'
   const trimmedText = message.text.trim()
-  const currentConnections = getRemoteConnectionService().list().connections
-  let effectiveSessionId = message.connection.defaultSessionId
+  const remoteService = getRemoteConnectionService()
+  const route = remoteService.ensureRouteBinding(message.connection.id, message.externalId)
+  const currentConnections = remoteService.list().connections
+  let effectiveSessionId = route.defaultSessionId
   if (
     effectiveSessionId != null &&
-    !canUseConfiguredRemoteSession(currentConnections, message.connection)
+    !canBindRemoteRouteSession(
+      currentConnections,
+      message.connection,
+      message.externalId,
+      effectiveSessionId,
+    )
   ) {
-    effectiveSessionId = (await createRemoteSession(message.connection.id)).sessionId
+    effectiveSessionId = (
+      await createRemoteSession(message.connection.id, undefined, message.externalId)
+    ).sessionId
   }
   const isCommandMessage = trimmedText.startsWith(prefix)
   // 远程问答桥：会话挂起待答问题时，非命令消息优先当作问题回答路由，
@@ -4147,7 +4227,7 @@ async function handleRemoteInboundMessage(
   }
   const activeSelectionKind =
     !isCommandMessage && /^\d+$/.test(trimmedText)
-      ? getActiveRemoteSelectionKind(message.connection.id)
+      ? getActiveRemoteSelectionKind(remoteRouteKey(message.connection.id, message.externalId))
       : null
   if (isCommandMessage || activeSelectionKind != null) {
     if (!message.connection.capabilities.runCommands) {
@@ -4168,6 +4248,7 @@ async function handleRemoteInboundMessage(
       message.connection.id,
       commandMessage,
       effectiveSessionId,
+      message.externalId,
     )
     return {
       title: result.title,
@@ -4207,23 +4288,22 @@ async function handleRemoteInboundMessage(
     }
   }
   const sessionId =
-    effectiveSessionId ?? (await createRemoteSession(message.connection.id)).sessionId
+    effectiveSessionId ??
+    (await createRemoteSession(message.connection.id, undefined, message.externalId)).sessionId
   await ensureSessionWorkspacePaths(sessionId)
+
+  const activeRoute = remoteService.ensureRouteBinding(message.connection.id, message.externalId)
 
   const result = await getSessionService().sendTurn({
     sessionId,
     ...createRemoteUserTurn(message.connection.channel, message.text, {
       canTransferFiles: message.connection.capabilities.transferFiles,
     }),
-    ...(message.connection.defaultProviderProfileId != null
-      ? { providerProfileId: message.connection.defaultProviderProfileId }
+    ...(activeRoute.defaultProviderProfileId != null
+      ? { providerProfileId: activeRoute.defaultProviderProfileId }
       : {}),
-    ...(message.connection.defaultModelId != null
-      ? { modelId: message.connection.defaultModelId }
-      : {}),
-    ...(message.connection.defaultAgentId != null
-      ? { agentId: message.connection.defaultAgentId }
-      : {}),
+    ...(activeRoute.defaultModelId != null ? { modelId: activeRoute.defaultModelId } : {}),
+    ...(activeRoute.defaultAgentId != null ? { agentId: activeRoute.defaultAgentId } : {}),
     ...(message.attachments != null ? { attachments: message.attachments } : {}),
   })
   const target = {
@@ -8969,6 +9049,15 @@ export function registerAllIpcHandlers(): void {
     if (req.category === 'telemetry' && req.key === 'data') {
       applyTelemetrySettings(req.value)
     }
+    // 会话工作流灰度开关变更后，已打开会话的挂载入口要即时出现/隐藏：
+    // 广播 scope='settings' 事件，useSessionWorkflowBinding 监听后重取 binding+features。
+    if (req.category === 'sessionWorkflowBinding') {
+      pushStreamEvent('stream:config:changed', {
+        scope: 'settings',
+        action: 'update',
+        id: req.category,
+      })
+    }
     return { ok: true }
   })
 
@@ -10264,6 +10353,37 @@ export function registerAllIpcHandlers(): void {
       filePath,
       fileName,
       fileUrl: toSafeFileUrl(filePath),
+    }
+  })
+
+  typedIpcHandle('file:prepare-media-input', async (req) => {
+    const sourcePath = req.sourcePath?.trim()
+    if (!sourcePath) throw new Error('sourcePath is required')
+    const resolvedSource = path.resolve(sourcePath)
+    const sourceStat = await fs.stat(resolvedSource)
+    if (!sourceStat.isFile()) throw new Error('输入媒体不是文件')
+    if (sourceStat.size > 72 * 1024 * 1024) {
+      throw new Error('输入视频或图片不能超过 72MB')
+    }
+    const inputRoot = path.join(
+      getDefaultCanvasMediaDir(),
+      'quick-create-inputs',
+      req.kind === 'video' ? 'videos' : 'images',
+    )
+    await fs.mkdir(inputRoot, { recursive: true })
+    const extension = path.extname(resolvedSource) || (req.kind === 'video' ? '.mp4' : '.png')
+    const baseName = path
+      .basename(resolvedSource, path.extname(resolvedSource))
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    const fileName = `${baseName || `quick-create-${req.kind}`}-${crypto.randomUUID()}${extension}`
+    const filePath = path.join(inputRoot, fileName)
+    await fs.copyFile(resolvedSource, filePath)
+    log.info(`file:prepare-media-input copied kind=${req.kind} sizeBytes=${sourceStat.size}`)
+    return {
+      filePath,
+      fileName,
+      fileUrl: toSafeFileUrl(filePath),
+      sizeBytes: sourceStat.size,
     }
   })
 

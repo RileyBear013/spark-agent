@@ -30,7 +30,9 @@ export class SkillRepository extends BaseRepository {
 
   list(filters?: { scope?: string }): SkillRow[] {
     if (filters?.scope !== undefined) {
-      return this.raw.prepare('SELECT * FROM skills WHERE scope = ? ORDER BY created_at ASC').all(filters.scope) as SkillRow[]
+      return this.raw
+        .prepare('SELECT * FROM skills WHERE scope = ? ORDER BY created_at ASC')
+        .all(filters.scope) as SkillRow[]
     }
     return this.raw.prepare('SELECT * FROM skills ORDER BY created_at ASC').all() as SkillRow[]
   }
@@ -39,16 +41,57 @@ export class SkillRepository extends BaseRepository {
     return this.findById<SkillRow>(id) ?? undefined
   }
 
-  create(params: { id: string; scope: string; name: string; version: string; rootPath: string; manifestJson: string; enabled?: boolean }): SkillRow {
+  /**
+   * 按 rootPath 精确查找（保持与 list().find 相同的匹配顺序：created_at 最早者优先）。
+   * 供技能导入的 existing 判定使用——避免每次导入都全表读取 manifest_json 大字段。
+   */
+  getByRootPath(rootPath: string): SkillRow | undefined {
+    return this.raw
+      .prepare('SELECT * FROM skills WHERE root_path = ? ORDER BY created_at ASC LIMIT 1')
+      .get(rootPath) as SkillRow | undefined
+  }
+
+  create(params: {
+    id: string
+    scope: string
+    name: string
+    version: string
+    rootPath: string
+    manifestJson: string
+    enabled?: boolean
+  }): SkillRow {
     const now = new Date().toISOString()
-    this.raw.prepare(`
+    this.raw
+      .prepare(
+        `
       INSERT INTO skills (id, scope, name, version, root_path, manifest_json, enabled, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(params.id, params.scope, params.name, params.version, params.rootPath, params.manifestJson, params.enabled === false ? 0 : 1, now, now)
+    `,
+      )
+      .run(
+        params.id,
+        params.scope,
+        params.name,
+        params.version,
+        params.rootPath,
+        params.manifestJson,
+        params.enabled === false ? 0 : 1,
+        now,
+        now,
+      )
     return this.get(params.id)!
   }
 
-  update(id: string, fields: Partial<{ name: string; version: string; rootPath: string; manifestJson: string; enabled: boolean }>): SkillRow | undefined {
+  update(
+    id: string,
+    fields: Partial<{
+      name: string
+      version: string
+      rootPath: string
+      manifestJson: string
+      enabled: boolean
+    }>,
+  ): SkillRow | undefined {
     const sets: string[] = []
     const vals: unknown[] = []
 
@@ -84,29 +127,59 @@ export class SkillRepository extends BaseRepository {
   /**
    * 更新扩展字段（由 migration 008 新增的列）
    */
-  updateExtendedFields(id: string, fields: {
-    registryId?: string | null
-    remoteId?: string | null
-    author?: string
-    category?: string
-    tagsJson?: string
-    rating?: number
-    downloadCount?: number
-    homepageUrl?: string | null
-    iconUrl?: string | null
-  }): SkillRow | undefined {
+  updateExtendedFields(
+    id: string,
+    fields: {
+      registryId?: string | null
+      remoteId?: string | null
+      author?: string
+      category?: string
+      tagsJson?: string
+      rating?: number
+      downloadCount?: number
+      homepageUrl?: string | null
+      iconUrl?: string | null
+    },
+  ): SkillRow | undefined {
     const sets: string[] = []
     const vals: unknown[] = []
 
-    if (fields.registryId !== undefined) { sets.push('registry_id = ?'); vals.push(fields.registryId) }
-    if (fields.remoteId !== undefined) { sets.push('remote_id = ?'); vals.push(fields.remoteId) }
-    if (fields.author !== undefined) { sets.push('author = ?'); vals.push(fields.author) }
-    if (fields.category !== undefined) { sets.push('category = ?'); vals.push(fields.category) }
-    if (fields.tagsJson !== undefined) { sets.push('tags_json = ?'); vals.push(fields.tagsJson) }
-    if (fields.rating !== undefined) { sets.push('rating = ?'); vals.push(fields.rating) }
-    if (fields.downloadCount !== undefined) { sets.push('download_count = ?'); vals.push(fields.downloadCount) }
-    if (fields.homepageUrl !== undefined) { sets.push('homepage_url = ?'); vals.push(fields.homepageUrl) }
-    if (fields.iconUrl !== undefined) { sets.push('icon_url = ?'); vals.push(fields.iconUrl) }
+    if (fields.registryId !== undefined) {
+      sets.push('registry_id = ?')
+      vals.push(fields.registryId)
+    }
+    if (fields.remoteId !== undefined) {
+      sets.push('remote_id = ?')
+      vals.push(fields.remoteId)
+    }
+    if (fields.author !== undefined) {
+      sets.push('author = ?')
+      vals.push(fields.author)
+    }
+    if (fields.category !== undefined) {
+      sets.push('category = ?')
+      vals.push(fields.category)
+    }
+    if (fields.tagsJson !== undefined) {
+      sets.push('tags_json = ?')
+      vals.push(fields.tagsJson)
+    }
+    if (fields.rating !== undefined) {
+      sets.push('rating = ?')
+      vals.push(fields.rating)
+    }
+    if (fields.downloadCount !== undefined) {
+      sets.push('download_count = ?')
+      vals.push(fields.downloadCount)
+    }
+    if (fields.homepageUrl !== undefined) {
+      sets.push('homepage_url = ?')
+      vals.push(fields.homepageUrl)
+    }
+    if (fields.iconUrl !== undefined) {
+      sets.push('icon_url = ?')
+      vals.push(fields.iconUrl)
+    }
 
     if (sets.length === 0) return this.get(id)
 

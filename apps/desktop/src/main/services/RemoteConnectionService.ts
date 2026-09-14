@@ -10,6 +10,7 @@ import type {
   RemoteCommandDefinition,
   RemoteConnectionCapabilities,
   RemoteConnectionConfig,
+  RemoteRouteBinding,
   RemoteConnectionGlobalSettings,
   RemoteConnectionStatus,
   RemoteCreateBotDraftResponse,
@@ -41,7 +42,9 @@ import {
 import { downloadQqImage, uploadQqImage, type QqInboundImage } from './qqImageMedia.js'
 import { readOutboundImage } from './remoteImageMedia.js'
 import {
+  canBindRemoteRouteSession,
   canShareRemoteSession,
+  canUseConfiguredRemoteSession,
   remoteConnectionsForSession,
   remoteRouteKey,
 } from './remoteSessionIsolation.js'
@@ -72,6 +75,8 @@ export type RemoteInboundMessage = {
   senderName: string
   text: string
   messageId?: string
+  /** Telegram callback 所在的机器人消息；同步命令响应应覆盖编辑该消息。 */
+  editMessageId?: number
   attachments?: SessionAttachment[]
 }
 
@@ -92,6 +97,7 @@ type RemoteOutboundMessage = {
   text: string
   actions?: RemoteMessageAction[]
   images?: Array<{ source: string; alt: string }>
+  editMessageId?: number
 }
 
 function buildRemoteRuntimeErrorMessage(error: unknown, commandPrefix = '/'): string {
@@ -624,6 +630,7 @@ export function parseWebhookBody(
       senderName: string
       text: string
       messageId?: string
+      editMessageId?: number
       inboundImages?: TelegramInboundImageDescriptor[]
       feishuImage?: FeishuInboundImage
       qqImages?: QqInboundImage[]
@@ -652,6 +659,9 @@ export function parseWebhookBody(
             : (firstName ?? 'Telegram 用户'),
         text: normalizeInboundText(channel, callbackText),
         ...(callback.id != null ? { messageId: `telegram:callback:${String(callback.id)}` } : {}),
+        ...(Number.isSafeInteger(callbackMessage?.message_id)
+          ? { editMessageId: Number(callbackMessage?.message_id) }
+          : {}),
       }
     }
     const message = isRecord(body.message) ? body.message : undefined
@@ -840,6 +850,37 @@ function sanitizeConnection(input: unknown): RemoteConnectionConfig | null {
     commandPrefix: typeof input.commandPrefix === 'string' ? input.commandPrefix : '/',
     allowedUserIds: normalizeStringArray(input.allowedUserIds),
     allowedChatIds: normalizeStringArray(input.allowedChatIds),
+    routeBindings: Array.isArray(input.routeBindings)
+      ? input.routeBindings.filter(isRecord).flatMap((route): RemoteRouteBinding[] => {
+          if (typeof route.externalId !== 'string' || route.externalId.length === 0) return []
+          return [
+            {
+              externalId: route.externalId,
+              ...(typeof route.defaultSessionId === 'string'
+                ? { defaultSessionId: route.defaultSessionId }
+                : {}),
+              ...(typeof route.defaultWorkspaceId === 'string'
+                ? { defaultWorkspaceId: route.defaultWorkspaceId }
+                : {}),
+              ...(typeof route.defaultProviderProfileId === 'string'
+                ? { defaultProviderProfileId: route.defaultProviderProfileId }
+                : {}),
+              ...(typeof route.defaultModelId === 'string'
+                ? { defaultModelId: route.defaultModelId }
+                : {}),
+              ...(typeof route.defaultAgentId === 'string'
+                ? { defaultAgentId: route.defaultAgentId }
+                : {}),
+              ...(isRemotePermissionMode(route.defaultPermissionMode)
+                ? { defaultPermissionMode: route.defaultPermissionMode }
+                : {}),
+              ...(isRemoteReasoningEffort(route.defaultReasoningEffort)
+                ? { defaultReasoningEffort: route.defaultReasoningEffort }
+                : {}),
+            },
+          ]
+        })
+      : [],
     ...(typeof input.defaultSessionId === 'string'
       ? { defaultSessionId: input.defaultSessionId }
       : {}),
@@ -1186,6 +1227,85 @@ export class RemoteConnectionService {
     return this.save(next)
   }
 
+  ensureRouteBinding(id: string, externalId: string): RemoteRouteBinding {
+    const store = this.readStore()
+    const connection = store.connections.find((item) => item.id === id)
+    if (connection == null) throw new Error('Remote connection not found')
+    const existing = connection.routeBindings?.find((item) => item.externalId === externalId)
+    if (existing != null) return existing
+    const knownTargets = new Set([
+      ...connection.allowedChatIds,
+      ...connection.pairedDevices.map((device) => device.channelThreadId ?? device.remoteUserId),
+    ])
+    const canInheritLegacySession =
+      (connection.routeBindings?.length ?? 0) === 0 &&
+      knownTargets.size === 1 &&
+      knownTargets.has(externalId) &&
+      canUseConfiguredRemoteSession(store.connections, connection) &&
+      canBindRemoteRouteSession(
+        store.connections,
+        connection,
+        externalId,
+        connection.defaultSessionId,
+      )
+    const route: RemoteRouteBinding = {
+      externalId,
+      ...(canInheritLegacySession && connection.defaultSessionId != null
+        ? { defaultSessionId: connection.defaultSessionId }
+        : {}),
+      ...(connection.defaultWorkspaceId != null
+        ? { defaultWorkspaceId: connection.defaultWorkspaceId }
+        : {}),
+      ...(connection.defaultProviderProfileId != null
+        ? { defaultProviderProfileId: connection.defaultProviderProfileId }
+        : {}),
+      ...(connection.defaultModelId != null ? { defaultModelId: connection.defaultModelId } : {}),
+      ...(connection.defaultAgentId != null ? { defaultAgentId: connection.defaultAgentId } : {}),
+      ...(connection.defaultPermissionMode != null
+        ? { defaultPermissionMode: connection.defaultPermissionMode }
+        : {}),
+      ...(connection.defaultReasoningEffort != null
+        ? { defaultReasoningEffort: connection.defaultReasoningEffort }
+        : {}),
+    }
+    this.writeConnections(store, {
+      ...connection,
+      routeBindings: [...(connection.routeBindings ?? []), route],
+    })
+    return route
+  }
+
+  updateRouteDefaults(
+    id: string,
+    externalId: string,
+    patch: Partial<{
+      [K in keyof Omit<RemoteRouteBinding, 'externalId'>]: RemoteRouteBinding[K] | null
+    }>,
+  ): RemoteRouteBinding {
+    this.ensureRouteBinding(id, externalId)
+    const store = this.readStore()
+    const connection = store.connections.find((item) => item.id === id)
+    const previous = connection?.routeBindings?.find((item) => item.externalId === externalId)
+    if (connection == null || previous == null) throw new Error('Remote route not found')
+    const next: RemoteRouteBinding = { ...previous }
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) delete (next as unknown as Record<string, unknown>)[key]
+      else if (value !== undefined) (next as unknown as Record<string, unknown>)[key] = value
+    }
+    if (
+      !canBindRemoteRouteSession(store.connections, connection, externalId, next.defaultSessionId)
+    ) {
+      throw new Error('该会话已绑定到其他远程聊天，请选择独立会话。')
+    }
+    this.writeConnections(store, {
+      ...connection,
+      routeBindings: (connection.routeBindings ?? []).map((item) =>
+        item.externalId === externalId ? next : item,
+      ),
+    })
+    return next
+  }
+
   async sendReply(
     connectionId: string,
     externalId: string,
@@ -1443,6 +1563,7 @@ export class RemoteConnectionService {
       senderName: string
       text: string
       messageId?: string
+      editMessageId?: number
       inboundImages?: TelegramInboundImageDescriptor[]
       feishuImage?: FeishuInboundImage
       qqImages?: QqInboundImage[]
@@ -1560,6 +1681,7 @@ export class RemoteConnectionService {
         senderName: message.senderName,
         text,
         ...(message.messageId != null ? { messageId: message.messageId } : {}),
+        ...(message.editMessageId != null ? { editMessageId: message.editMessageId } : {}),
         ...(attachments != null ? { attachments } : {}),
       })
       if (response != null) {
@@ -1567,6 +1689,7 @@ export class RemoteConnectionService {
           title: response.title,
           text: response.text.trim(),
           ...(response.actions != null ? { actions: response.actions } : {}),
+          ...(message.editMessageId != null ? { editMessageId: message.editMessageId } : {}),
         })
       }
     } catch (err) {
@@ -2170,6 +2293,33 @@ export class RemoteConnectionService {
           ? (message.title ?? '请选择操作')
           : ''
     const chunks = messageText.length > 0 ? splitText(messageText, 3900) : []
+    if (message.editMessageId != null && chunks.length === 1 && media.images.length === 0) {
+      const actions = message.actions ?? []
+      try {
+        await this.postTelegramFormattedText(
+          `https://api.telegram.org/bot${encodeURIComponent(token)}/editMessageText`,
+          {
+            chat_id: externalId,
+            message_id: message.editMessageId,
+            disable_web_page_preview: true,
+            reply_markup: {
+              inline_keyboard: chunkActions(actions).map((row) =>
+                row.map((action) => ({
+                  text: action.label,
+                  callback_data: this.encodeTelegramCallback(connection.id, action.command),
+                })),
+              ),
+            },
+          },
+          chunks[0] ?? '',
+        )
+        return
+      } catch (error) {
+        log.warn(
+          `Telegram 原消息编辑失败，退回新消息: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+    }
     for (const [index, chunk] of chunks.entries()) {
       const actions = index === chunks.length - 1 ? (message.actions ?? []) : []
       await this.postTelegramFormattedText(

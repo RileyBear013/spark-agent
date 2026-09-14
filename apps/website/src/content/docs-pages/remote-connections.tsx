@@ -127,19 +127,21 @@ const Body = () => (
     <ol>
       <li>以配置的前缀开头的消息 → 跑命令处理器。</li>
       <li>
-        普通消息 → 通过 <code>SessionService.sendTurn</code> 发到该连接的默认会话。
+        普通消息 → 通过 <code>SessionService.sendTurn</code> 发到该聊天独立绑定的会话。
       </li>
       <li>
-        没配置默认会话 → Spark 在默认项目中自动创建会话；选择“不使用项目”时立即创建 no-project
-        会话。
+        新聊天没有绑定会话 → Spark 在该聊天的默认项目中自动创建会话；选择“不使用项目”时立即创建
+        no-project 会话。
       </li>
       <li>配置了 default provider / model / agent → 在发送时应用。</li>
       <li>Telegram 和飞书的列表响应使用分页按钮，不再回传大段列表文本。</li>
       <li>新建远程会话默认使用各执行器的自动审批模式；完全访问仍受高危操作权限保护。</li>
+      <li>同一个机器人下的私聊和群聊分别保存会话、模型和选择状态，彼此不会共用。</li>
+      <li>定时任务仅在会话恰好绑定一个远程聊天时回传，不会猜测接收者。</li>
     </ol>
     <p>
-      设置页提供「默认会话」选择器，确保普通消息有明确去处。 Telegram 命令会在轮询启动时通过{' '}
-      <code>setMyCommands</code> 同步给 Telegram。
+      设置页「默认会话」只用于唯一可识别的新聊天首次绑定；已有聊天保持自己的会话。Telegram
+      命令会在轮询启动时通过 <code>setMyCommands</code> 同步给 Telegram。
     </p>
 
     <h2 id="ui">5. 设置 UI</h2>
@@ -163,15 +165,17 @@ const Body = () => (
       <li>
         <strong>Telegram</strong>：<code>getUpdates</code> 轮询；文本走 <code>sendMessage</code>。
         收到已配对用户的消息后，优先在原消息添加 👀 反应确认接收（若该聊天不允许反应则静默跳过）；
-        长任务期间每 4 秒续期 <code>sendChatAction(typing)</code>；产生正文后通过{' '}
-        <code>sendMessage</code> 与 <code>editMessageText</code> 在同一条消息中增量展示，
-        最终回复尽量原位收口；常用 Markdown 会转换为 Telegram HTML
-        富文本，解析失败时自动回退纯文本； 发送或编辑失败时退回持续输入状态与正常回复。
-        开启“传输文件”能力后，回复中的 Markdown 图片会通过 <code>sendPhoto</code> 发送。本地图片优先
-        multipart 直传 Telegram；若图片模式被拒绝则以文件模式发送，直传失败时上传到 Spark
-        临时存储，再由 Telegram 拉取临时 URL。用户发送的 Telegram 图片或图片文件会通过{' '}
-        <code>getFile</code> 下载到本机持久附件目录，并作为图片附件提交给当前会话识别；单张图片限制
-        20 MB。同一图片同时出现在 Markdown 引用和文件卡片时，发送前会按文件路径或 URL 去重。
+        点击分页或选择按钮时通过 <code>editMessageText</code>{' '}
+        原位更新按钮所在消息，避免反复新增消息； 长任务期间每 4 秒续期{' '}
+        <code>sendChatAction(typing)</code>；产生正文后通过 <code>sendMessage</code> 与{' '}
+        <code>editMessageText</code> 在同一条消息中增量展示， 最终回复尽量原位收口；常用 Markdown
+        会转换为 Telegram HTML 富文本，解析失败时自动回退纯文本；
+        发送或编辑失败时退回持续输入状态与正常回复。 开启“传输文件”能力后，回复中的 Markdown
+        图片会通过 <code>sendPhoto</code> 发送。本地图片优先 multipart 直传
+        Telegram；若图片模式被拒绝则以文件模式发送，直传失败时上传到 Spark 临时存储，再由 Telegram
+        拉取临时 URL。用户发送的 Telegram 图片或图片文件会通过 <code>getFile</code>{' '}
+        下载到本机持久附件目录，并作为图片附件提交给当前会话识别；单张图片限制 20
+        MB。同一图片同时出现在 Markdown 引用和文件卡片时，发送前会按文件路径或 URL 去重。
       </li>
       <li>
         <strong>飞书</strong>：通过 <code>@larksuiteoapi/node-sdk</code> 的官方 WebSocket

@@ -64,6 +64,12 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
     if (event.sessionId === sessionId && event.kind === 'workflow-binding') void reload()
   })
 
+  // 设置页「会话工作流」灰度开关变更（scope='settings'）：立即重取 features，
+  // 让已打开会话的挂载入口即时出现/隐藏，无需重开会话。
+  useIpcStream('stream:config:changed', (event) => {
+    if (event.scope === 'settings' && event.id === 'sessionWorkflowBinding') void reload()
+  })
+
   const update = useCallback(
     async (next: { mode: 'inherit' | 'disabled' } | { mode: 'override'; workflowId: string }) => {
       if (sessionId == null || state == null) return

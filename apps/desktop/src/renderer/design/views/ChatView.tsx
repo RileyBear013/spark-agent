@@ -4636,6 +4636,15 @@ function ChatStream({
     return () => el.removeEventListener('scroll', handleScroll)
   }, [])
 
+  // 用户「上滚意图」统一标记：供 wheel/touchstart 源事件闸门与自定义滚动条
+  // （ChatOverlayScrollbar 的拖拽/轨道点击/按键，均不派发 wheel/touchstart）共用。
+  // 不标记后者的话，流式贴底 pin 会在下一帧把滚动条拖上去的视图拽回底部。
+  const markUserScrollIntentUp = useCallback(() => {
+    // 初始贴底进行中不拦截（切会话首次贴底必须完成）
+    if (scrollToBottomPendingRef.current) return
+    userScrolledRef.current = true
+  }, [])
+
   // 用户主动上滚的「源事件」闸门：流式 pin（层2 effect 与 MutationObserver）都以 userScrolledRef
   // 为闸门，但仅靠 scroll 事件的 distance 重算存在阈值延迟与程序 pin 干扰——用户第一帧小幅上滚时
   // distance 仍 <50，会被当成「未上滚」，pin 随即把视图拉回，形成「滚不上去被弹回」的死锁。
@@ -4644,11 +4653,7 @@ function ChatStream({
   useEffect(() => {
     const el = streamRef.current
     if (!el) return
-    const markUserScrolled = () => {
-      // 初始贴底进行中不拦截（切会话首次贴底必须完成）
-      if (scrollToBottomPendingRef.current) return
-      userScrolledRef.current = true
-    }
+    const markUserScrolled = markUserScrollIntentUp
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY < 0) markUserScrolled() // 仅向上滚
     }
@@ -4661,7 +4666,7 @@ function ChatStream({
       el.removeEventListener('wheel', onWheel)
       el.removeEventListener('touchstart', onTouchStart)
     }
-  }, [])
+  }, [markUserScrollIntentUp])
 
   // 实时监听新事件 — useIpcStream 内部通过 ref 持有 callback，不会因 deps 变化重订阅
   // 这里直接用闭包中的 sessionId 过滤即可
@@ -5390,7 +5395,11 @@ function ChatStream({
           onNavigate={handleNavigateToTurn}
         />
       )}
-      <ChatOverlayScrollbar scrollRef={streamRef} controlsId={streamId} />
+      <ChatOverlayScrollbar
+        scrollRef={streamRef}
+        controlsId={streamId}
+        onUserScrollIntentUp={markUserScrollIntentUp}
+      />
     </div>
   )
 }
