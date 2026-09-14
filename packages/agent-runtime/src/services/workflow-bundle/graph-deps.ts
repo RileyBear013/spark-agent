@@ -10,6 +10,8 @@ export interface GraphDependencies {
   agentIds: string[]
   ruleIds: string[]
   toolIds: string[]
+  /** 节点模型绑定引用(providerProfileId+modelId 组合去重);跨环境不可移植,仅供打包端转提示 */
+  modelRefs: Array<{ providerProfileId: string | null; modelId: string | null }>
 }
 
 function mergeInto(target: GraphDependencies, config: WorkflowNodeConfig): void {
@@ -26,10 +28,37 @@ function mergeInto(target: GraphDependencies, config: WorkflowNodeConfig): void 
   ) {
     target.agentIds.push(config.agentId)
   }
+  // 确定性 MCP 直调节点(toolSource='mcp')按 toolServerId 引用 MCP 服务器;
+  // 不收集会导致该服务器既不随包也不进 unresolved,导入后 preflight 才报缺。
+  if (
+    config.toolSource === 'mcp' &&
+    typeof config.toolServerId === 'string' &&
+    config.toolServerId.length > 0 &&
+    !target.mcpServerIds.includes(config.toolServerId)
+  ) {
+    target.mcpServerIds.push(config.toolServerId)
+  }
+  // 节点模型绑定是跨环境不可移植引用,收集后由打包端转 unresolved 提示。
+  const modelId = typeof config.modelId === 'string' ? config.modelId : null
+  const providerProfileId =
+    typeof config.providerProfileId === 'string' ? config.providerProfileId : null
+  if (modelId != null || providerProfileId != null) {
+    const exists = target.modelRefs.some(
+      (ref) => ref.modelId === modelId && ref.providerProfileId === providerProfileId,
+    )
+    if (!exists) target.modelRefs.push({ providerProfileId, modelId })
+  }
 }
 
 function emptyDeps(): GraphDependencies {
-  return { skillIds: [], mcpServerIds: [], agentIds: [], ruleIds: [], toolIds: [] }
+  return {
+    skillIds: [],
+    mcpServerIds: [],
+    agentIds: [],
+    ruleIds: [],
+    toolIds: [],
+    modelRefs: [],
+  }
 }
 
 /** 深度收集一张图(含 loop.body 嵌套体)的全部外部依赖引用。 */
