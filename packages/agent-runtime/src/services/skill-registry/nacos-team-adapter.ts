@@ -109,7 +109,7 @@ export class NacosTeamAdapter implements SkillRegistryAdapter {
     const client = await this.teamRegistry.client()
     if (!client) return []
     try {
-      const raw = await client.listTeamSkills()
+      const raw = (await client.listTeamSkills()).items
       return raw
         .map((item) => {
           const slug = pickStr(item, ['skillName', 'name'])

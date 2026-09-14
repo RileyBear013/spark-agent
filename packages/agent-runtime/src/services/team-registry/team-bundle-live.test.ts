@@ -370,7 +370,7 @@ describe.skipIf(!LIVE)('自包含捆绑真机探针（TEAM_REGISTRY_LIVE=1）', 
       expect(bigEnv?.checksum).toBe(computePayloadChecksum(bigEnv!.payload))
     } finally {
       await cleanup()
-      const items = await client.listTeamAgentSpecs()
+      const items = (await client.listTeamAgentSpecs()).items
       expect(items.filter((i) => probeNames.includes(String(i.name))).map((i) => i.name)).toEqual([])
     }
   })

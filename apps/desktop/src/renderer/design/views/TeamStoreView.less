@@ -679,3 +679,34 @@
   line-height: 1;
   pointer-events: none;
 }
+
+// ─── 嵌入扩展中心（McpView 页签）与分页 ─────────────────────────────────
+
+// embedded 模式：页面级标题栏收成一行工具条（仅保留上传/刷新按钮）
+.team-store-header--embedded {
+  justify-content: flex-end;
+  padding-top: 0;
+}
+
+// 分类视图底部分页器
+.team-store-pager {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 2px 4px;
+}
+
+// 「全部」视图分节的「查看全部」跳转
+.team-store-section-more {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-primary, #4a9eff);
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--color-bg-2, rgba(128, 128, 128, 0.12));
+  }
+}

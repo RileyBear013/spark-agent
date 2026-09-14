@@ -19,6 +19,7 @@ import type { TeamAssetPinsRepository } from '@spark/storage'
 
 import { listInstallableTeamVersions, pickLatestTeamVersion } from './index.js'
 import {
+  AGENT_SPEC_PREFIX,
   agentSpecNameFor,
   buildAgentSpecPackage,
   envelopeFromAgentSpecVersion,
@@ -183,14 +184,25 @@ export class TeamAssetService {
     return client
   }
 
-  /** 浏览团队某类资产（团队商店列表；未配置时返回空） */
-  async listTeamAssets(assetType: EnvelopeAssetType): Promise<TeamAssetListItem[]> {
+  /** 浏览团队某类资产（团队商店列表；未配置时返回空）。服务端分页 + 按类型前缀 blur 过滤。 */
+  async listTeamAssets(
+    assetType: EnvelopeAssetType,
+    opts: { page?: number; pageSize?: number; query?: string } = {},
+  ): Promise<{ items: TeamAssetListItem[]; total: number }> {
     const client = await this.configStore.buildClient()
-    if (!client) return []
-    const items = await client.listTeamAgentSpecs()
+    if (!client) return { items: [], total: 0 }
+    // search 用类型前缀 blur（`spark-<type>-`），用户搜索词拼在前缀后；服务端
+    // 不支持 search 时会忽略该参数，此时本地 parseAgentSpecName 过滤兜底，
+    // 仅分页计数退化为全局（分页语义不受影响）。
+    const q = opts.query?.trim() ?? ''
+    const page = await client.listTeamAgentSpecs({
+      ...(opts.page !== undefined ? { page: opts.page } : {}),
+      ...(opts.pageSize !== undefined ? { pageSize: opts.pageSize } : {}),
+      search: `${AGENT_SPEC_PREFIX}${assetType}-${q}`,
+    })
     // 列表只有 agentSpecName/labels.latest；取 x-spark 元数据需逐条版本详情
     const ours: Array<{ agentSpecName: string; slug: string; latest: string }> = []
-    for (const item of items) {
+    for (const item of page.items) {
       const name = fieldStr(item, ['name'])
       if (!name) continue
       const parsed = parseAgentSpecName(name)
@@ -218,7 +230,7 @@ export class TeamAssetService {
         }
       }),
     )
-    return results.filter((item): item is TeamAssetListItem => item != null)
+    return { items: results.filter((item): item is TeamAssetListItem => item != null), total: page.total }
   }
 
   /**
@@ -402,7 +414,7 @@ export class TeamAssetService {
     const client = await this.configStore.buildClient()
     if (!client) return []
     const port = this.ports[assetType]
-    const items = await client.listTeamAgentSpecs()
+    const items = (await client.listTeamAgentSpecs()).items
     const remoteBySlug = new Map<string, { agentSpecName: string; version: string }>()
     for (const item of items) {
       const name = fieldStr(item, ['name'])

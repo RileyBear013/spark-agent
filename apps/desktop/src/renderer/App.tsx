@@ -120,9 +120,6 @@ const McpView = React.lazy(async () => ({
 const SkillStoreView = React.lazy(async () => ({
   default: (await import('./design/views/SkillStoreView')).SkillStoreView,
 }))
-const TeamStoreView = React.lazy(async () => ({
-  default: (await import('./design/views/TeamStoreView')).TeamStoreView,
-}))
 const SettingsView = React.lazy(async () => ({
   default: (await import('./design/views/SettingsView')).SettingsView,
 }))
@@ -296,7 +293,8 @@ const WORKBENCH_TOOL_IDS = ['workflows', 'board', 'scheduled-tasks', 'sub-apps']
 const BETA_NAV_IDS = new Set(['workflows', 'sub-apps'])
 // L3 全局共享资源：常驻底部图标条，永不随模式切换。两边都用，故独立成层。
 // 记忆不在此列——按用户决策，记忆入口收归设置页。
-const SHARED_RESOURCE_IDS = ['agents', 'providers', 'skill-store', 'team-store', 'mcp']
+// 团队商店不在此列——收归扩展中心（mcp）页签，更新角标挂在 mcp 入口上。
+const SHARED_RESOURCE_IDS = ['agents', 'providers', 'skill-store', 'mcp']
 
 // 按 id 集合从 NAV_ITEMS 取子集，保序
 function pickNavItems(ids: string[]) {
@@ -971,7 +969,7 @@ function FloatingSidebar({ onNewTask }: { onNewTask: () => void }) {
             >
               <item.icon size={16} />
               <span className="shared-resource-btn-label">{tr(item.labelKey)}</span>
-              {item.id === 'team-store' && teamStoreBadge > 0 && (
+              {item.id === 'mcp' && teamStoreBadge > 0 && (
                 <span className="shared-resource-badge" aria-label={`${teamStoreBadge} 个可更新`}>
                   {teamStoreBadge > 99 ? '99+' : teamStoreBadge}
                 </span>
@@ -1957,7 +1955,8 @@ function Shell() {
       case 'skill-store':
         return <SkillStoreView />
       case 'team-store':
-        return <TeamStoreView />
+        // 团队商店收归扩展中心页签（保留 view id 以兼容全局搜索/命令面板深链）
+        return <McpView initialTab="team-store" />
       case 'providers':
         return <ProvidersView />
       case 'mcp':

@@ -534,8 +534,12 @@ export function registerTeamAssetIpc(deps: TeamAssetIpcDeps): void {
 
   typedIpcHandle('team-registry:list-assets', async (req) =>
     runAssetTask(async () => {
-      const items = await service().listTeamAssets(req.assetType)
-      return { items }
+      const { items, total } = await service().listTeamAssets(req.assetType, {
+        ...(req.page !== undefined ? { page: req.page } : {}),
+        ...(req.pageSize !== undefined ? { pageSize: req.pageSize } : {}),
+        ...(req.query !== undefined ? { query: req.query } : {}),
+      })
+      return { items, total }
     }),
   )
 

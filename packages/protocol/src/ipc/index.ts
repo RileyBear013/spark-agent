@@ -2694,10 +2694,19 @@ export interface TeamRegistryMcpListItemDto {
   protocol: string
 }
 
-export interface TeamRegistryListMcpRequest {}
+export interface TeamRegistryListMcpRequest {
+  /** 页码（1 起步）；缺省 1 保持旧行为 */
+  page?: number
+  /** 每页条数；缺省 200（服务端原上限） */
+  pageSize?: number
+  /** 服务端 blur 搜索词；缺省 'blur'（list 接口必须带 search 参数） */
+  query?: string
+}
 
 export interface TeamRegistryListMcpResponse {
   servers: TeamRegistryMcpListItemDto[]
+  /** 服务端总数（探测不到时为当页条数） */
+  total?: number
 }
 
 export interface TeamRegistryPublishMcpRequest {
@@ -2760,10 +2769,18 @@ export interface TeamRegistryAssetListItemDto {
 
 export interface TeamRegistryListAssetsRequest {
   assetType: TeamRegistryAssetTypeDto
+  /** 页码（1 起步）；缺省 1 保持旧行为 */
+  page?: number
+  /** 每页条数；缺省 200（服务端原上限） */
+  pageSize?: number
+  /** 服务端 blur 搜索词（按类型前缀拼接）；缺省全量 */
+  query?: string
 }
 
 export interface TeamRegistryListAssetsResponse {
   items: TeamRegistryAssetListItemDto[]
+  /** 服务端总数（探测不到时为当页条数） */
+  total?: number
 }
 
 export interface TeamRegistryPublishAssetRequest {

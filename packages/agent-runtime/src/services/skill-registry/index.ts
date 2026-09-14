@@ -1461,7 +1461,7 @@ export class SkillRegistryService {
     if (!this.teamRegistry) return []
     const client = await this.teamRegistry.client()
     if (!client) return []
-    const raw = await client.listTeamSkills()
+    const raw = (await client.listTeamSkills()).items
     const bySlug = new Map<string, { version: string; updatedAt: string }>()
     for (const item of raw) {
       const slug = teamItemString(item, ['skillName', 'name'])

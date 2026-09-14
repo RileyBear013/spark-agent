@@ -258,10 +258,13 @@ describe('NacosClient 原生 MCP API（mock）', () => {
       calls,
     )
     const client = new NacosClient({ ...baseOpts, fetchImpl })
-    const items = await client.listTeamMcpServers()
-    expect(items).toHaveLength(1)
+    const page = await client.listTeamMcpServers()
+    expect(page.items).toHaveLength(1)
+    expect(page.total).toBe(1)
     const call = calls.find((c) => c.url.includes('/mcp/list'))!
     expect(call.url).toContain('search=blur')
+    expect(call.url).toContain('pageNo=1')
+    expect(call.url).toContain('pageSize=200')
   })
 
   it('createTeamMcpDraft 走 form，字段含 serverSpecification；delete 走 DELETE', async () => {
