@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join, resolve } from 'path'
+import { join } from 'path'
 import { SparkDatabase } from '@spark/storage'
-import { SubAppRepository } from '@spark/storage'
+import { SubAppRepository, SubAppPackageService, SubAppPlatformRepository } from '@spark/storage'
 import {
   SubAppShareService,
   buildImportChecks,
@@ -13,13 +13,15 @@ import {
 } from '../SubAppShareService.js'
 import { SubAppFileStore } from '../SubAppFileStore.js'
 
-const MIGRATIONS_DIR = resolve(process.cwd(), '../../packages/storage/migrations')
+// 缺省 migrations 目录由 @spark/storage 按模块自身位置解析，cwd 无关
+const MIGRATIONS_DIR: string | undefined = undefined
 
 describe('SubAppShareService', () => {
   let testDir: string
   let db: SparkDatabase
   let repository: SubAppRepository
   let fileStore: SubAppFileStore
+  let packages: SubAppPackageService
   let service: SubAppShareService
 
   beforeEach(() => {
@@ -33,12 +35,14 @@ describe('SubAppShareService', () => {
     db.runMigrations(MIGRATIONS_DIR)
     repository = new SubAppRepository(db)
     fileStore = new SubAppFileStore(join(testDir, 'files'))
+    packages = new SubAppPackageService(db)
     service = new SubAppShareService({
       repository,
       fileStore,
       fileStoreRoot: join(testDir, 'files'),
       backupsDir: join(testDir, 'backups'),
       platformVersion: '1.2.3',
+      packages,
     })
   })
 
@@ -281,5 +285,45 @@ describe('SubAppShareService', () => {
     // 超大 data 在预检阶段被拦（error 级），不发生文件交换也不写库。
     await expect(service.applyImport(evil, 'new-app')).rejects.toThrow()
     expect(() => statSync(join(testDir, 'files', '01900000-0000-7000-8000-0000000000cc'))).toThrow()
+  })
+
+  it('V2 受管项目：导出携带项目文件/制品/绑定，导入后完整还原', async () => {
+    const platform = new SubAppPlatformRepository(db)
+    const scaffolded = await packages.scaffold({ name: '看板应用', surface: 'panel' })
+    const appId = scaffolded.appId
+    await packages.writeFile({
+      appId,
+      expectedDraftRevision: scaffolded.draftRevision,
+      filePath: 'frontend/extra.js',
+      content: 'console.log("hi")',
+    })
+    const published = await packages.publish(appId, scaffolded.draftRevision + 1)
+    expect(published.version).toBe(1)
+    platform.upsertBinding({
+      appId,
+      slot: 'kb',
+      bindingKind: 'api-connection',
+      bindingId: 'conn-1',
+      grantedOrigins: [],
+      allowPrivateNetwork: false,
+    })
+
+    const exported = await service.buildPackage(appId, { includeData: false, includeFiles: false })
+    expect(exported.body.v2).toBeDefined()
+    expect(exported.body.v2?.draftFiles.map((f) => f.path) ?? []).toContain('frontend/extra.js')
+    expect(exported.body.v2?.releases ?? []).toHaveLength(1)
+    expect(exported.counts.v2Files).toBeGreaterThan(0)
+
+    // 作为新应用导入：V2 身份/项目文件/制品关联/绑定完整还原
+    const applied = await service.applyImport(exported.body, 'new-app')
+    expect(applied.appId).not.toBe(appId)
+    const format = platform.getDraftFormat(applied.appId)
+    expect(format.format).toBe('v2')
+    const restored = await packages.status(applied.appId)
+    expect(restored.manifest?.name).toBe('看板应用')
+    expect(restored.files.map((f) => f.path)).toContain('frontend/extra.js')
+    const runtime = await packages.resolveRuntime({ appId: applied.appId, mode: 'published' })
+    expect(runtime.descriptor.fileCount).toBeGreaterThan(0)
+    expect(platform.listBindings(applied.appId).map((b) => b.slot)).toEqual(['kb'])
   })
 })

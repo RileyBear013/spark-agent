@@ -13,6 +13,9 @@ import {
   type SubAppPackageValidationResult,
   type SubAppProjectFile,
   type SubAppProjectStatus,
+  type SubAppShareV2FileEntry,
+  type SubAppShareV2Release,
+  type SubAppShareV2State,
 } from '@spark/protocol'
 import type { SparkDatabase } from './database.js'
 import { SubAppPlatformRepository } from './repositories/sub-app-platform.repository.js'
@@ -191,6 +194,144 @@ export class SubAppPackageService {
       }
     }
     return { directory: exportRoot, files: files.size, digest: digestFiles(files) }
+  }
+
+  /**
+   * 导出 V2 受管项目的完整可迁移状态（草稿项目文件 + 全部发布制品 + 连接槽绑定）。
+   * 应用不存在抛 SubAppNotFoundError；应用是 V1 单文件草稿时返回 null（分享包 v2 段缺省）。
+   */
+  async exportV2State(appId: string): Promise<SubAppShareV2State | null> {
+    const format = this.platform.getDraftFormat(appId)
+    if (format.format !== 'v2' || format.projectRevision == null || format.manifest == null) {
+      return null
+    }
+    const draftFiles = await this.collectV2ShareFiles(
+      await this.readRevisionFiles(appId, format.projectRevision),
+      '草稿项目',
+    )
+    const releases: SubAppShareV2Release[] = []
+    for (const item of this.platform.listReleaseArtifacts(appId)) {
+      const root = path.join(this.rootDir, item.relativePath)
+      const files = new Map<string, Buffer>()
+      await walkFiles(root, async (relative, absolute) => {
+        files.set(relative, await fs.readFile(absolute))
+      })
+      releases.push({
+        version: item.version,
+        digest: item.digest,
+        manifest: item.manifest,
+        frontendEntry: item.frontendEntry,
+        serviceEntry: item.serviceEntry,
+        buildInfo: item.buildInfo,
+        files: await this.collectV2ShareFiles(files, `v${item.version} 制品`),
+      })
+    }
+    const bindings = this.platform.listBindings(appId).map((binding) => ({
+      slot: binding.slot,
+      bindingKind: binding.bindingKind,
+      bindingId: binding.bindingId,
+      grantedOrigins: binding.grantedOrigins,
+      allowPrivateNetwork: binding.allowPrivateNetwork,
+    }))
+    return {
+      projectRevision: format.projectRevision,
+      draftManifest: format.manifest,
+      draftFiles,
+      releases,
+      bindings,
+    }
+  }
+
+  /**
+   * 导入端恢复 V2 状态：必须在 SubAppRepository.importApp 成功之后调用
+   * （依赖其重建的 sub_apps / sub_app_releases 行，且 draft_revision 已重置为 1）。
+   * 制品目录是内容寻址的共享存储，中途失败留下的未引用制品由
+   * cleanupOrphanedArtifacts 统一清理，无需在此回滚。
+   */
+  async importV2State(appId: string, state: SubAppShareV2State): Promise<void> {
+    // 1) 草稿项目文件：项目 revision 从 1 重建，并把草稿标记为 V2。
+    const draftFiles = this.decodeV2ShareFiles(state.draftFiles)
+    const draftValidation = validatePackageFiles(draftFiles)
+    if (draftValidation.manifest == null) {
+      throw new SubAppStateError('分享包内的 V2 项目文件无效，无法恢复。')
+    }
+    await this.writeRevision(appId, 1, draftFiles)
+    try {
+      this.platform.markDraftAsV2(appId, 1, 1, draftValidation.manifest)
+    } catch (error) {
+      await fs.rm(this.projectRevisionRoot(appId, 1), { recursive: true, force: true })
+      throw error
+    }
+    // 2) 发布制品：校验和核对 → 落盘内容寻址目录 → 重建 artifacts 关联。
+    for (const release of state.releases) {
+      const files = this.decodeV2ShareFiles(release.files)
+      if (digestFiles(files) !== release.digest) {
+        throw new SubAppStateError(`v${release.version} 制品校验和不匹配，已拒绝恢复。`)
+      }
+      const artifactRoot = path.join(this.artifactsRoot(), release.digest)
+      await this.ensureArtifact(artifactRoot, files)
+      this.platform.restoreReleaseArtifact({
+        appId,
+        version: release.version,
+        descriptor: {
+          schemaVersion: 2,
+          digest: release.digest,
+          byteLength: [...files.values()].reduce((total, value) => total + value.byteLength, 0),
+          fileCount: files.size,
+          frontendEntry: release.manifest.frontend.entry,
+          serviceEntry: release.manifest.service?.entry ?? null,
+          manifest: release.manifest,
+        },
+        relativePath: path.relative(this.rootDir, artifactRoot).split(path.sep).join('/'),
+        buildInfo: release.buildInfo,
+      })
+    }
+    // 3) 连接槽绑定（appId 按导入目标补齐）。
+    for (const binding of state.bindings) {
+      this.platform.upsertBinding({
+        appId,
+        slot: binding.slot,
+        bindingKind: binding.bindingKind,
+        bindingId: binding.bindingId,
+        grantedOrigins: binding.grantedOrigins,
+        allowPrivateNetwork: binding.allowPrivateNetwork,
+      })
+    }
+  }
+
+  /** 项目/制品文件 → 分享包条目（base64），带数量与单文件体积上限。 */
+  private async collectV2ShareFiles(
+    files: Map<string, Buffer>,
+    label: string,
+  ): Promise<SubAppShareV2FileEntry[]> {
+    if (files.size > SUB_APP_PACKAGE_MAX_FILES) {
+      throw new SubAppStateError(`${label}文件数超过 ${SUB_APP_PACKAGE_MAX_FILES}，无法导出。`)
+    }
+    return [...files.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([relative, bytes]) => {
+        if (bytes.byteLength > SUB_APP_PACKAGE_MAX_FILE_BYTES) {
+          throw new SubAppStateError(`${label}文件 ${relative} 超过单文件上限，无法导出。`)
+        }
+        return { path: relative, content: bytes.toString('base64') }
+      })
+  }
+
+  /** 分享包条目 → 项目文件表，路径与体积上限校验。 */
+  private decodeV2ShareFiles(entries: SubAppShareV2FileEntry[]): Map<string, Buffer> {
+    const files = new Map<string, Buffer>()
+    for (const entry of entries) {
+      const relative = assertPackagePath(entry.path)
+      const bytes = Buffer.from(entry.content, 'base64')
+      if (bytes.byteLength > SUB_APP_PACKAGE_MAX_FILE_BYTES) {
+        throw new SubAppStateError(`V2 分享文件 ${relative} 超过单文件上限。`)
+      }
+      files.set(relative, bytes)
+    }
+    if (files.size > SUB_APP_PACKAGE_MAX_FILES) {
+      throw new SubAppStateError(`V2 分享文件数超过 ${SUB_APP_PACKAGE_MAX_FILES} 上限。`)
+    }
+    return files
   }
 
   async writeFile(input: {

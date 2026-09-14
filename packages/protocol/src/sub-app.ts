@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { SubAppPackageManifest } from './sub-app-v2.js'
 
 export const SUB_APP_PROTOCOL_VERSION = 1
 
@@ -301,6 +302,48 @@ export interface SubAppShareCapabilityReport {
   secretHints: Array<{ scope: 'source' | 'data'; location: string }>
 }
 
+// ---------------------------------------------------------------------------
+// V2 受管多文件应用的分享段（formatVersion 仍为 1，v2 段为可选字段：
+// 旧版应用解析时忽略该字段，导入退化为「空壳 V1 草稿」；新版应用完整还原）。
+// ---------------------------------------------------------------------------
+
+/** V2 项目/制品文件条目（base64 内容，可能含二进制资源）。 */
+export interface SubAppShareV2FileEntry {
+  path: string
+  content: string
+}
+
+/** V2 发布制品快照：制品文件 + 与 release 的关联元数据。 */
+export interface SubAppShareV2Release {
+  version: number
+  /** 制品内容摘要（sha256）；导入端按它落盘并重建 artifacts 关联。 */
+  digest: string
+  manifest: SubAppPackageManifest
+  frontendEntry: string
+  serviceEntry: string | null
+  buildInfo: Record<string, unknown>
+  files: SubAppShareV2FileEntry[]
+}
+
+/** V2 连接槽绑定快照（appId 由导入端按目标应用补齐）。 */
+export interface SubAppShareV2Binding {
+  slot: string
+  bindingKind: 'api-connection' | 'provider-profile'
+  bindingId: string
+  grantedOrigins: string[]
+  allowPrivateNetwork: boolean
+}
+
+/** V2 受管项目完整状态：草稿项目文件 + 全部发布制品 + 连接槽绑定。 */
+export interface SubAppShareV2State {
+  /** 导出时草稿的项目 revision（导入端从 1 重建，仅作展示参考）。 */
+  projectRevision: number
+  draftManifest: SubAppPackageManifest
+  draftFiles: SubAppShareV2FileEntry[]
+  releases: SubAppShareV2Release[]
+  bindings: SubAppShareV2Binding[]
+}
+
 export interface SubAppSharePackage {
   formatVersion: number
   /** 原应用 id：用于导入时识别「本机同一应用」以支持覆盖导入。 */
@@ -319,6 +362,8 @@ export interface SubAppSharePackage {
   data: SubAppShareDataEntry[]
   files: SubAppShareFileEntry[]
   capabilities: SubAppShareCapabilityReport
+  /** V2 受管多文件应用的完整项目/制品/绑定状态；V1 单文件应用无此字段。 */
+  v2?: SubAppShareV2State
   /** 包体完整性：sha256/byteSize 均针对「不含本字段的包体 JSON 文本」。 */
   integrity: { sha256: string; byteSize: number }
 }
@@ -339,7 +384,7 @@ export interface SubAppShareExportResponse {
   savedPath?: string
   canceled?: boolean
   error?: string
-  counts: { releases: number; dataEntries: number; files: number }
+  counts: { releases: number; dataEntries: number; files: number; v2Files?: number }
   capabilities: SubAppShareCapabilityReport
   /** 导出侧发现的疑似密钥警告（源码 + data 值）。 */
   secretWarnings: string[]
@@ -357,6 +402,7 @@ export interface SubAppShareImportCheck {
     | 'DATA_LIMIT'
     | 'FILE_LIMIT'
     | 'DRAFT_EMPTY'
+    | 'V2_BUNDLE'
   message: string
   detail?: string[]
 }

@@ -266,6 +266,111 @@ export class SubAppPlatformRepository {
     return row == null ? null : { ...this.toDescriptor(row), releaseId: row.release_id }
   }
 
+  /** 全部发布版本的制品清单（导出 V2 分享包用），按版本升序。 */
+  listReleaseArtifacts(
+    appId: string,
+  ): Array<
+    SubAppPackageDescriptor & {
+      version: number
+      relativePath: string
+      buildInfo: Record<string, unknown>
+    }
+  > {
+    this.assertAppExists(appId)
+    const rows = this.raw
+      .prepare(
+        `SELECT r.version, a.sha256, a.byte_length, a.file_count, a.manifest_json,
+                a.build_info_json, ra.frontend_entry, ra.service_entry, a.relative_path
+         FROM sub_app_releases r
+         JOIN sub_app_release_artifacts ra ON ra.release_id = r.id
+         JOIN sub_app_artifacts a ON a.id = ra.artifact_id
+         WHERE r.app_id = ? ORDER BY r.version ASC`,
+      )
+      .all(appId) as Array<{
+      version: number
+      sha256: string
+      byte_length: number
+      file_count: number
+      manifest_json: string
+      build_info_json: string | null
+      frontend_entry: string
+      service_entry: string | null
+      relative_path: string
+    }>
+    return rows.map((row) => {
+      const manifest = this.parseJson<SubAppPackageManifest | null>(row.manifest_json, null)
+      if (manifest == null) throw new SubAppStateError('子应用制品 manifest 损坏。')
+      return {
+        version: row.version,
+        schemaVersion: 2,
+        digest: row.sha256,
+        byteLength: row.byte_length,
+        fileCount: row.file_count,
+        frontendEntry: row.frontend_entry,
+        serviceEntry: row.service_entry,
+        manifest,
+        relativePath: row.relative_path,
+        buildInfo: this.parseJson<Record<string, unknown>>(row.build_info_json, {}),
+      }
+    })
+  }
+
+  /**
+   * 导入端重建「release ↔ artifact」关联：制品行按 sha256 幂等插入，
+   * 关联行挂在 importApp 重建出的 release 行上；重复导入（覆盖）安全。
+   */
+  restoreReleaseArtifact(input: {
+    appId: string
+    version: number
+    descriptor: SubAppPackageDescriptor
+    relativePath: string
+    buildInfo?: Record<string, unknown>
+  }): void {
+    const release = this.raw
+      .prepare('SELECT id FROM sub_app_releases WHERE app_id = ? AND version = ?')
+      .get(input.appId, input.version) as { id: string } | undefined
+    if (release == null) {
+      throw new SubAppStateError(`发布版本 v${input.version} 不存在，无法恢复制品关联。`)
+    }
+    const manifest = input.descriptor.manifest
+    const now = new Date().toISOString()
+    this.raw
+      .prepare(
+        `INSERT INTO sub_app_artifacts (
+          id, sha256, schema_version, relative_path, byte_length, file_count,
+          manifest_json, build_info_json, created_at
+        ) VALUES (?, ?, 2, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sha256) DO NOTHING`,
+      )
+      .run(
+        randomUUID(),
+        input.descriptor.digest,
+        input.relativePath,
+        input.descriptor.byteLength,
+        input.descriptor.fileCount,
+        JSON.stringify(manifest),
+        JSON.stringify(input.buildInfo ?? {}),
+        now,
+      )
+    const artifact = this.raw
+      .prepare('SELECT id FROM sub_app_artifacts WHERE sha256 = ?')
+      .get(input.descriptor.digest) as { id: string } | undefined
+    if (artifact == null) throw new SubAppStateError('子应用制品记录创建失败。')
+    this.raw
+      .prepare(
+        `INSERT INTO sub_app_release_artifacts (
+          release_id, artifact_id, frontend_entry, service_entry, contract_digest, permission_digest
+        ) VALUES (?, ?, ?, ?, NULL, ?)`,
+      )
+      .run(
+        release.id,
+        artifact.id,
+        input.descriptor.frontendEntry,
+        input.descriptor.serviceEntry,
+        this.digestPermissions(manifest),
+      )
+  }
+
   isEnabledPublished(appId: string): boolean {
     const row = this.raw
       .prepare("SELECT enabled FROM sub_apps WHERE id=? AND publication_status='published'")
