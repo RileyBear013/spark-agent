@@ -319,14 +319,22 @@ export class MediaRouterService {
     const isTemplateOverride = manifestMatch?.manifest.adapterMode === 'template'
     const shouldUseManifestAdapter = Boolean(
       manifestMatch &&
-      (isCustomManifest || isTemplateOverride || !adapter || !adapter.supports(capability) || kind === 'custom'),
+      (isCustomManifest ||
+        isTemplateOverride ||
+        !adapter ||
+        !adapter.supports(capability) ||
+        kind === 'custom'),
     )
     // 包装 fetch，捕获发给 provider 的请求（method + url + body），用于任务详情展示。
     // 只取最后一个带 body 的 POST：adapter 内部对单次能力调用只发一个主请求；
     // APIMart 编辑会先 POST /uploads/images 再 POST /images/generations，取后者即主请求。
     const capture = createRequestCapture(options.fetch)
     const requestEndpointOverride = managedNewApiImageEndpoint(chosen, capability)
-    const routedFetch = createManagedNewApiImageFetch(requestEndpointOverride, capture.fetch)
+    const routedFetch = createManagedNewApiImageFetch(
+      requestEndpointOverride,
+      chosen.apiKey,
+      capture.fetch,
+    )
     const onTaskSubmitted = options.onTaskSubmitted
       ? (submission: MediaTaskSubmission): void => {
           try {
@@ -515,17 +523,37 @@ export class MediaRouterService {
 
 function createManagedNewApiImageFetch(
   endpoint: string | null,
+  apiKey: string,
   fetchImpl: typeof fetch,
 ): typeof fetch {
   if (!endpoint) return fetchImpl
 
   return async (input, init) => {
     const method = (init?.method ?? 'GET').toUpperCase()
-    const requestUrl = String(input)
-    if (method !== 'POST' || isAuxiliaryMediaRequest(requestUrl)) {
+    const requestUrl = input instanceof Request ? input.url : String(input)
+    if (method !== 'POST') {
+      const endpointOrigin = safeUrlOrigin(endpoint)
+      const requestOrigin = safeUrlOrigin(requestUrl)
+      if (endpointOrigin && requestOrigin === endpointOrigin) {
+        const headers = new Headers(input instanceof Request ? input.headers : undefined)
+        new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+        if (!headers.has('authorization')) headers.set('authorization', `Bearer ${apiKey}`)
+        return fetchImpl(input, { ...init, headers })
+      }
+      return fetchImpl(input, init)
+    }
+    if (isAuxiliaryMediaRequest(requestUrl)) {
       return fetchImpl(input, init)
     }
     return fetchImpl(endpoint, init)
+  }
+}
+
+function safeUrlOrigin(value: string): string | null {
+  try {
+    return new URL(value).origin
+  } catch {
+    return null
   }
 }
 

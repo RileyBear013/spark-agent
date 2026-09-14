@@ -1,11 +1,10 @@
 import { useMemo, useState } from 'react'
-import { Button, Modal } from 'antd'
+import { Button, Modal, message } from 'antd'
 import type { CanvasMediaTaskAsset } from '@spark/protocol'
 import { Icons } from '../../Icons'
-import { ImagePreviewModal } from '../../components/ImagePreviewModal'
+import { MediaArtifactViewer } from '../../components/MediaArtifactViewer'
 import {
   MODE_ITEMS,
-  lightboxImagesOf,
   modeLabel,
   statusLabel,
   taskOutputUrl,
@@ -22,35 +21,87 @@ type HistoryProps = {
   tasks: QuickCreateTaskRecord[]
   expandedTaskId: string | null
   onRowActivate: (task: QuickCreateTaskRecord) => void
-  onFocusTask: (task: QuickCreateTaskRecord) => void
   onReuse: (task: QuickCreateTaskRecord) => void
   onCancel: (task: QuickCreateTaskRecord) => void
   onRetry: (task: QuickCreateTaskRecord) => void
   onDelete: (taskId: string) => void
   onOpenOutput: (asset: CanvasMediaTaskAsset) => void
+  onSavePrompt: (task: QuickCreateTaskRecord) => void
+}
+
+/** 任务内可独立查看的产物：已解析出 URL 的图片 / 视频。 */
+type TaskViewableOutput = {
+  asset: CanvasMediaTaskAsset
+  url: string
+}
+
+function viewableOutputsOf(task: QuickCreateTaskRecord): TaskViewableOutput[] {
+  return task.assets
+    .map((asset) => {
+      const url = taskOutputUrl(asset)
+      const viewable = url !== '' && (asset.type === 'image' || asset.type === 'video')
+      return viewable ? { asset, url } : null
+    })
+    .filter((item): item is TaskViewableOutput => item != null)
+}
+
+/** 独立产物查看：taskId + 可查看产物列表下标；不切换创作结果区块。 */
+type ViewerTarget = { taskId: string; outputIndex: number }
+
+/** 详情内提示词块：label 后带一键复制；空提示词（反推任务）不出现复制按钮。 */
+function DetailPrompt({ prompt }: { prompt: string }) {
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(prompt)
+      message.success('提示词已复制')
+    } catch {
+      message.error('复制提示词失败')
+    }
+  }
+  return (
+    <div className="quick-create-detail-prompt">
+      <div className="quick-create-detail-prompt-label">
+        <span>提示词</span>
+        {prompt.trim() && (
+          <button
+            type="button"
+            aria-label="复制提示词"
+            title="复制提示词"
+            onClick={() => void copy()}
+          >
+            <Icons.Copy size={12} />
+          </button>
+        )}
+      </div>
+      <p>{prompt || '图片反推任务'}</p>
+    </div>
+  )
 }
 
 /**
  * 任务管理 Tab：顶部保留概览 / 模式筛选，右侧提供 列表 / 卡片 视图切换。
  * 列表视图为可展开行；卡片视图以瀑布流只呈现产物图片，点击图片打开详情弹层。
+ * 详情内的图片 / 视频在独立弹层中查看，不影响右侧创作结果的当前任务。
  */
 export function QuickCreateTaskHistory({
   tasks,
   expandedTaskId,
   onRowActivate,
-  onFocusTask,
   onReuse,
   onCancel,
   onRetry,
   onDelete,
   onOpenOutput,
+  onSavePrompt,
 }: HistoryProps) {
-  const [filter, setFilter] = useState<QuickCreateMode | 'all'>('all')
+  const [filter, setFilter] = useState<QuickCreateMode | 'all'>(
+    () => readQuickCreatePreferences().taskFilter ?? 'all',
+  )
   const [view, setView] = useState<QuickCreateTaskViewMode>(
     () => readQuickCreatePreferences().taskView ?? 'list',
   )
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null)
-  const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [viewer, setViewer] = useState<ViewerTarget | null>(null)
 
   const visibleTasks = useMemo(
     () => (filter === 'all' ? tasks : tasks.filter((task) => task.mode === filter)),
@@ -64,11 +115,33 @@ export function QuickCreateTaskHistory({
     () => (detailTaskId ? (tasks.find((task) => task.id === detailTaskId) ?? null) : null),
     [detailTaskId, tasks],
   )
-  const detailImages = useMemo(() => (detailTask ? lightboxImagesOf(detailTask) : []), [detailTask])
+  const detailOutputs = useMemo(
+    () => (detailTask ? viewableOutputsOf(detailTask) : []),
+    [detailTask],
+  )
+  const viewerTask = useMemo(
+    () => (viewer ? (tasks.find((task) => task.id === viewer.taskId) ?? null) : null),
+    [viewer, tasks],
+  )
+  const viewerOutputs = useMemo(
+    () => (viewerTask ? viewableOutputsOf(viewerTask) : []),
+    [viewerTask],
+  )
+  const viewerOutput =
+    viewer && viewerOutputs.length > 0
+      ? (viewerOutputs[Math.min(viewer.outputIndex, viewerOutputs.length - 1)] ?? null)
+      : null
+  const viewerIndex = viewerOutput ? viewerOutputs.indexOf(viewerOutput) : 0
 
   const changeView = (next: QuickCreateTaskViewMode) => {
     setView(next)
     writeQuickCreatePreferences({ ...readQuickCreatePreferences(), taskView: next })
+  }
+
+  // 筛选与视图同属「展示状态」，切换后一并持久化，下次进入保持原样
+  const changeFilter = (next: QuickCreateMode | 'all') => {
+    setFilter(next)
+    writeQuickCreatePreferences({ ...readQuickCreatePreferences(), taskFilter: next })
   }
 
   const renderTaskActions = (task: QuickCreateTaskRecord, output?: CanvasMediaTaskAsset) => (
@@ -78,19 +151,27 @@ export function QuickCreateTaskHistory({
           取消任务
         </Button>
       )}
-      {task.status === 'failed' && (
+      {task.status !== 'running' && (
         <Button
           size="small"
           type="text"
           icon={<Icons.RotateCcw size={13} />}
           onClick={() => onRetry(task)}
         >
-          重试
+          {task.status === 'succeeded' ? '重新生成' : '重试'}
         </Button>
       )}
-      {(task.status === 'succeeded' || task.status === 'failed') && (
-        <Button size="small" type="text" onClick={() => onReuse(task)}>
-          复用配置
+      <Button size="small" type="text" onClick={() => onReuse(task)}>
+        复用配置
+      </Button>
+      {task.prompt.trim() && (
+        <Button
+          size="small"
+          type="text"
+          icon={<Icons.Book size={13} />}
+          onClick={() => onSavePrompt(task)}
+        >
+          存入提示词库
         </Button>
       )}
       {output?.filePath && (
@@ -98,7 +179,13 @@ export function QuickCreateTaskHistory({
           打开产物
         </Button>
       )}
-      <Button size="small" type="text" danger onClick={() => onDelete(task.id)}>
+      <Button
+        size="small"
+        type="text"
+        danger
+        className="quick-create-task-remove"
+        onClick={() => onDelete(task.id)}
+      >
         移除记录
       </Button>
     </div>
@@ -125,7 +212,7 @@ export function QuickCreateTaskHistory({
               role="tab"
               aria-selected={filter === 'all'}
               className={filter === 'all' ? 'is-active' : ''}
-              onClick={() => setFilter('all')}
+              onClick={() => changeFilter('all')}
             >
               全部 <small>{tasks.length}</small>
             </button>
@@ -136,7 +223,7 @@ export function QuickCreateTaskHistory({
                 role="tab"
                 aria-selected={filter === item.id}
                 className={filter === item.id ? 'is-active' : ''}
-                onClick={() => setFilter(item.id)}
+                onClick={() => changeFilter(item.id)}
               >
                 {item.label}
                 <small>{tasks.filter((task) => task.mode === item.id).length}</small>
@@ -226,7 +313,8 @@ export function QuickCreateTaskHistory({
           ) : (
             visibleTasks.map((task) => {
               const output = task.assets[0]
-              const outputUrl = taskOutputUrl(output)
+              const taskOutputs = viewableOutputsOf(task)
+              const firstOutput = taskOutputs[0]
               const expanded = expandedTaskId === task.id
               return (
                 <article
@@ -254,31 +342,22 @@ export function QuickCreateTaskHistory({
                         · {new Date(task.createdAt).toLocaleString()}
                       </small>
                     </span>
-                    {outputUrl && output?.type === 'image' ? (
-                      <img src={outputUrl} alt="生成结果预览" />
-                    ) : outputUrl && output?.type === 'video' ? (
-                      <video src={outputUrl} muted />
+                    {firstOutput && firstOutput.asset.type === 'image' ? (
+                      <img src={firstOutput.url} alt="生成结果预览" />
+                    ) : firstOutput ? (
+                      <video src={firstOutput.url} muted />
                     ) : task.text ? (
                       <span className="quick-create-text-preview">{task.text.slice(0, 80)}</span>
                     ) : (
                       <span className="quick-create-task-placeholder">
-                        <Icons.Sparkles size={15} />
+                        <Icons.Clock size={15} />
                       </span>
                     )}
                     <Icons.ChevronDown size={15} className={expanded ? 'is-open' : ''} />
                   </button>
                   {expanded && (
                     <div className="quick-create-task-detail">
-                      <div className="quick-create-detail-prompt">
-                        <span>提示词</span>
-                        <p>{task.prompt || '图片反推任务'}</p>
-                      </div>
-                      {task.negativePrompt && (
-                        <div className="quick-create-detail-prompt">
-                          <span>反向提示词</span>
-                          <p>{task.negativePrompt}</p>
-                        </div>
-                      )}
+                      <DetailPrompt prompt={task.prompt} />
                       {task.error && (
                         <div className="quick-create-task-error">
                           <Icons.AlertTriangle size={14} /> {task.error.message}
@@ -292,18 +371,20 @@ export function QuickCreateTaskHistory({
                         )}
                       </div>
                       {task.text && <pre>{task.text}</pre>}
-                      {outputUrl && (
+                      {firstOutput && (
                         <button
                           type="button"
                           className="quick-create-history-output-thumb"
-                          onClick={() => onFocusTask(task)}
+                          onClick={() => setViewer({ taskId: task.id, outputIndex: 0 })}
                         >
-                          {output?.type === 'image' ? (
-                            <img src={outputUrl} alt="生成结果缩略图" />
-                          ) : output?.type === 'video' ? (
-                            <video src={outputUrl} muted />
-                          ) : null}
-                          <span>在输出面板查看</span>
+                          {firstOutput.asset.type === 'image' ? (
+                            <img src={firstOutput.url} alt="生成结果缩略图" />
+                          ) : (
+                            <video src={firstOutput.url} muted />
+                          )}
+                          <span>
+                            {firstOutput.asset.type === 'video' ? '查看视频' : '查看大图'}
+                          </span>
                         </button>
                       )}
                       {renderTaskActions(task, output)}
@@ -340,23 +421,27 @@ export function QuickCreateTaskHistory({
                 {new Date(detailTask.createdAt).toLocaleString()}
               </small>
             </div>
-            {detailImages.length > 0 ? (
+            {detailOutputs.length > 0 ? (
               <button
                 type="button"
                 className="quick-create-detail-media"
                 aria-label="查看大图"
-                onClick={() => setLightboxOpen(true)}
+                onClick={() => setViewer({ taskId: detailTask.id, outputIndex: 0 })}
               >
-                <img src={detailImages[0]?.src} alt={detailImages[0]?.alt ?? '生成结果'} />
-                {detailImages.length > 1 && (
+                {detailOutputs[0]?.asset.type === 'video' ? (
+                  <video src={detailOutputs[0]?.url} muted />
+                ) : (
+                  <img src={detailOutputs[0]?.url} alt="生成结果" />
+                )}
+                {detailOutputs.length > 1 && (
                   <span className="quick-create-detail-count">
-                    点击放大 · {detailImages.length} 图
+                    点击放大 · {detailOutputs.length} 图
                   </span>
                 )}
               </button>
             ) : detailTask.status === 'running' ? (
               <div className="quick-create-detail-pending">
-                <Icons.Sparkles size={16} />
+                <Icons.Clock size={16} />
                 <span>任务处理中，完成后这里会显示产物图片。</span>
               </div>
             ) : (
@@ -365,16 +450,7 @@ export function QuickCreateTaskHistory({
                 <span>这条任务没有产物图片。</span>
               </div>
             )}
-            <div className="quick-create-detail-prompt">
-              <span>提示词</span>
-              <p>{detailTask.prompt || '图片反推任务'}</p>
-            </div>
-            {detailTask.negativePrompt && (
-              <div className="quick-create-detail-prompt">
-                <span>反向提示词</span>
-                <p>{detailTask.negativePrompt}</p>
-              </div>
-            )}
+            <DetailPrompt prompt={detailTask.prompt} />
             {detailTask.error && (
               <div className="quick-create-task-error">
                 <Icons.AlertTriangle size={14} /> {detailTask.error.message}
@@ -385,14 +461,55 @@ export function QuickCreateTaskHistory({
         </Modal>
       )}
 
-      {lightboxOpen && detailTask && detailImages.length > 0 && (
-        <ImagePreviewModal
-          src={detailImages[0]?.src ?? ''}
-          alt={detailImages[0]?.alt ?? '生成结果'}
-          fileName={detailImages[0]?.fileName ?? 'quick-create-output.png'}
-          onClose={() => setLightboxOpen(false)}
-          navigation={{ images: detailImages, startIndex: 0 }}
-        />
+      {viewer && viewerTask && viewerOutput && (
+        <Modal
+          open
+          width="min(1240px, 94vw)"
+          centered
+          footer={null}
+          title={null}
+          className="quick-create-media-viewer-modal"
+          closeIcon={<Icons.X size={15} />}
+          onCancel={() => setViewer(null)}
+        >
+          <div className="quick-create-media-viewer-body">
+            <MediaArtifactViewer
+              media={{
+                src: viewerOutput.url,
+                alt: viewerOutput.asset.title ?? '生成结果',
+                fileName:
+                  viewerOutput.asset.filePath?.split(/[\\/]/).pop() ||
+                  `quick-create-output.${viewerOutput.asset.type === 'video' ? 'mp4' : 'png'}`,
+                ...(viewerOutput.asset.filePath ? { filePath: viewerOutput.asset.filePath } : {}),
+                type: viewerOutput.asset.type === 'video' ? 'video' : 'image',
+              }}
+              pagination={
+                viewerOutputs.length > 1
+                  ? {
+                      index: viewerIndex,
+                      total: viewerOutputs.length,
+                      onPrev: () =>
+                        setViewer((current) =>
+                          current
+                            ? {
+                                ...current,
+                                outputIndex:
+                                  (viewerIndex - 1 + viewerOutputs.length) % viewerOutputs.length,
+                              }
+                            : current,
+                        ),
+                      onNext: () =>
+                        setViewer((current) =>
+                          current
+                            ? { ...current, outputIndex: (viewerIndex + 1) % viewerOutputs.length }
+                            : current,
+                        ),
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        </Modal>
       )}
     </section>
   )

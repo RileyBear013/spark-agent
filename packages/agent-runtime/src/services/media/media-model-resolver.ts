@@ -22,6 +22,7 @@ import type {
   MediaModelParamPolicy,
   ProviderMediaModelRef,
 } from '@spark/protocol'
+import { CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES, CUSTOM_IMAGE_MODEL_SIZE_PATTERN } from '@spark/protocol'
 import type { MediaModelCatalogService } from './media-model-catalog.service.js'
 
 /** 解析所需的 profile 字段子集（与 ProviderProfile 兼容）。 */
@@ -140,12 +141,12 @@ export function synthesizeMediaManifestForRef(
     }
   }
 
-  return {
+  return overlaySynthesizedImageSizeSchema({
     ...best,
     id: ref.manifestId,
     modelId,
     displayName: modelId,
-  }
+  })
 }
 
 /**
@@ -305,6 +306,43 @@ function applyCapabilityOverrides(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * 把合成 manifest 中图像能力的 size 参数替换为自部署友好的自由尺寸契约
+ * （examples 快捷项 + 自由输入），让快速创作与画布给出更完整的默认尺寸比例。
+ * 仅覆盖声明为 string 的 size 属性；其余参数保持基准 manifest 原样。
+ */
+function overlaySynthesizedImageSizeSchema(manifest: MediaModelManifest): MediaModelManifest {
+  let changed = false
+  const capabilities = manifest.capabilities.map((capability) => {
+    if (!capability.id.startsWith('image.')) return capability
+    const properties = isRecord(capability.paramSchema.properties)
+      ? capability.paramSchema.properties
+      : {}
+    const size = isRecord(properties.size) ? properties.size : null
+    if (size == null || size.type !== 'string') return capability
+    changed = true
+    const previousDefault = typeof size.default === 'string' ? size.default : undefined
+    return {
+      ...capability,
+      paramSchema: {
+        ...capability.paramSchema,
+        properties: {
+          ...properties,
+          size: {
+            type: 'string',
+            ...(typeof size.title === 'string' ? { title: size.title } : { title: '尺寸' }),
+            examples: [...CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES],
+            'x-allow-custom': true,
+            pattern: CUSTOM_IMAGE_MODEL_SIZE_PATTERN,
+            default: previousDefault ?? 'auto',
+          },
+        },
+      },
+    }
+  })
+  return changed ? { ...manifest, capabilities } : manifest
 }
 
 /**

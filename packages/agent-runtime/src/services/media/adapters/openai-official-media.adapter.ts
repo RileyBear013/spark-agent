@@ -161,6 +161,7 @@ export class OpenAiOfficialMediaAdapter implements MediaProviderAdapter {
           filenameHelper(input, suffix, index, images.length),
           ctx.fetch,
           configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+          ctx,
         ),
       ),
     )

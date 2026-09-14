@@ -5,6 +5,7 @@ import type {
 } from '@spark/protocol'
 import { migrateMediaModelManifestToV2 } from '@spark/protocol'
 import { MediaArtifactService } from './media-artifact.service.js'
+import type { MediaDownloadAuth } from './media-artifact.service.js'
 import { MinimaxHailuoFilesClient } from './minimax-hailuo-files.client.js'
 import { VolcengineArkVideoTaskClient } from './video-channel-task-client.js'
 import { BailianVideoTaskClient } from './bailian-video-task-client.js'
@@ -517,6 +518,7 @@ async function downloadAssets(
 ): Promise<MediaGeneratedAsset[]> {
   const artifact = new MediaArtifactService()
   const fetchImpl = mediaDownloadFetch(input)
+  const auth = recoveryDownloadAuth(input)
   return Promise.all(
     urls.map((url, index) => {
       const name = `recovered-${safeFileName(input.taskId)}-${index + 1}`
@@ -527,6 +529,7 @@ async function downloadAssets(
           `${name}.png`,
           fetchImpl,
           300_000,
+          auth,
         )
       if (kind === 'audio')
         return artifact.downloadMediaAsset(
@@ -536,6 +539,7 @@ async function downloadAssets(
           `${name}.mp3`,
           fetchImpl,
           300_000,
+          auth,
         )
       return artifact.downloadMediaAsset(
         'video',
@@ -544,9 +548,17 @@ async function downloadAssets(
         `${name}.mp4`,
         fetchImpl,
         300_000,
+        auth,
       )
     }),
   )
+}
+
+/** 恢复链路产物下载鉴权：apiEndpoint 已配置时交给 service 做同源判断附加 Bearer。 */
+function recoveryDownloadAuth(
+  input: MediaTaskRecoveryInput,
+): MediaDownloadAuth | undefined {
+  return input.apiEndpoint ? { apiKey: input.apiKey, apiEndpoint: input.apiEndpoint } : undefined
 }
 
 async function materializeValues(
@@ -557,6 +569,7 @@ async function materializeValues(
 ): Promise<MediaGeneratedAsset[]> {
   const artifact = new MediaArtifactService()
   const fetchImpl = mediaDownloadFetch(input)
+  const auth = recoveryDownloadAuth(input)
   return Promise.all(
     values.map((value, index) => {
       const name = `recovered-${safeFileName(input.taskId)}-${index + 1}`
@@ -570,6 +583,7 @@ async function materializeValues(
             `${name}.png`,
             fetchImpl,
             300_000,
+            auth,
           )
         return artifact.downloadMediaAsset(
           kind === 'audio' ? 'audio' : 'video',
@@ -578,6 +592,7 @@ async function materializeValues(
           `${name}.${kind === 'audio' ? 'mp3' : 'mp4'}`,
           fetchImpl,
           300_000,
+          auth,
         )
       }
       if (kind === 'image')

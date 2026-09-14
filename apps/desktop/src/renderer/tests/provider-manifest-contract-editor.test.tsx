@@ -250,7 +250,10 @@ describe('ProviderManifestContractEditor', () => {
     expect(next.capabilities.map((item) => item.id)).toEqual(['image.generate'])
     expect(next.capabilities[0]?.paramSchema).toMatchObject({
       properties: {
-        size: { enum: ['auto', '1024x1024', '1536x1024', '1024x1536'] },
+        size: {
+          examples: expect.arrayContaining(['auto', '1024x1024', '576x1024', '896x1152']),
+          'x-allow-custom': true,
+        },
         outputFormat: { enum: ['png', 'jpeg', 'webp'] },
       },
     })

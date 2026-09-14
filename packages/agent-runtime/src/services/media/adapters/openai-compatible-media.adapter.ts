@@ -251,6 +251,7 @@ export abstract class OpenAiCompatibleMediaAdapter implements MediaProviderAdapt
           filename(input, 'img', i, images.length),
           ctx.fetch,
           configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+          ctx,
         ),
       ),
     )
@@ -363,6 +364,7 @@ export abstract class OpenAiCompatibleMediaAdapter implements MediaProviderAdapt
           filename(input, 'edit', i, images.length),
           ctx.fetch,
           configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+          ctx,
         ),
       ),
     )
@@ -848,6 +850,7 @@ export abstract class OpenAiCompatibleMediaAdapter implements MediaProviderAdapt
           filename(input, 'video', i, videoUrls.length),
           ctx.fetch,
           configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+          ctx,
         ),
       ),
     )

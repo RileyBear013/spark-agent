@@ -46,6 +46,13 @@ const RUNNING_TASK: QuickCreateTaskRecord = {
   progress: 30,
 }
 
+const CANCELLED_TASK: QuickCreateTaskRecord = {
+  ...IMAGE_TASK,
+  id: 'task-cancelled',
+  status: 'cancelled',
+  assets: [],
+}
+
 function renderHistory(root: Root, props: Partial<Parameters<typeof QuickCreateTaskHistory>[0]>) {
   act(() =>
     root.render(
@@ -53,12 +60,12 @@ function renderHistory(root: Root, props: Partial<Parameters<typeof QuickCreateT
         tasks={[IMAGE_TASK, VIDEO_TASK, RUNNING_TASK]}
         expandedTaskId={null}
         onRowActivate={vi.fn()}
-        onFocusTask={vi.fn()}
         onReuse={vi.fn()}
         onCancel={vi.fn()}
         onRetry={vi.fn()}
         onDelete={vi.fn()}
         onOpenOutput={vi.fn()}
+        onSavePrompt={vi.fn()}
         {...props}
       />,
     ),
@@ -117,7 +124,7 @@ describe('QuickCreateTaskHistory', () => {
     expect(document.querySelectorAll('.quick-create-task').length).toBe(3)
   })
 
-  it('点击卡片打开详情弹层，弹层内点击图片进入统一大图预览', () => {
+  it('点击卡片打开详情弹层，弹层内点击图片进入独立产物查看', () => {
     renderHistory(root, {})
 
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="卡片视图"]')?.click())
@@ -126,21 +133,51 @@ describe('QuickCreateTaskHistory', () => {
     const modal = document.querySelector('.quick-create-task-detail-modal')
     expect(modal).not.toBeNull()
     expect(document.body.textContent).toContain('清晨窗边的静物')
-    expect(document.querySelector('.image-lightbox-backdrop')).toBeNull()
+    expect(document.querySelector('.quick-create-media-viewer-modal')).toBeNull()
 
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="查看大图"]')?.click())
-    const lightbox = document.querySelector('.image-lightbox-backdrop')
-    expect(lightbox).not.toBeNull()
-    expect(document.querySelector('.image-lightbox-img')?.getAttribute('src')).toContain(
-      'safe-file://',
+    expect(document.querySelector('.quick-create-media-viewer-modal')).not.toBeNull()
+    expect(document.querySelector('.media-artifact-viewer')).not.toBeNull()
+    expect(
+      document.querySelector('.media-artifact-viewer-stage img')?.getAttribute('src'),
+    ).toContain('safe-file://')
+
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>('.quick-create-media-viewer-modal .ant-modal-close')
+        ?.click(),
+    )
+    expect(document.querySelector('.quick-create-media-viewer-modal')).toBeNull()
+    expect(document.querySelector('.quick-create-task-detail-modal')).not.toBeNull()
+  })
+
+  it('列表详情内查看产物使用独立弹层，不切换创作结果区块', () => {
+    renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
+
+    act(() =>
+      document.querySelector<HTMLButtonElement>('.quick-create-history-output-thumb')?.click(),
     )
 
-    act(() => document.querySelector<HTMLButtonElement>('[title="关闭 (Esc)"]')?.click())
-    expect(document.querySelector('.image-lightbox-backdrop')).toBeNull()
-    expect(document.querySelector('.quick-create-task-detail-modal')).not.toBeNull()
+    expect(document.querySelector('.quick-create-media-viewer-modal')).not.toBeNull()
+    expect(document.querySelector('.media-artifact-viewer-stage img')).not.toBeNull()
 
-    act(() => document.querySelector<HTMLButtonElement>('.ant-modal-close')?.click())
-    expect(document.querySelector('.quick-create-task-detail-modal')).toBeNull()
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>('.quick-create-media-viewer-modal .ant-modal-close')
+        ?.click(),
+    )
+    expect(document.querySelector('.quick-create-media-viewer-modal')).toBeNull()
+  })
+
+  it('视频任务详情的产物以独立弹层查看并提供视频播放器', () => {
+    renderHistory(root, { expandedTaskId: VIDEO_TASK.id })
+
+    act(() =>
+      document.querySelector<HTMLButtonElement>('.quick-create-history-output-thumb')?.click(),
+    )
+
+    expect(document.querySelector('.quick-create-media-viewer-modal')).not.toBeNull()
+    expect(document.querySelector('.media-artifact-video')).not.toBeNull()
   })
 
   it('列表视图点击任务行仍触发行激活回调', () => {
@@ -151,5 +188,91 @@ describe('QuickCreateTaskHistory', () => {
 
     expect(onRowActivate).toHaveBeenCalledTimes(1)
     expect(onRowActivate).toHaveBeenCalledWith(IMAGE_TASK)
+  })
+
+  it('在任务详情操作区保存提示词到提示词库', () => {
+    const onSavePrompt = vi.fn()
+    renderHistory(root, { onSavePrompt, expandedTaskId: IMAGE_TASK.id })
+
+    act(() =>
+      Array.from(document.querySelectorAll<HTMLButtonElement>('.quick-create-task-actions button'))
+        .find((button) => button.textContent?.includes('存入提示词库'))
+        ?.click(),
+    )
+
+    expect(onSavePrompt).toHaveBeenCalledWith(IMAGE_TASK)
+  })
+
+  it('任务详情提示词 label 后可一键复制提示词', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
+
+    const copyButton = document.querySelector<HTMLButtonElement>('[aria-label="复制提示词"]')
+    expect(copyButton).not.toBeNull()
+
+    await act(async () => copyButton?.click())
+    expect(writeText).toHaveBeenCalledWith('清晨窗边的静物')
+  })
+
+  it('空提示词的反推任务不显示复制按钮', () => {
+    const reverseTask: QuickCreateTaskRecord = {
+      ...IMAGE_TASK,
+      id: 'task-reverse',
+      mode: 'reverse',
+      prompt: '',
+      assets: [],
+    }
+    renderHistory(root, { tasks: [reverseTask], expandedTaskId: reverseTask.id })
+
+    expect(document.querySelector('[aria-label="复制提示词"]')).toBeNull()
+    expect(document.body.textContent).toContain('图片反推任务')
+  })
+
+  it('成功任务详情显示重新生成并回调重试', () => {
+    const onRetry = vi.fn()
+    renderHistory(root, { onRetry, expandedTaskId: IMAGE_TASK.id })
+
+    const retryButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.quick-create-task-actions button'),
+    ).find((button) => button.textContent?.includes('重新生成'))
+    expect(retryButton).toBeDefined()
+
+    act(() => retryButton?.click())
+    expect(onRetry).toHaveBeenCalledWith(IMAGE_TASK)
+  })
+
+  it('已取消任务显示重试按钮', () => {
+    const onRetry = vi.fn()
+    renderHistory(root, { tasks: [CANCELLED_TASK], onRetry, expandedTaskId: CANCELLED_TASK.id })
+
+    const retryButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.quick-create-task-actions button'),
+    ).find((button) => button.textContent?.includes('重试'))
+    expect(retryButton).toBeDefined()
+
+    act(() => retryButton?.click())
+    expect(onRetry).toHaveBeenCalledWith(CANCELLED_TASK)
+  })
+
+  it('任意状态（含运行中）都显示复用配置', () => {
+    const onReuse = vi.fn()
+    renderHistory(root, { tasks: [RUNNING_TASK], onReuse, expandedTaskId: RUNNING_TASK.id })
+
+    const reuseButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.quick-create-task-actions button'),
+    ).find((button) => button.textContent?.includes('复用配置'))
+    expect(reuseButton).toBeDefined()
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>('.quick-create-task-actions button'),
+      ).some((button) => button.textContent?.includes('重试')),
+    ).toBe(false)
+
+    act(() => reuseButton?.click())
+    expect(onReuse).toHaveBeenCalledWith(RUNNING_TASK)
   })
 })

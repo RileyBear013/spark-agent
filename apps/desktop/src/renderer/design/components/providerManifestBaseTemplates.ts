@@ -1,4 +1,8 @@
-import { DEFAULT_VIDEO_POLL_TIMEOUT_MS } from '@spark/protocol'
+import {
+  CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES,
+  CUSTOM_IMAGE_MODEL_SIZE_PATTERN,
+  DEFAULT_VIDEO_POLL_TIMEOUT_MS,
+} from '@spark/protocol'
 import type {
   MediaManifestBaseTemplate,
   MediaModelCapabilityManifest,
@@ -90,7 +94,9 @@ function openAiImageBase(manifest: MediaModelManifest): MediaModelManifest {
     size: {
       type: 'string',
       title: '画面尺寸',
-      enum: ['auto', '1024x1024', '1536x1024', '1024x1536'],
+      examples: [...CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES],
+      'x-allow-custom': true,
+      pattern: CUSTOM_IMAGE_MODEL_SIZE_PATTERN,
       default: 'auto',
     },
     quality: {

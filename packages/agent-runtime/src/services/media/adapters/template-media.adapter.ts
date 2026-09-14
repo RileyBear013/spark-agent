@@ -407,6 +407,7 @@ export class TemplateMediaAdapter {
               name,
               ctx.fetch,
               configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+              ctx,
             )
           }
           if (outputKind === 'audio' || outputKind === 'video') {
@@ -419,6 +420,7 @@ export class TemplateMediaAdapter {
               name,
               ctx.fetch,
               configuredMediaInterfaceTimeoutMs(ctx.mediaDefaults),
+              ctx,
             )
           }
         }

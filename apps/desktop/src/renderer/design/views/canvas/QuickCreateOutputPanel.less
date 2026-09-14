@@ -1,24 +1,29 @@
+// 创作结果面板：产物展示交给公用 MediaArtifactViewer，这里只保留面板布局与状态态
+// 原则：灰底面板区分层级，不用边框盒子与多余分割线
+
 .quick-create-output-panel {
   display: flex;
   min-width: 0;
   min-height: 0;
+  flex: 1;
   flex-direction: column;
-  padding: 0 22px 22px;
-  border-left: 1px solid var(--divider);
+  padding: 0 18px 18px;
   background: transparent;
 }
 
 .quick-create-output-panel.is-empty {
+  display: flex;
+  position: relative;
+  align-items: center;
   justify-content: center;
 }
 
 .quick-create-output-meta {
   display: flex;
-  min-height: 58px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid var(--divider);
 }
 
 .quick-create-output-meta > .quick-create-task-status {
@@ -36,126 +41,49 @@
   display: flex;
   min-height: 0;
   flex: 1;
-  align-items: center;
-  justify-content: center;
-  padding: 18px 0;
+  align-items: stretch;
+  padding: 6px 0 2px;
 }
 
-.quick-create-output-image-button {
-  position: relative;
-  display: block;
-  width: 100%;
-  height: min(56vh, 520px);
+// 多图时的缩略图条：选中项用描边高亮
+.quick-create-output-thumbs {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 8px 0 2px;
+  overflow-x: auto;
+}
+
+.quick-create-output-thumbs button {
+  flex: 0 0 56px;
+  width: 56px;
+  height: 42px;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--divider);
-  border-radius: 10px;
+  border: 0;
+  border-radius: 5px;
   background: var(--bg-sunken);
-  cursor: zoom-in;
+  cursor: pointer;
+  opacity: 0.55;
 }
 
-.quick-create-output-image-button img,
-.quick-create-output-media {
+.quick-create-output-thumbs button img,
+.quick-create-output-thumbs button video {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
-  background: var(--bg-sunken);
+  object-fit: cover;
 }
 
-.quick-create-output-image-button span {
-  position: absolute;
-  right: 12px;
-  bottom: 10px;
-  padding: 4px 7px;
-  border-radius: 5px;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.58);
-  font-size: 10px;
-  opacity: 0;
-  transition: opacity 160ms ease;
-}
-
-.quick-create-output-image-button:hover span,
-.quick-create-output-image-button:focus-visible span {
+.quick-create-output-thumbs button:hover,
+.quick-create-output-thumbs button:focus-visible,
+.quick-create-output-thumbs button.is-active {
   opacity: 1;
+  outline: 2px solid color-mix(in srgb, var(--quick-accent) 60%, transparent);
+  outline-offset: -2px;
 }
 
-.quick-create-output-toolbar {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.quick-create-output-toolbar button {
-  display: inline-flex;
-  min-width: 32px;
-  min-height: 32px;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 4px 7px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-}
-
-.quick-create-output-toolbar button:hover:not(:disabled),
-.quick-create-output-toolbar button:focus-visible,
-.quick-create-output-toolbar button.is-active {
-  border-color: color-mix(in srgb, var(--quick-accent) 38%, var(--divider));
-  color: var(--quick-accent);
-  outline: none;
-}
-
-.quick-create-output-toolbar button:disabled {
-  cursor: not-allowed;
-  opacity: 0.38;
-}
-
-.quick-create-compare-view {
-  display: grid;
-  width: 100%;
-  height: min(56vh, 520px);
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--divider);
-  border-radius: 10px;
-  background: var(--divider);
-}
-
-.quick-create-compare-view > div {
-  position: relative;
-  min-width: 0;
-  background: var(--bg-sunken);
-}
-
-.quick-create-compare-view span {
-  position: absolute;
-  z-index: 1;
-  top: 10px;
-  left: 10px;
-  padding: 4px 7px;
-  border-radius: 5px;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.58);
-  font-size: 10px;
-}
-
-.quick-create-compare-view img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
+// 等待 / 处理中 / 失败 / 取消：纯居中状态，无分割线无装饰
 .quick-create-output-empty,
 .quick-create-output-pending {
   display: flex;
@@ -163,6 +91,7 @@
   justify-content: center;
   flex-direction: column;
   gap: 8px;
+  margin-top: 40px;
   color: var(--text-faint);
   text-align: center;
 }
@@ -175,37 +104,56 @@
   color: var(--text-faint);
 }
 
-.quick-create-output-empty-mark {
-  display: inline-flex;
-  width: 48px;
-  height: 48px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--quick-accent) 24%, var(--divider));
-  border-radius: 50%;
-  color: var(--quick-accent);
-  background: color-mix(in srgb, var(--quick-accent) 7%, transparent);
-}
-
-.quick-create-output-empty strong,
-.quick-create-output-pending strong {
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.quick-create-output-empty > span:last-child,
-.quick-create-output-pending > span {
-  max-width: 260px;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
 .quick-create-output-pending svg {
   color: var(--quick-accent);
 }
 
 .quick-create-output-pending.is-error svg {
   color: #ee8e8e;
+}
+
+.quick-create-output-empty {
+  width: min(360px, 100%);
+  align-items: center;
+  gap: 9px;
+  padding: 18px 0;
+  text-align: center;
+}
+
+.quick-create-output-empty-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.quick-create-output-empty-label svg {
+  color: var(--quick-accent);
+}
+
+.quick-create-output-empty strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.quick-create-output-empty > span:last-child {
+  max-width: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.quick-create-output-pending strong {
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.quick-create-output-pending > span {
+  max-width: 390px;
+  font-size: 11px;
+  line-height: 1.7;
 }
 
 .quick-create-output-loader {
@@ -255,24 +203,19 @@
   font-variant-numeric: tabular-nums;
 }
 
+// 反推任务的文本产物：左侧强调线标记引用，不做盒子
 .quick-create-output-text {
   max-height: 100%;
-  margin: 18px 0;
-  padding: 14px;
+  margin: 14px 0;
+  padding: 12px 14px;
   overflow: auto;
   border-left: 2px solid var(--quick-accent);
   color: var(--text-muted);
-  background: var(--quick-field);
+  background: var(--bg-sunken);
   font: inherit;
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
-}
-
-@keyframes quick-create-output-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 @keyframes quick-create-output-wave {
@@ -290,8 +233,6 @@
 @media (max-width: 820px) {
   .quick-create-output-panel {
     min-height: 420px;
-    border-top: 1px solid var(--divider);
-    border-left: 0;
   }
 }
 

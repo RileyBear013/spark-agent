@@ -37,6 +37,18 @@ const RUNNING_TASK: QuickCreateTaskRecord = {
   progress: 42,
 }
 
+const NO_INPUT_TASK: QuickCreateTaskRecord = {
+  ...TASK,
+  id: 'quick-output-no-input-test',
+  inputFiles: [],
+}
+
+function stageImageSrc(): string | null | undefined {
+  return document
+    .querySelector('.media-artifact-viewer-stage:not(.is-compare) img')
+    ?.getAttribute('src')
+}
+
 describe('QuickCreateOutputPanel', () => {
   let container: HTMLDivElement
   let root: Root
@@ -53,37 +65,65 @@ describe('QuickCreateOutputPanel', () => {
     document.body.innerHTML = ''
   })
 
-  it('点击图片才打开统一大图预览，并支持输出翻页和输入输出对比', () => {
+  it('产物舞台使用公用查看器：支持翻页、输入输出对比与全屏大图预览', () => {
     act(() => root.render(<QuickCreateOutputPanel task={TASK} />))
 
     expect(document.querySelector('.image-lightbox-backdrop')).toBeNull()
-    const firstOutputSrc = document
-      .querySelector('.quick-create-output-image-button img')
-      ?.getAttribute('src')
+    const firstOutputSrc = stageImageSrc()
     expect(firstOutputSrc).toContain('safe-file://')
 
+    // 公用查看器内翻页
     act(() => document.querySelector<HTMLButtonElement>('[aria-label="下一项输出"]')?.click())
-    const secondOutputSrc = document
-      .querySelector('.quick-create-output-image-button img')
-      ?.getAttribute('src')
+    const secondOutputSrc = stageImageSrc()
     expect(secondOutputSrc).toContain('safe-file://')
     expect(secondOutputSrc).not.toBe(firstOutputSrc)
 
-    act(() => document.querySelector<HTMLButtonElement>('[aria-label="点击查看大图"]')?.click())
+    // 有参考图时显示对比入口，进入左右对比
+    act(() => document.querySelector<HTMLButtonElement>('[title="并排查看输入与输出"]')?.click())
+    const compareStage = document.querySelector('.media-artifact-viewer-stage.is-compare')
+    expect(compareStage).not.toBeNull()
+    expect(compareStage?.textContent).toContain('输入图')
+    expect(compareStage?.textContent).toContain('输出图')
+
+    act(() => document.querySelector<HTMLButtonElement>('[title="退出对比"]')?.click())
+    expect(document.querySelector('.media-artifact-viewer-stage.is-compare')).toBeNull()
+
+    // 大图预览带翻页，显示的是当前输出
+    act(() => document.querySelector<HTMLButtonElement>('[title="打开全屏大图预览"]')?.click())
     expect(document.querySelector('.image-lightbox-backdrop')).not.toBeNull()
     expect(document.querySelector('.image-lightbox-img')?.getAttribute('src')).toBe(secondOutputSrc)
-
     act(() => document.querySelector<HTMLButtonElement>('[title="关闭 (Esc)"]')?.click())
     expect(document.querySelector('.image-lightbox-backdrop')).toBeNull()
+  })
 
-    act(() =>
-      document
-        .querySelector<HTMLButtonElement>('.quick-create-output-toolbar button:last-child')
-        ?.click(),
+  it('没有参考图时不渲染对比入口', () => {
+    act(() => root.render(<QuickCreateOutputPanel task={NO_INPUT_TASK} />))
+
+    expect(document.querySelector('[title="并排查看输入与输出"]')).toBeNull()
+    expect(stageImageSrc()).toContain('safe-file://')
+  })
+
+  it('多图时展示缩略图条，点击缩略图切换当前输出', () => {
+    act(() => root.render(<QuickCreateOutputPanel task={TASK} />))
+
+    const thumbs = document.querySelectorAll<HTMLButtonElement>(
+      '.quick-create-output-thumbs button',
     )
-    expect(document.querySelector('.quick-create-compare-view')).not.toBeNull()
-    expect(document.querySelector('.quick-create-compare-view')?.textContent).toContain('输入图')
-    expect(document.querySelector('.quick-create-compare-view')?.textContent).toContain('输出图')
+    expect(thumbs.length).toBe(2)
+
+    // safe-file URL 会把路径编码为 base64，这里直接对比缩略图与舞台的 src 一致性
+    const secondThumbSrc = thumbs[1]?.querySelector('img')?.getAttribute('src')
+    act(() => thumbs[1]?.click())
+    expect(stageImageSrc()).toBe(secondThumbSrc)
+    expect(thumbs[1]?.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('查看器工具栏提供复制、下载与打开所在文件夹', () => {
+    act(() => root.render(<QuickCreateOutputPanel task={TASK} />))
+
+    expect(document.querySelector('[title="复制图片"]')).not.toBeNull()
+    expect(document.querySelector('[title="下载到本地"]')).not.toBeNull()
+    expect(document.querySelector('[title="打开产物所在文件夹"]')).not.toBeNull()
   })
 
   it('运行任务展示处理中动效和进度，失败任务不继续显示 loading', () => {
@@ -107,5 +147,15 @@ describe('QuickCreateOutputPanel', () => {
 
     expect(document.querySelector('.quick-create-output-loader')).toBeNull()
     expect(document.body.textContent).toContain('这次创作没有完成')
+  })
+
+  it('空输出只显示下一步提示，不渲染装饰性营销内容', () => {
+    act(() => root.render(<QuickCreateOutputPanel />))
+
+    expect(document.querySelector('.quick-create-output-empty-label')).not.toBeNull()
+    expect(document.body.textContent).toContain('等待生成')
+    expect(document.body.textContent).toContain('填写提示词并点击')
+    expect(document.querySelector('.quick-create-output-benefits')).toBeNull()
+    expect(document.querySelector('.quick-create-output-tip')).toBeNull()
   })
 })

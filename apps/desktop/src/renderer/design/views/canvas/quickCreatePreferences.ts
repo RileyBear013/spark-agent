@@ -11,6 +11,7 @@ export type QuickCreatePreferences = {
   textProviderId?: string
   textModelId?: string
   taskView?: QuickCreateTaskViewMode
+  taskFilter?: QuickCreateMode | 'all'
   paramsByScope?: Record<string, Record<string, string>>
   customSizeHistoryByScope?: Record<string, Record<string, string[]>>
 }
@@ -75,6 +76,12 @@ export function readQuickCreatePreferences(): QuickCreatePreferences {
       ...(typeof parsed.textModelId === 'string' ? { textModelId: parsed.textModelId } : {}),
       ...(parsed.taskView === 'list' || parsed.taskView === 'grid'
         ? { taskView: parsed.taskView }
+        : {}),
+      ...(parsed.taskFilter === 'all' ||
+      parsed.taskFilter === 'image' ||
+      parsed.taskFilter === 'reverse' ||
+      parsed.taskFilter === 'video'
+        ? { taskFilter: parsed.taskFilter }
         : {}),
       paramsByScope: normalizeParams(parsed.paramsByScope),
       customSizeHistoryByScope: normalizeCustomSizeHistory(parsed.customSizeHistoryByScope),

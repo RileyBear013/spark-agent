@@ -569,6 +569,34 @@ export const ProviderMediaModelRefSchema: z.ZodType<ProviderMediaModelRef> = z
     }
   })
 
+/**
+ * 自定义/自部署图像模型的画面尺寸快捷项，覆盖常见画幅比（含 auto）。
+ * 自部署后端普遍接受任意像素尺寸，因此自定义模型的 size 契约采用
+ * 「examples 快捷项 + x-allow-custom 自由输入 + pattern 兜底」，
+ * 而不是官方 API 的固定 enum；画布与快速创作按 examples 顺序展示快捷项。
+ */
+export const CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES = [
+  'auto',
+  '1024x1024',
+  '576x1024',
+  '1024x576',
+  '768x1536',
+  '1536x768',
+  '768x1024',
+  '1024x768',
+  '768x1280',
+  '1280x768',
+  '768x1344',
+  '1344x768',
+  '1216x832',
+  '832x1216',
+  '1152x896',
+  '896x1152',
+] as const
+
+/** 与 {@link CUSTOM_IMAGE_MODEL_SIZE_EXAMPLES} 配套的像素尺寸宽松校验。 */
+export const CUSTOM_IMAGE_MODEL_SIZE_PATTERN = '^(?:auto|\\d+\\s*[xX]\\s*\\d+)$'
+
 const imageSizeSchema = {
   type: 'object',
   additionalProperties: false,

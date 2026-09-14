@@ -24,13 +24,21 @@ describe('window chrome layout contract', () => {
     const app = readSource('../App.tsx')
     const workspaceStyles = readSource('./views/canvas/CanvasWorkspaceView.less')
     const cinematicStyles = readSource('./views/canvas/cinematic/shell.less')
+    const quickCreateStyles = readSource('./views/canvas/QuickCreateView.less')
 
     expect(app).toMatch(
-      /t\.view === 'canvas'\s*\|\|\s*t\.view === 'canvas-workflows'\s*\|\|\s*t\.view === 'canvas-prompts'/,
+      /t\.view === 'canvas'\s*\|\|\s*t\.view === 'canvas-workflows'\s*\|\|\s*t\.view === 'canvas-prompts'\s*\|\|\s*t\.view === 'quick-create'/,
     )
     expect(workspaceStyles).toContain('padding-left: var(--window-titlebar-safe-left)')
     expect(cinematicStyles).toContain('height: var(--window-titlebar-height)')
     expect(cinematicStyles).toContain('padding-left: var(--window-titlebar-safe-left)')
+    // 快速创作折叠菜单后由自身 tabbar 接管标题栏行：行高取标题栏高度，macOS 让出红绿灯安全区
+    expect(quickCreateStyles).toMatch(
+      /\.quick-create-tabbar\.is-sidebar-hidden\s*\{[^}]*min-height:\s*var\(--window-titlebar-height\)/s,
+    )
+    expect(quickCreateStyles).toMatch(
+      /\.platform-darwin \.quick-create-tabbar\.is-sidebar-hidden\s*\{[^}]*padding-left:\s*var\(--window-titlebar-safe-left\)/s,
+    )
   })
 
   it('keeps the settings titlebar surface aligned with the settings navigation', () => {

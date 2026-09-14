@@ -402,6 +402,12 @@ export const FileStatKindRequestSchema = z.object({
   path: z.string().min(1),
 })
 
+/** 快速创作任务资源清理：路径由主进程按白名单目录策略二次过滤，这里只约束形态 */
+export const QuickCreateCleanupTaskResourcesRequestSchema = z.object({
+  inputPaths: z.array(z.string().min(1).max(4000)).max(64),
+  assetPaths: z.array(z.string().min(1).max(4000)).max(128),
+})
+
 /** 文件操作冲突策略 */
 export const FileConflictPolicySchema = z.enum(['error', 'overwrite', 'merge', 'rename'])
 
@@ -1172,6 +1178,7 @@ export const IpcSchemaRegistry = {
   'file:prepare-media-input': FilePrepareMediaInputRequestSchema,
   'file:prepare-session-images': FilePrepareSessionImagesRequestSchema,
   'file:stat-kind': FileStatKindRequestSchema,
+  'quick-create:cleanup-task-resources': QuickCreateCleanupTaskResourcesRequestSchema,
   'file:trash': FileTrashRequestSchema,
   'file:create-file': FileCreateFileRequestSchema,
   'file:create-directory': FileCreateDirectoryRequestSchema,

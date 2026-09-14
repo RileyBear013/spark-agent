@@ -1,7 +1,4 @@
-import type { ComponentType } from 'react'
 import type { CanvasMediaTaskAsset } from '@spark/protocol'
-import { Icons } from '../../Icons'
-import type { LightboxImage } from '../../components/ImagePreviewModal'
 import { resolveMediaDisplayUrl } from './canvas-safe-file'
 import type {
   QuickCreateMode,
@@ -12,15 +9,41 @@ import type {
 export const MODE_ITEMS: Array<{
   id: QuickCreateMode
   label: string
-  icon: ComponentType<{ size?: number }>
 }> = [
-  { id: 'image', label: '图片生成', icon: Icons.ImagePlus },
-  { id: 'reverse', label: '图片反推', icon: Icons.Eye },
-  { id: 'video', label: '视频生成', icon: Icons.Video },
+  { id: 'image', label: '生图' },
+  { id: 'reverse', label: '反推' },
+  { id: 'video', label: '视频' },
 ]
 
 export function modeLabel(mode: QuickCreateMode): string {
   return MODE_ITEMS.find((item) => item.id === mode)?.label ?? mode
+}
+
+const IMAGE_INPUT_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'heic', 'heif']
+const VIDEO_INPUT_EXTENSIONS = ['mp4', 'mov', 'webm', 'm4v']
+
+/** 拖拽来源可能是浏览器里拖出的图片 URL；只有磁盘绝对路径才能作为输入素材读取。 */
+export function isLocalInputPath(filePath: string): boolean {
+  return filePath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(filePath)
+}
+
+/** 按模式过滤可接收的输入素材路径；视频模式额外接收视频文件。 */
+export function selectQuickCreateInputPaths(
+  filePaths: readonly string[],
+  mode: QuickCreateMode,
+): string[] {
+  const extensions =
+    mode === 'video'
+      ? [...IMAGE_INPUT_EXTENSIONS, ...VIDEO_INPUT_EXTENSIONS]
+      : IMAGE_INPUT_EXTENSIONS
+  const pattern = new RegExp(`\\.(${extensions.join('|')})$`, 'i')
+  return filePaths.filter((filePath) => isLocalInputPath(filePath) && pattern.test(filePath))
+}
+
+export function quickInputKindForPath(filePath: string): 'image' | 'video' {
+  return new RegExp(`\\.(${VIDEO_INPUT_EXTENSIONS.join('|')})$`, 'i').test(filePath)
+    ? 'video'
+    : 'image'
 }
 
 export function titleForPrompt(prompt: string, mode: QuickCreateMode): string {
@@ -29,6 +52,18 @@ export function titleForPrompt(prompt: string, mode: QuickCreateMode): string {
     .find((line) => line.trim())
     ?.trim()
   return firstLine?.slice(0, 40) || `${modeLabel(mode)}提示词`
+}
+
+/**
+ * 重试成功任务时的新记录：任务存储对同 id 是替换语义，复用原 id 会把已有产物清空，
+ * 因此必须换新 id 与创建时间；其余配置（提示词/素材/模型/参数）原样保留。
+ */
+export function retryTaskRecord(task: QuickCreateTaskRecord): QuickCreateTaskRecord {
+  return {
+    ...task,
+    id: `quick-create-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+  }
 }
 
 export function statusLabel(status: QuickCreateTaskStatus): string {
@@ -45,18 +80,25 @@ export function taskOutputUrl(asset: CanvasMediaTaskAsset | undefined): string {
     : ''
 }
 
-/** 任务详情弹层的大图浏览清单：只收集成功解析出 URL 的图片产物。 */
-export function lightboxImagesOf(task: QuickCreateTaskRecord): LightboxImage[] {
-  return task.assets
-    .map((asset, index) => {
-      const src = asset.type === 'image' ? taskOutputUrl(asset) : ''
-      return src
-        ? {
-            src,
-            alt: asset.title ?? `生成结果 ${index + 1}`,
-            fileName: asset.filePath?.split(/[\\/]/).pop() || `quick-create-${index + 1}.png`,
-          }
-        : null
-    })
-    .filter((item): item is LightboxImage => item != null)
+/**
+ * 取任务产物中第一张可显示的图片作为提示词封面。
+ *
+ * 封面 URL 与产物缩略图同源（磁盘路径优先编码为 safe-file://，避免把大段
+ * base64 持久化进设置存储）；纯视频/音频任务没有图片产物，返回 null 表示无封面。
+ */
+export function promptCoverFromTaskAssets(
+  assets: readonly CanvasMediaTaskAsset[],
+): { url: string; mimeType: string } | null {
+  for (const asset of assets) {
+    if (asset.type !== 'image') continue
+    const url = taskOutputUrl(asset)
+    if (!url) continue
+    const dataUrlMime = /^data:(image\/[\w.+-]+)/i.exec(url)?.[1]
+    const mimeType =
+      asset.mimeType && /^image\//i.test(asset.mimeType)
+        ? asset.mimeType
+        : (dataUrlMime ?? 'image/png')
+    return { url, mimeType }
+  }
+  return null
 }

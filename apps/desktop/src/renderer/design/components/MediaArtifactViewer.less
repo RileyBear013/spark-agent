@@ -1,0 +1,155 @@
+// MediaArtifactViewer — 产物查看公用组件样式
+// 原则：舞台即灰底面板，无边框盒子；工具栏纯文字按钮
+
+.media-artifact-viewer {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.media-artifact-viewer-stage {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+
+.media-artifact-viewer-stage.is-compare {
+  gap: 2px;
+  align-items: stretch;
+  background: transparent;
+}
+
+.media-artifact-compare-pane {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--bg-sunken);
+}
+
+.media-artifact-compare-pane figcaption {
+  padding: 8px 0 2px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.media-artifact-compare-pane img {
+  display: block;
+  min-height: 0;
+  max-width: 100%;
+  flex: 1;
+  object-fit: contain;
+}
+
+.media-artifact-canvas {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.media-artifact-canvas.is-zoomed {
+  cursor: grab;
+}
+
+.media-artifact-canvas.is-zoomed:active {
+  cursor: grabbing;
+}
+
+.media-artifact-canvas img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 90ms ease-out;
+}
+
+.media-artifact-canvas.is-zoomed img {
+  transition: none;
+}
+
+.media-artifact-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.media-artifact-viewer-toolbar {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.media-artifact-viewer-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.media-artifact-viewer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.media-artifact-viewer-toolbar button {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.media-artifact-viewer-toolbar button:hover:not(:disabled),
+.media-artifact-viewer-toolbar button:focus-visible,
+.media-artifact-viewer-toolbar button.is-active {
+  color: var(--quick-accent, var(--primary));
+  background: color-mix(in srgb, var(--quick-accent, var(--primary)) 9%, transparent);
+  outline: none;
+}
+
+.media-artifact-viewer-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.media-artifact-viewer-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.media-artifact-viewer-zoom-level {
+  min-width: 42px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

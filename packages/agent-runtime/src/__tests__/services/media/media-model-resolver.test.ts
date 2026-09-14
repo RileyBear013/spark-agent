@@ -280,6 +280,59 @@ describe('synthesizeMediaManifestForRef', () => {
     )
     expect(manifest).toBeNull()
   })
+
+  it('合成的自定义图像模型把 size 替换为自由尺寸快捷契约', () => {
+    const catalog = newCatalog()
+    const manifest = synthesizeMediaManifestForRef(
+      { mediaProvider: 'openai-images', mediaCapabilities: ['image.generate', 'image.edit'] },
+      { manifestId: 'custom:zimage:test', modelId: '文生图-ZImage' },
+      catalog,
+    )
+    expect(manifest).not.toBeNull()
+    if (!manifest) throw new Error('expected synthesized manifest')
+
+    for (const capabilityId of ['image.generate', 'image.edit']) {
+      const capability = manifest.capabilities.find((item) => item.id === capabilityId)
+      expect(capability).toBeTruthy()
+      const properties = capability?.paramSchema.properties as
+        | Record<string, Record<string, unknown>>
+        | undefined
+      expect(properties?.size).toMatchObject({
+        type: 'string',
+        default: 'auto',
+        'x-allow-custom': true,
+      })
+      const examples = properties?.size?.examples as string[] | undefined
+      expect(examples?.[0]).toBe('auto')
+      // 覆盖截图中的全部新增画幅比（纵向/横向成对）
+      for (const value of ['1024x1024', '576x1024', '1024x576', '768x1536', '1152x896', '896x1152']) {
+        expect(examples).toContain(value)
+      }
+    }
+  })
+
+  it('非图像能力（视频）的 size 参数不被自由尺寸契约覆盖', () => {
+    const catalog = newCatalog()
+    const manifest = synthesizeMediaManifestForRef(
+      { mediaProvider: 'openai-images', mediaCapabilities: ['video.generate'] },
+      { manifestId: 'custom:sora-test', modelId: 'sora-2-pro-custom' },
+      catalog,
+    )
+    expect(manifest).not.toBeNull()
+    if (!manifest) throw new Error('expected synthesized manifest')
+
+    const capability = manifest.capabilities.find((item) => item.id === 'video.generate')
+    expect(capability).toBeTruthy()
+    const properties = capability?.paramSchema.properties as
+      | Record<string, Record<string, unknown>>
+      | undefined
+    expect(properties?.size).toMatchObject({
+      type: 'string',
+      enum: expect.arrayContaining(['720x1280', '1280x720']),
+      default: '720x1280',
+    })
+    expect(properties?.size?.['x-allow-custom']).toBeUndefined()
+  })
 })
 
 function newCatalog(): MediaModelCatalogService {

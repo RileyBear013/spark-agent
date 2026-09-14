@@ -309,6 +309,7 @@ import { registerWorkspaceSearchIpc } from './registerWorkspaceSearchIpc.js'
 import { getPluginManager, registerPluginIpc } from './registerPluginIpc.js'
 import { registerFilePreviewIpc } from './registerFilePreviewIpc.js'
 import { registerFileOperationsIpc } from './registerFileOperationsIpc.js'
+import { registerQuickCreateIpc } from './registerQuickCreateIpc.js'
 import { registerPromptLibraryPackageIpc } from './registerPromptLibraryPackageIpc.js'
 import { registerWorkflowBundleIpc } from './registerWorkflowBundleIpc.js'
 import { registerTeamAssetIpc } from './registerTeamAssetIpc.js'
@@ -4340,6 +4341,7 @@ export function registerAllIpcHandlers(): void {
   log.info('Registering IPC handlers...')
   registerFilePreviewIpc()
   registerFileOperationsIpc()
+  registerQuickCreateIpc()
   registerPromptLibraryPackageIpc()
   registerWorkflowBundleIpc({ getMcpService })
   registerPastedTextIpc()

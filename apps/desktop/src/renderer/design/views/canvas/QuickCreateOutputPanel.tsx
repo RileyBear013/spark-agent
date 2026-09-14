@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Button } from '@lobehub/ui'
 import type { CanvasMediaTaskAsset, CanvasMediaTaskInputFile } from '@spark/protocol'
 import { Icons } from '../../Icons'
 import { ImagePreviewModal, type LightboxImage } from '../../components/ImagePreviewModal'
+import { MediaArtifactViewer } from '../../components/MediaArtifactViewer'
 import { resolveMediaDisplayUrl } from './canvas-safe-file'
 import type { QuickCreateTaskRecord } from './quickCreateTaskStore'
 import './QuickCreateOutputPanel.less'
@@ -29,15 +29,12 @@ function statusLabel(status: QuickCreateTaskRecord['status']): string {
   return { running: '处理中', succeeded: '已完成', failed: '未完成', cancelled: '已取消' }[status]
 }
 
-export function QuickCreateOutputPanel({
-  task,
-  onOpenOutput,
-}: {
-  task?: QuickCreateTaskRecord | undefined
-  onOpenOutput?: ((asset: CanvasMediaTaskAsset) => void) | undefined
-}) {
+/**
+ * 创作结果面板：产物展示统一交给公用的 MediaArtifactViewer
+ * （多图翻页 + 缩略图、输入/输出对比、缩放拖拽、复制下载、打开所在文件夹）。
+ */
+export function QuickCreateOutputPanel({ task }: { task?: QuickCreateTaskRecord | undefined }) {
   const [outputIndex, setOutputIndex] = useState(0)
-  const [compareOpen, setCompareOpen] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
 
   const outputs = useMemo(
@@ -50,8 +47,6 @@ export function QuickCreateOutputPanel({
   const inputImage = task?.inputFiles.find((input) => input.type === 'image')
   const inputImageUrl = inputUrl(inputImage)
   const imageOutputs = outputs.filter((asset) => asset.type === 'image')
-  const imagePreviewIndex =
-    currentOutput?.type === 'image' ? imageOutputs.indexOf(currentOutput) : -1
   const lightboxImages: LightboxImage[] = imageOutputs
     .map((asset, index) => {
       const src = assetUrl(asset)
@@ -70,18 +65,14 @@ export function QuickCreateOutputPanel({
     return (
       <section className="quick-create-output-panel is-empty" aria-label="输出预览">
         <div className="quick-create-output-empty">
-          <span className="quick-create-output-empty-mark">
-            <Icons.Image size={22} />
-          </span>
-          <strong>等待创作结果</strong>
-          <span>提交任务后，结果会在这里呈现。</span>
+          <div className="quick-create-output-empty-label">
+            <Icons.Image size={17} />
+            <strong>等待生成</strong>
+          </div>
+          <span>填写提示词并点击「生成」，结果会显示在这里。</span>
         </div>
       </section>
     )
-  }
-
-  const openPreview = () => {
-    if (currentOutput?.type === 'image' && lightboxImages.length > 0) setPreviewOpen(true)
   }
 
   return (
@@ -98,74 +89,55 @@ export function QuickCreateOutputPanel({
               ? '队列处理中'
               : '暂无输出'}
         </span>
-        {currentOutput?.filePath && onOpenOutput && (
-          <Button size="small" type="text" onClick={() => onOpenOutput(currentOutput)}>
-            打开产物
-          </Button>
-        )}
       </div>
 
       {outputs.length > 0 && currentOutput && currentUrl ? (
         <>
           <div className="quick-create-output-stage">
-            {compareOpen && currentOutput.type === 'image' && inputImageUrl ? (
-              <div className="quick-create-compare-view" aria-label="输入图与输出图对比">
-                <div>
-                  <span>输入图</span>
-                  <img src={inputImageUrl} alt="输入参考图" />
-                </div>
-                <div>
-                  <span>输出图</span>
-                  <img src={currentUrl} alt="生成输出图" />
-                </div>
-              </div>
-            ) : currentOutput.type === 'video' ? (
-              <video src={currentUrl} controls className="quick-create-output-media" />
-            ) : (
-              <button
-                type="button"
-                className="quick-create-output-image-button"
-                onClick={openPreview}
-                aria-label="点击查看大图"
-              >
-                <img src={currentUrl} alt={currentOutput.title ?? '生成结果'} />
-                <span>点击查看大图</span>
-              </button>
-            )}
+            <MediaArtifactViewer
+              media={{
+                src: currentUrl,
+                alt: currentOutput.title ?? '生成结果',
+                fileName: fileName(currentOutput.filePath, 'quick-create-output.png'),
+                ...(currentOutput.filePath ? { filePath: currentOutput.filePath } : {}),
+                type: currentOutput.type === 'video' ? 'video' : 'image',
+              }}
+              {...(inputImageUrl ? { inputImage: { src: inputImageUrl } } : {})}
+              pagination={{
+                index: safeOutputIndex,
+                total: outputs.length,
+                onPrev: () =>
+                  setOutputIndex((current) => (current - 1 + outputs.length) % outputs.length),
+                onNext: () => setOutputIndex((current) => (current + 1) % outputs.length),
+              }}
+              onOpenFullscreen={imageOutputs.length > 0 ? () => setPreviewOpen(true) : undefined}
+            />
           </div>
-          <div className="quick-create-output-toolbar">
-            <button
-              type="button"
-              aria-label="上一项输出"
-              disabled={outputs.length < 2}
-              onClick={() =>
-                setOutputIndex((current) => (current - 1 + outputs.length) % outputs.length)
-              }
-            >
-              <Icons.ChevronLeft size={15} />
-            </button>
-            <span>
-              {safeOutputIndex + 1} / {outputs.length}
-            </span>
-            <button
-              type="button"
-              aria-label="下一项输出"
-              disabled={outputs.length < 2}
-              onClick={() => setOutputIndex((current) => (current + 1) % outputs.length)}
-            >
-              <Icons.ChevronRight size={15} />
-            </button>
-            {currentOutput.type === 'image' && inputImageUrl && (
-              <button
-                type="button"
-                className={compareOpen ? 'is-active' : ''}
-                onClick={() => setCompareOpen((current) => !current)}
-              >
-                <Icons.Combine size={14} />
-                {compareOpen ? '退出对比' : '输入 / 输出对比'}
-              </button>
-            )}
-          </div>
+          {outputs.length > 1 && (
+            <div className="quick-create-output-thumbs" role="tablist" aria-label="输出缩略图">
+              {outputs.map((asset, index) => {
+                const url = assetUrl(asset)
+                if (!url) return null
+                return (
+                  <button
+                    type="button"
+                    role="tab"
+                    key={`${asset.filePath ?? url}-${index}`}
+                    aria-selected={index === safeOutputIndex}
+                    className={index === safeOutputIndex ? 'is-active' : ''}
+                    aria-label={`查看第 ${index + 1} 个输出`}
+                    onClick={() => setOutputIndex(index)}
+                  >
+                    {asset.type === 'video' ? (
+                      <video src={url} muted />
+                    ) : (
+                      <img src={url} alt={asset.title ?? `输出 ${index + 1}`} loading="lazy" />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </>
       ) : task.text ? (
         <pre className="quick-create-output-text">{task.text}</pre>
@@ -215,7 +187,7 @@ export function QuickCreateOutputPanel({
           navigation={{
             images: lightboxImages,
             startIndex: Math.max(
-              lightboxStartIndex >= 0 ? lightboxStartIndex : imagePreviewIndex,
+              lightboxStartIndex >= 0 ? lightboxStartIndex : imageOutputs.indexOf(currentOutput),
               0,
             ),
           }}

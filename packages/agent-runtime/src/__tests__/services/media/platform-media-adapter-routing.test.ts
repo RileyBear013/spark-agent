@@ -25,12 +25,86 @@ describe('platform media adapter routing', () => {
       managedType: 'newapi',
     } as Pick<MediaProviderProfile, 'mediaProvider' | 'managedType'>
 
-    expect(invocationProviderKind(managed, { providerKind: 'openai-images' })).toBe(
-      'openai-images',
-    )
+    expect(invocationProviderKind(managed, { providerKind: 'openai-images' })).toBe('openai-images')
     expect(invocationProviderKind(managed, { providerKind: 'volcengine-ark' })).toBe(
       'volcengine-ark',
     )
+  })
+
+  it('authenticates same-origin NewAPI artifact downloads without leaking credentials cross-origin', async () => {
+    const source = BUILTIN_MEDIA_MODEL_MANIFESTS.find(
+      (manifest) => manifest.id === 'openai-images:gpt-image-2',
+    )
+    if (!source) throw new Error('missing OpenAI image template')
+    const manifest = {
+      ...source,
+      id: 'platform:spark-img:url-download',
+      modelId: 'spark-img-url',
+      adapterModelId: source.modelId,
+    }
+    const outputDir = mkdtempSync(path.join(tmpdir(), 'spark-platform-download-'))
+    outputDirs.push(outputDir)
+    const downloadHeaders: Array<{ url: string; authorization: string | null }> = []
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input)
+      if (init?.method === 'POST') {
+        return new Response(
+          JSON.stringify({
+            data: [
+              { url: 'https://newapi.example/v1/images/result.png' },
+              { url: 'https://cdn.example/result.png?signature=signed' },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      downloadHeaders.push({
+        url,
+        authorization: new Headers(init?.headers).get('authorization'),
+      })
+      return new Response(Uint8Array.from([1, 2, 3]), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      })
+    }
+
+    await new MediaRouterService().invoke(
+      {
+        operation: 'text_to_image',
+        prompt: 'authenticated artifact',
+        outputDir,
+      },
+      {
+        providers: [
+          {
+            id: 'spark-platform-newapi',
+            name: 'Spark Platform',
+            defaultModel: 'spark-img-url',
+            apiEndpoint: 'https://newapi.example/v1',
+            mediaProvider: null,
+            mediaApiType: 'sync',
+            mediaModelManifests: [manifest],
+            apiKey: 'sk-platform',
+            managedType: 'newapi',
+          },
+        ],
+        providerProfileId: 'spark-platform-newapi',
+        modelId: 'spark-img-url',
+        capability: 'image.generate',
+        fetch: fetchImpl,
+      },
+    )
+
+    expect(downloadHeaders).toEqual([
+      {
+        url: 'https://newapi.example/v1/images/result.png',
+        authorization: 'Bearer sk-platform',
+      },
+      {
+        url: 'https://cdn.example/result.png?signature=signed',
+        authorization: null,
+      },
+    ])
   })
 
   it('keeps existing provider-level adapter routing unchanged', () => {
@@ -74,25 +148,29 @@ describe('platform media adapter routing', () => {
       {
         operation: 'image_edit',
         prompt: 'edit this image',
-        inputFiles: [{
-          type: 'image',
-          dataUrl: `data:image/png;base64,${pngBase64}`,
-        }],
+        inputFiles: [
+          {
+            type: 'image',
+            dataUrl: `data:image/png;base64,${pngBase64}`,
+          },
+        ],
         modelParams: { inputFidelity: 'high' },
         outputDir,
       },
       {
-        providers: [{
-          id: 'spark-platform-newapi',
-          name: 'Spark Platform',
-          defaultModel: 'spark-img',
-          apiEndpoint: 'https://newapi.example/v1',
-          mediaProvider: null,
-          mediaApiType: 'sync',
-          mediaModelManifests: [manifest],
-          apiKey: 'sk-platform',
-          managedType: 'newapi',
-        }],
+        providers: [
+          {
+            id: 'spark-platform-newapi',
+            name: 'Spark Platform',
+            defaultModel: 'spark-img',
+            apiEndpoint: 'https://newapi.example/v1',
+            mediaProvider: null,
+            mediaApiType: 'sync',
+            mediaModelManifests: [manifest],
+            apiKey: 'sk-platform',
+            managedType: 'newapi',
+          },
+        ],
         providerProfileId: 'spark-platform-newapi',
         modelId: 'spark-img',
         capability: 'image.edit',
@@ -137,7 +215,11 @@ describe('platform media adapter routing', () => {
             request_id: 'bailian-request',
             output: {
               choices: [
-                { message: { content: [{ type: 'image', image: `data:image/png;base64,${pngBase64}` }] } },
+                {
+                  message: {
+                    content: [{ type: 'image', image: `data:image/png;base64,${pngBase64}` }],
+                  },
+                },
               ],
             },
           }),

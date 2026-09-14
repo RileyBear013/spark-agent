@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'reac
 import { createPortal } from 'react-dom'
 import { Icons } from '../Icons'
 import { useToast } from './Toast'
+import { readLastMediaDownloadDir, writeLastMediaDownloadDir } from './mediaViewerPreferences'
 import './ImagePreviewModal.less'
 
 /** 多图导航时的单张图片描述；src 需已解析为浏览器可加载的 URL（如 safe-file://） */
@@ -144,11 +145,15 @@ export function ImagePreviewModal({ src, alt, fileName, onClose, navigation }: P
           toast.error('下载失败：桌面能力尚未就绪')
           return
         }
+        const lastDir = readLastMediaDownloadDir()
         const res = await window.spark.invoke('file:save-image', {
           sourcePath,
           suggestedFileName: current.fileName,
+          ...(lastDir ? { defaultDirectory: lastDir } : {}),
         })
         if (res.saved) {
+          const dirIndex = Math.max(res.savedPath.lastIndexOf('/'), res.savedPath.lastIndexOf('\\'))
+          if (dirIndex > 0) writeLastMediaDownloadDir(res.savedPath.slice(0, dirIndex))
           toast.success(`已保存到 ${res.savedPath}`)
         }
       } else {
@@ -178,6 +183,21 @@ export function ImagePreviewModal({ src, alt, fileName, onClose, navigation }: P
     },
     [onClose],
   )
+
+  /** 本地文件路径可解析时，允许直接在系统文件管理器中定位产物 */
+  const handleReveal = useCallback(async () => {
+    const sourcePath = decodeSafeFilePath(current.src)
+    if (!sourcePath || !window.spark?.invoke) {
+      toast.warning('当前图片没有可定位的本地文件')
+      return
+    }
+    try {
+      const res = await window.spark.invoke('file:reveal', { filePath: sourcePath })
+      if (!res.revealed) toast.error(res.error ?? '打开所在文件夹失败')
+    } catch (err) {
+      toast.error(`打开所在文件夹失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }, [current.src, toast])
 
   return createPortal(
     <div
@@ -220,6 +240,17 @@ export function ImagePreviewModal({ src, alt, fileName, onClose, navigation }: P
           <Icons.Download size={16} />
           <span>下载</span>
         </button>
+        {current.src.startsWith(`${SAFE_FILE_SCHEME}:`) && (
+          <button
+            type="button"
+            className="image-lightbox-btn"
+            onClick={() => void handleReveal()}
+            title="打开图片所在文件夹"
+          >
+            <Icons.FolderOpen size={16} />
+            <span>所在文件夹</span>
+          </button>
+        )}
         <button
           type="button"
           className="image-lightbox-btn image-lightbox-close"

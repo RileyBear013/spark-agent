@@ -5296,6 +5296,31 @@ export interface FileReadBinaryResponse {
   error?: string
 }
 
+/**
+ * `quick-create:cleanup-task-resources` — 删除快速创作任务时清理其专属文件资源。
+ *
+ * 清理策略（主进程强制校验，渲染端传什么都不会越界删除）：
+ *   - 产物文件（assetPaths）：仅删除画布媒体目录（userData/.spark-artifacts/media）下的文件；
+ *   - 输入文件（inputPaths）：仅删除 quick-create-inputs 任务专属拷贝目录下的文件；
+ *   - 其余路径（用户原始文件、与其他功能共享的粘贴素材目录等）一律跳过不删。
+ * 删除优先送系统回收站（可恢复），回收站不可用时回退为直接删除。
+ */
+export interface QuickCreateCleanupTaskResourcesRequest {
+  /** 任务输入素材的候选绝对路径（内部按策略过滤） */
+  inputPaths: string[]
+  /** 任务产物资产的候选绝对路径（内部按策略过滤） */
+  assetPaths: string[]
+}
+
+export interface QuickCreateCleanupTaskResourcesResponse {
+  /** 实际删除成功的绝对路径 */
+  deletedPaths: string[]
+  /** 不在允许范围内或已不存在而跳过的绝对路径 */
+  skippedPaths: string[]
+  /** 尝试删除但失败的路径与原因 */
+  errors: Array<{ path: string; message: string }>
+}
+
 // ─── File Save / Download Channels ────────────────────────────────────────────
 
 /**
@@ -7406,6 +7431,12 @@ export interface IpcChannelMap
 
   // File Save Image — show save dialog and copy a local image to the user's chosen path
   'file:save-image': [FileSaveImageRequest, FileSaveImageResponse]
+
+  // Quick Create — 删除任务时清理其专属输入拷贝与生成产物
+  'quick-create:cleanup-task-resources': [
+    QuickCreateCleanupTaskResourcesRequest,
+    QuickCreateCleanupTaskResourcesResponse,
+  ]
   'file:save-pasted-image': [FileSavePastedImageRequest, FileSavePastedImageResponse]
   'file:save-pasted-text': [FileSavePastedTextRequest, FileSavePastedTextResponse]
   'file:save-pasted-media': [FileSavePastedMediaRequest, FileSavePastedMediaResponse]

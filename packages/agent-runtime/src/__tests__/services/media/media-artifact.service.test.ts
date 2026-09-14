@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MediaArtifactService } from '../../../services/media/media-artifact.service.js'
+import { sameOriginAuthHeaders } from '../../../services/media/media-artifact.service.js'
 
 describe('MediaArtifactService interface timeout', () => {
   let outputDir: string | undefined
@@ -78,5 +79,87 @@ describe('MediaArtifactService interface timeout', () => {
     ).rejects.toMatchObject({ code: 'artifact_download_failed', statusCode: 404 })
 
     expect(calls).toBe(1)
+  })
+})
+
+describe('MediaArtifactService same-origin download auth', () => {
+  let outputDir: string | undefined
+
+  afterEach(async () => {
+    if (outputDir) await rm(outputDir, { recursive: true, force: true })
+  })
+
+  const AUTH = { apiKey: 'sk-test-key', apiEndpoint: 'http://gateway.local:13005/v1' }
+
+  const pngResponse = () =>
+    new Response(Uint8Array.from([1, 2, 3]), {
+      status: 200,
+      headers: { 'content-type': 'image/png' },
+    })
+
+  it('attaches a Bearer header when the artifact url shares origin with the endpoint', async () => {
+    outputDir = await mkdtemp(path.join(tmpdir(), 'spark-media-auth-'))
+    let seenInit: RequestInit | undefined
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenInit = init
+      return pngResponse()
+    }) as typeof fetch
+
+    await new MediaArtifactService().writeImage(
+      { kind: 'url', value: 'http://gateway.local:13005/view?filename=image.png' },
+      outputDir,
+      'image',
+      fetchImpl,
+      5_000,
+      AUTH,
+    )
+
+    const headers = new Headers(seenInit?.headers)
+    expect(headers.get('authorization')).toBe('Bearer sk-test-key')
+  })
+
+  it('does not attach auth to cross-origin presigned urls', async () => {
+    outputDir = await mkdtemp(path.join(tmpdir(), 'spark-media-no-auth-'))
+    let seenInit: RequestInit | undefined
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenInit = init
+      return pngResponse()
+    }) as typeof fetch
+
+    await new MediaArtifactService().writeImage(
+      {
+        kind: 'url',
+        value: 'https://oss.example.com/signed-image.png?UCloudPublicKey=token&Signature=sig',
+      },
+      outputDir,
+      'image',
+      fetchImpl,
+      5_000,
+      AUTH,
+    )
+
+    const headers = new Headers(seenInit?.headers)
+    expect(headers.get('authorization')).toBeNull()
+  })
+
+  it('keeps downloads unauthenticated when no auth context is provided', () => {
+    expect(
+      sameOriginAuthHeaders('http://gateway.local:13005/view?filename=a.png', undefined),
+    ).toBeUndefined()
+    expect(
+      sameOriginAuthHeaders('http://gateway.local:13005/view?filename=a.png', {
+        apiKey: '',
+        apiEndpoint: 'http://gateway.local:13005/v1',
+      }),
+    ).toBeUndefined()
+  })
+
+  it('treats endpoints with identical host but different port as cross-origin', () => {
+    expect(
+      sameOriginAuthHeaders('http://gateway.local:13006/view?a=1', {
+        apiKey: 'sk-test-key',
+        apiEndpoint: 'http://gateway.local:13005/v1',
+      }),
+    ).toBeUndefined()
   })
 })

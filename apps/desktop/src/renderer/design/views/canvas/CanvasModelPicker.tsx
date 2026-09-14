@@ -87,7 +87,11 @@ export function CanvasModelPicker({
         />
       </div>
       <div className="canvas-model-picker-layout">
-        <div className="canvas-model-picker-providers" aria-label="模型渠道" data-canvas-overlay-scroll>
+        <div
+          className="canvas-model-picker-providers"
+          aria-label="模型渠道"
+          data-canvas-overlay-scroll
+        >
           {filteredGroups.map((group) => {
             const active = group.key === visibleGroup?.key
             return (
@@ -119,7 +123,12 @@ export function CanvasModelPicker({
             <div className="canvas-model-picker-empty">没有匹配的渠道</div>
           )}
         </div>
-        <div className="canvas-model-picker-models" role="listbox" aria-label="模型列表" data-canvas-overlay-scroll>
+        <div
+          className="canvas-model-picker-models"
+          role="listbox"
+          aria-label="模型列表"
+          data-canvas-overlay-scroll
+        >
           {allowEmpty && (
             <button
               type="button"
@@ -130,7 +139,7 @@ export function CanvasModelPicker({
               onClick={() => chooseModel('')}
             >
               <span className="canvas-model-picker-auto-icon">
-                <Icons.Sparkles size={16} />
+                <Icons.Image size={16} />
               </span>
               <span className="canvas-model-picker-model-copy">
                 <strong>{emptyLabel}</strong>
@@ -224,7 +233,7 @@ export function CanvasModelPicker({
                 fallbackText={triggerLabel.slice(0, 1).toUpperCase()}
               />
             ) : (
-              <Icons.Sparkles size={15} />
+              <Icons.Image size={15} />
             )
           }
         >

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
 } from 'react'
 import { AutoComplete, Input, Modal, Select, Spin, message } from 'antd'
 import { Button } from '@lobehub/ui'
@@ -22,8 +23,14 @@ import type {
 import { Icons } from '../../Icons'
 import { SidebarExpandButton } from '../../SidebarExpandButton'
 import { useApp } from '../../AppContext'
+import {
+  getDataTransferFilePaths,
+  hasFileDataTransfer,
+  isUnresolvableFileDrop,
+} from '../../services/composer-attachments'
 import { canvasApi } from './canvas.api'
 import { CanvasModelPicker } from './CanvasModelPicker'
+import { CanvasParameterControl } from './CanvasParameterControl'
 import {
   buildModelParams,
   mergeSchemaFields,
@@ -37,27 +44,38 @@ import {
 import {
   aspectRatioOptions,
   aspectRatioShape,
-  aspectRatioShortLabel,
   isAspectRatioValue,
   parameterOptionValues,
   partitionParameterFields,
   type CanvasParameterPresentation,
 } from './canvasParameterPresentation'
 import type { CanvasOperationType } from './canvas.types'
+import {
+  canvasParameterHistoryScope,
+  readCanvasParameterHistory,
+  recordCanvasCustomParameterHistory,
+} from './canvasParameterHistory'
 import { resolveMediaDisplayUrl } from './canvas-safe-file'
 import { mediaModelKey } from './canvasModelPickerModel'
 import { QuickCreateOutputPanel } from './QuickCreateOutputPanel'
 import { QuickCreateTaskHistory } from './QuickCreateTaskHistory'
-import { MODE_ITEMS, modeLabel, titleForPrompt } from './quickCreateTaskPresentation'
+import {
+  MODE_ITEMS,
+  modeLabel,
+  promptCoverFromTaskAssets,
+  quickInputKindForPath,
+  retryTaskRecord,
+  selectQuickCreateInputPaths,
+  titleForPrompt,
+} from './quickCreateTaskPresentation'
 import {
   quickCreateParamScope,
   readQuickCreateCustomSizeHistory,
   readQuickCreatePreferences,
-  recordQuickCreateCustomSize,
-  removeQuickCreateCustomSize,
   writeQuickCreatePreferences,
   type QuickCreatePreferences,
 } from './quickCreatePreferences'
+import { RemoteAssetImage } from '../../components/RemoteAssetImage'
 import {
   readGlobalPromptLibrary,
   writeGlobalPromptLibrary,
@@ -99,47 +117,36 @@ function quickParameterLabel(presentation: CanvasParameterPresentation): string 
   )
 }
 
-/** 比例矩形按等比缩放（CSS max-width/height 会各自截断导致比例失真，必须在 JS 侧缩放） */
-function scaledRatioShape(value: string, scale: number) {
-  const shape = aspectRatioShape(value)
+function normalizedParameterName(value: string): string {
+  return value.replace(/[^a-z0-9]/gi, '').toLowerCase()
+}
+
+function isQualityPresentation(presentation: CanvasParameterPresentation): boolean {
+  const name = normalizedParameterName(presentation.field.name)
+  const label = presentation.label.toLowerCase()
+  return name.includes('quality') || label.includes('质量')
+}
+
+function parameterOptionLabel(presentation: CanvasParameterPresentation, option: string): string {
+  return presentation.field.enumLabels?.[option] ?? option
+}
+
+function parameterNumberBounds(field: CanvasParameterPresentation['field']): {
+  minimum: number
+  maximum: number
+} {
+  const options = parameterOptionValues(field)
+    .map((option) => Number(option))
+    .filter((option) => Number.isFinite(option))
+  const minimum = field.minimum ?? (options.length > 0 ? Math.min(...options) : 1)
+  const maximum = field.maximum ?? (options.length > 0 ? Math.max(...options) : 4)
   return {
-    width: Math.max(5, Math.round(shape.width * scale)),
-    height: Math.max(5, Math.round(shape.height * scale)),
-    ...(shape.adaptive ? { adaptive: true } : {}),
+    minimum: Math.min(minimum, maximum),
+    maximum: Math.max(minimum, maximum),
   }
 }
 
-/** 重复的约简比例（如 1024x1024 与 2048x2048 都是 1:1）附加分辨率档位区分 */
-function resolutionBucket(value: string): string {
-  const width = Number(
-    value
-      .trim()
-      .toLowerCase()
-      .match(/^(\d+)[x×*]/)?.[1] ?? 0,
-  )
-  if (width >= 4096) return '4K'
-  if (width >= 2048) return '2K'
-  if (width >= 1024) return '1K'
-  return String(width || '')
-}
-
-function ratioButtonLabel(
-  option: string,
-  field: CanvasParameterPresentation['field'],
-  shortLabelCounts: Map<string, number>,
-): string {
-  const enumLabel = field.enumLabels?.[option]
-  if (enumLabel && enumLabel !== option) return enumLabel
-  const short = aspectRatioShortLabel(option)
-  if (!short) return option
-  if ((shortLabelCounts.get(short) ?? 0) > 1) {
-    const bucket = resolutionBucket(option)
-    return bucket ? `${short} · ${bucket}` : option
-  }
-  return short
-}
-
-function QuickCreateCountStepper({
+function QuickCreateQualityControl({
   presentation,
   value,
   onChange,
@@ -148,213 +155,251 @@ function QuickCreateCountStepper({
   value: string
   onChange: (value: string) => void
 }) {
-  const options = parameterOptionValues(presentation.field)
-    .map((item) => Number(item))
-    .filter((item) => Number.isFinite(item))
-  const minimum = presentation.field.minimum ?? Math.min(...options, 1)
-  const maximum = presentation.field.maximum ?? Math.max(...options, 4)
+  const options = parameterOptionValues(presentation.field).map((option) => ({
+    value: option,
+    label: parameterOptionLabel(presentation, option),
+  }))
+  return (
+    <div className="canvas-parameter-control quick-create-quality-control">
+      <div className="canvas-parameter-control-head">
+        <span>{quickParameterLabel(presentation)}</span>
+      </div>
+      <Select
+        aria-label={quickParameterLabel(presentation)}
+        value={value || undefined}
+        options={options}
+        allowClear
+        placeholder="默认"
+        onChange={(next) => onChange(next == null ? '' : String(next))}
+      />
+    </div>
+  )
+}
+
+function QuickCreateCountControl({
+  presentation,
+  value,
+  onChange,
+}: {
+  presentation: CanvasParameterPresentation
+  value: string
+  onChange: (value: string) => void
+}) {
+  const { minimum, maximum } = parameterNumberBounds(presentation.field)
   const parsed = Number(value)
   const current = Number.isFinite(parsed)
     ? Math.min(maximum, Math.max(minimum, Math.round(parsed)))
     : minimum
+  const commit = (raw: string) => {
+    const next = Number(raw)
+    if (!Number.isFinite(next)) {
+      onChange(String(current))
+      return
+    }
+    onChange(String(Math.min(maximum, Math.max(minimum, Math.round(next)))))
+  }
   return (
-    <div className="quick-create-count-stepper" aria-label="生成数量">
-      <button
-        type="button"
-        aria-label="减少生成数量"
-        disabled={current <= minimum}
-        onClick={() => onChange(String(current - 1))}
-      >
-        <Icons.Minus size={14} />
-      </button>
-      <input
-        aria-label="生成数量"
-        inputMode="numeric"
-        min={minimum}
-        max={maximum}
-        step={1}
-        type="number"
-        value={value}
-        placeholder={String(current)}
-        onChange={(event) => onChange(event.target.value)}
-        onBlur={() => onChange(String(current))}
-      />
-      <span>张</span>
-      <button
-        type="button"
-        aria-label="增加生成数量"
-        disabled={current >= maximum}
-        onClick={() => onChange(String(current + 1))}
-      >
-        <Icons.Plus size={14} />
-      </button>
+    <div className="canvas-parameter-control quick-create-count-control">
+      <div className="canvas-parameter-control-head">
+        <span>{quickParameterLabel(presentation)}</span>
+      </div>
+      <div className="quick-create-count-stepper" aria-label={quickParameterLabel(presentation)}>
+        <button
+          type="button"
+          aria-label="减少生成数量"
+          disabled={current <= minimum}
+          onClick={() => onChange(String(current - 1))}
+        >
+          <Icons.Minus size={13} />
+        </button>
+        <input
+          aria-label="生成数量"
+          inputMode="numeric"
+          min={minimum}
+          max={maximum}
+          step={1}
+          type="number"
+          value={value}
+          placeholder={String(current)}
+          onChange={(event) => onChange(event.target.value)}
+          onBlur={(event) => commit(event.target.value)}
+        />
+        <span>{presentation.unit ?? '张'}</span>
+        <button
+          type="button"
+          aria-label="增加生成数量"
+          disabled={current >= maximum}
+          onClick={() => onChange(String(current + 1))}
+        >
+          <Icons.Plus size={13} />
+        </button>
+      </div>
     </div>
+  )
+}
+
+function QuickCreateSizeOption({
+  presentation,
+  option,
+  selected,
+  onChange,
+}: {
+  presentation: CanvasParameterPresentation
+  option: string
+  selected: boolean
+  onChange: (value: string) => void
+}) {
+  const shape = isAspectRatioValue(option) ? aspectRatioShape(option) : null
+  return (
+    <button
+      type="button"
+      className={`quick-create-size-option${selected ? ' is-selected' : ''}`}
+      aria-pressed={selected}
+      title={parameterOptionLabel(presentation, option)}
+      onClick={() => onChange(option)}
+    >
+      <span className="quick-create-size-frame-wrap">
+        {shape ? (
+          <span
+            className={`quick-create-size-frame${shape.adaptive ? ' is-adaptive' : ''}`}
+            style={{ width: shape.width, height: shape.height }}
+          />
+        ) : (
+          <span className="quick-create-size-glyph" aria-hidden="true" />
+        )}
+      </span>
+      <span>{parameterOptionLabel(presentation, option)}</span>
+    </button>
   )
 }
 
 function QuickCreateSizeControl({
   presentation,
   value,
-  parameterScope,
+  customValueHistoryKey,
+  legacyParameterScope,
   onChange,
-  onRemoveCustomSize,
 }: {
   presentation: CanvasParameterPresentation
   value: string
-  parameterScope: string
+  customValueHistoryKey?: string | undefined
+  legacyParameterScope?: string | undefined
   onChange: (value: string) => void
-  onRemoveCustomSize: (fieldName: string, value: string) => void
 }) {
-  const { field, control } = presentation
-  const allOptions = parameterOptionValues(field)
-  const ratioOptions = (control === 'size' ? allOptions : aspectRatioOptions(field)).filter(
-    isAspectRatioValue,
-  )
-  const visualOptions = ratioOptions.slice(0, 6)
-  const overflowRatioOptions = ratioOptions.filter((option) => !visualOptions.includes(option))
-  const resolutionOptions =
-    control === 'size' ? allOptions.filter((option) => !isAspectRatioValue(option)) : []
-  const history = field.allowCustom
-    ? readQuickCreateCustomSizeHistory(parameterScope, field.name)
-    : []
-  const normalizedValue = value.trim()
-  const customPreview =
-    field.allowCustom &&
-    normalizedValue &&
-    !allOptions.includes(normalizedValue) &&
-    isAspectRatioValue(normalizedValue)
-      ? aspectRatioShape(normalizedValue)
-      : null
-  const moreGroups = [
-    ...(overflowRatioOptions.length > 0
-      ? [
-          {
-            label: '画面比例',
-            options: overflowRatioOptions.map((option) => ({
-              value: option,
-              label: field.enumLabels?.[option] ?? option,
-            })),
-          },
-        ]
-      : []),
-    ...(resolutionOptions.length > 0
-      ? [
-          {
-            label: '分辨率',
-            options: resolutionOptions.map((option) => ({
-              value: option,
-              label: field.enumLabels?.[option] ?? option,
-            })),
-          },
-        ]
-      : []),
+  const [moreOpen, setMoreOpen] = useState(false)
+  const allOptions = [
+    ...new Set(
+      (presentation.control === 'size'
+        ? parameterOptionValues(presentation.field)
+        : aspectRatioOptions(presentation.field)) ?? [],
+    ),
   ]
-
-  const shortLabelCounts = new Map<string, number>()
-  for (const option of visualOptions) {
-    const short = aspectRatioShortLabel(option)
-    if (short) shortLabelCounts.set(short, (shortLabelCounts.get(short) ?? 0) + 1)
+  const primaryOptions = allOptions.slice(0, 5)
+  const moreOptions = allOptions.slice(5)
+  const history = [
+    ...new Set([
+      ...readCanvasParameterHistory(customValueHistoryKey, presentation.field.name),
+      ...(legacyParameterScope
+        ? readQuickCreateCustomSizeHistory(legacyParameterScope, presentation.field.name)
+        : []),
+    ]),
+  ]
+  const historyOptions = history.filter((option) => !allOptions.includes(option))
+  const hasMore = moreOptions.length > 0 || history.length > 0 || presentation.field.allowCustom
+  const currentInMore = Boolean(value && !primaryOptions.includes(value))
+  // 当前值落在折叠区（更多尺寸/自定义/历史）时自动展开，用户随后仍可手动收起
+  const [prevCurrentInMore, setPrevCurrentInMore] = useState<boolean | null>(null)
+  if (prevCurrentInMore !== currentInMore) {
+    setPrevCurrentInMore(currentInMore)
+    if (currentInMore) {
+      setMoreOpen(true)
+    }
   }
-
+  const expanded = moreOpen
+  const autoCompleteOptions = [...new Set([...allOptions, ...history])].map((option) => ({
+    value: option,
+    label: parameterOptionLabel(presentation, option),
+  }))
   return (
-    <div className="quick-create-parameter-field is-size-field" data-parameter-name={field.name}>
-      <div className="quick-create-parameter-label is-size-label">
+    <div className="canvas-parameter-control quick-create-size-control">
+      <div className="canvas-parameter-control-head">
         <span>{quickParameterLabel(presentation)}</span>
-        <em>{value ? (field.enumLabels?.[value] ?? value) : '默认'}</em>
+        <small>{value ? parameterOptionLabel(presentation, value) : '默认'}</small>
       </div>
-      {visualOptions.length > 0 && (
-        <div className="quick-create-size-grid" role="group" aria-label="画面比例">
-          {visualOptions.map((option) => {
-            const shape = scaledRatioShape(option, 0.72)
-            return (
-              <button
-                key={option}
-                type="button"
-                className={option === value ? 'is-selected' : ''}
-                aria-pressed={option === value}
-                title={field.enumLabels?.[option] ?? option}
-                onClick={() => onChange(option)}
-              >
-                <span className="quick-create-size-frame-wrap">
-                  <span
-                    className={`quick-create-size-frame${shape.adaptive ? ' is-adaptive' : ''}`}
-                    style={{ width: shape.width, height: shape.height }}
-                  />
-                </span>
-                <span>{ratioButtonLabel(option, field, shortLabelCounts)}</span>
-              </button>
-            )
-          })}
-        </div>
-      )}
-      {(moreGroups.length > 0 || field.allowCustom) && (
-        <div className="quick-create-size-extra">
-          {moreGroups.length > 0 && (
-            <Select
-              className="quick-create-size-more"
-              aria-label="更多尺寸"
-              value={allOptions.includes(value) ? value : undefined}
-              placeholder="更多尺寸"
-              options={moreGroups}
-              onChange={(next) => onChange(String(next))}
-            />
-          )}
-          {field.allowCustom && (
-            <AutoComplete
-              className="quick-create-size-input"
-              value={value || undefined}
-              options={[...new Set([...allOptions, ...history])].map((option) => ({
-                value: option,
-                label: field.enumLabels?.[option] ?? option,
-              }))}
-              allowClear
-              placeholder="自定义尺寸，如 1536x1024"
-              onChange={(next) => onChange(next == null ? '' : String(next))}
-              filterOption={(input, option) =>
-                String(option?.value ?? option?.label ?? '')
-                  .toLowerCase()
-                  .includes(input.toLowerCase())
-              }
-            />
-          )}
-        </div>
-      )}
-      {customPreview && (
-        <div className="quick-create-size-custom-preview" aria-label={`预览尺寸 ${value}`}>
-          <span
-            className={`quick-create-size-frame${customPreview.adaptive ? ' is-adaptive' : ''}`}
-            style={{ width: customPreview.width, height: customPreview.height }}
+      <div className="quick-create-size-grid" role="group" aria-label={presentation.label}>
+        {primaryOptions.map((option) => (
+          <QuickCreateSizeOption
+            key={option}
+            presentation={presentation}
+            option={option}
+            selected={option === value}
+            onChange={onChange}
           />
-          <span>{value}</span>
-        </div>
-      )}
-      {history.length > 0 && (
-        <div className="quick-create-size-history" aria-label="已保存的自定义尺寸">
-          {history.map((savedValue) => {
-            const shape = scaledRatioShape(savedValue, 0.5)
-            return (
-              <span
-                className={`quick-create-size-history-item${savedValue === value ? ' is-selected' : ''}`}
-                key={savedValue}
-              >
-                <button type="button" onClick={() => onChange(savedValue)}>
-                  <span
-                    className="quick-create-size-history-frame"
-                    style={{ width: shape.width, height: shape.height }}
-                  />
-                  {savedValue}
-                </button>
-                <button
-                  type="button"
-                  aria-label={`删除自定义尺寸 ${savedValue}`}
-                  onClick={() => onRemoveCustomSize(field.name, savedValue)}
-                >
-                  <Icons.X size={11} />
-                </button>
-              </span>
-            )
-          })}
-        </div>
+        ))}
+      </div>
+      {hasMore && (
+        <>
+          <button
+            type="button"
+            className={`quick-create-size-more-toggle${expanded ? ' is-open' : ''}`}
+            aria-expanded={expanded}
+            onClick={() => setMoreOpen((current) => !current)}
+          >
+            <span>
+              <Icons.ChevronDown size={12} />
+              更多配置
+            </span>
+            {moreOptions.length > 0 && <small>{`+${moreOptions.length}`}</small>}
+          </button>
+          {expanded && (
+            <div className="quick-create-size-more-panel">
+              {moreOptions.length > 0 && (
+                <div className="quick-create-size-more-options" role="group" aria-label="更多尺寸">
+                  {moreOptions.map((option) => (
+                    <QuickCreateSizeOption
+                      key={option}
+                      presentation={presentation}
+                      option={option}
+                      selected={option === value}
+                      onChange={onChange}
+                    />
+                  ))}
+                </div>
+              )}
+              {presentation.field.allowCustom && (
+                <AutoComplete
+                  className="quick-create-size-input"
+                  aria-label="自定义或历史尺寸"
+                  value={value || undefined}
+                  options={autoCompleteOptions}
+                  allowClear
+                  placeholder="输入自定义尺寸，如 1536x1024"
+                  onChange={(next) => onChange(next == null ? '' : String(next))}
+                  filterOption={(input, option) =>
+                    String(option?.value ?? option?.label ?? '')
+                      .toLowerCase()
+                      .includes(input.toLowerCase())
+                  }
+                />
+              )}
+              {historyOptions.length > 0 && (
+                <div className="quick-create-size-history" aria-label="缓存尺寸">
+                  <span>已使用</span>
+                  {historyOptions.map((option) => (
+                    <button
+                      type="button"
+                      key={option}
+                      className={option === value ? 'is-selected' : ''}
+                      onClick={() => onChange(option)}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
@@ -363,125 +408,62 @@ function QuickCreateSizeControl({
 function QuickCreateParameterControl({
   presentation,
   value,
-  parameterScope,
+  customValueHistoryKey,
+  legacyParameterScope,
   onChange,
-  onRemoveCustomSize,
 }: {
   presentation: CanvasParameterPresentation
   value: string
-  parameterScope: string
+  customValueHistoryKey?: string | undefined
+  legacyParameterScope?: string | undefined
   onChange: (value: string) => void
-  onRemoveCustomSize: (fieldName: string, value: string) => void
 }) {
-  const { field, control } = presentation
-  if (control === 'aspect-ratio' || control === 'size') {
+  if (isQualityPresentation(presentation) && parameterOptionValues(presentation.field).length > 0) {
+    return (
+      <QuickCreateQualityControl presentation={presentation} value={value} onChange={onChange} />
+    )
+  }
+  if (presentation.control === 'count') {
+    return <QuickCreateCountControl presentation={presentation} value={value} onChange={onChange} />
+  }
+  if (presentation.control === 'size' || presentation.control === 'aspect-ratio') {
     return (
       <QuickCreateSizeControl
         presentation={presentation}
         value={value}
-        parameterScope={parameterScope}
+        customValueHistoryKey={customValueHistoryKey}
+        legacyParameterScope={legacyParameterScope}
         onChange={onChange}
-        onRemoveCustomSize={onRemoveCustomSize}
       />
     )
   }
-  if (control === 'count') {
-    return (
-      <div className="quick-create-parameter-field" data-parameter-name={field.name}>
-        <div className="quick-create-parameter-label">
-          <span>{quickParameterLabel(presentation)}</span>
-        </div>
-        <QuickCreateCountStepper presentation={presentation} value={value} onChange={onChange} />
-      </div>
-    )
-  }
-
-  const options = parameterOptionValues(field).map((option) => ({
-    value: option,
-    label: field.enumLabels?.[option] ?? option,
-  }))
-  const isNumber = field.type === 'integer' || field.type === 'number'
-  const isAutocomplete = control === 'autocomplete' || field.allowCustom === true
   return (
-    <div className="quick-create-parameter-field" data-parameter-name={field.name}>
-      <div className="quick-create-parameter-label">
-        <span>{quickParameterLabel(presentation)}</span>
-      </div>
-      {isAutocomplete ? (
-        <AutoComplete
-          value={value || undefined}
-          options={options}
-          allowClear
-          placeholder={field.placeholder ?? '默认'}
-          onChange={(next) => onChange(next == null ? '' : String(next))}
-          filterOption={(input, option) =>
-            String(option?.label ?? option?.value ?? '')
-              .toLowerCase()
-              .includes(input.toLowerCase())
-          }
-        />
-      ) : options.length > 0 || control === 'boolean' ? (
-        <Select
-          value={value || undefined}
-          options={
-            control === 'boolean'
-              ? [
-                  { value: 'true', label: '开启' },
-                  { value: 'false', label: '关闭' },
-                ]
-              : options
-          }
-          allowClear
-          placeholder="默认"
-          onChange={(next) => onChange(next == null ? '' : String(next))}
-        />
-      ) : (
-        <Input
-          value={value}
-          type={isNumber ? 'number' : 'text'}
-          min={isNumber ? field.minimum : undefined}
-          max={isNumber ? field.maximum : undefined}
-          step={isNumber && field.type === 'integer' ? 1 : field.multipleOf}
-          placeholder={field.placeholder ?? '默认'}
-          onChange={(event) => onChange(event.target.value)}
-        />
-      )}
-    </div>
+    <CanvasParameterControl
+      presentation={presentation}
+      value={value}
+      customValueHistoryKey={customValueHistoryKey}
+      onChange={onChange}
+    />
   )
 }
 
 function QuickCreateParameterPanel({
   fields,
   values,
-  parameterScope,
+  customValueHistoryKey,
+  legacyParameterScope,
   onChange,
 }: {
   fields: ReturnType<typeof schemaFields>
   values: Record<string, string>
-  parameterScope: string
+  customValueHistoryKey?: string | undefined
+  legacyParameterScope?: string | undefined
   onChange: (name: string, value: string) => void
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [customSizeHistoryVersion, setCustomSizeHistoryVersion] = useState(0)
   const groups = useMemo(() => {
-    const partitioned = partitionParameterFields(fields)
-    const isQuality = (presentation: CanvasParameterPresentation) =>
-      /^(image|video)?quality$/i.test(presentation.field.name.replace(/[^a-z]/gi, ''))
-    return {
-      common: partitioned.common.filter((presentation) => !isQuality(presentation)),
-      advanced: [
-        ...partitioned.advanced,
-        ...partitioned.common.filter((presentation) => isQuality(presentation)),
-      ],
-    }
+    return partitionParameterFields(fields)
   }, [fields])
-  const removeCustomSize = useCallback(
-    (fieldName: string, value: string) => {
-      removeQuickCreateCustomSize(parameterScope, fieldName, value)
-      setCustomSizeHistoryVersion((current) => current + 1)
-    },
-    [parameterScope],
-  )
   const advancedSummary = useMemo(() => {
     const parts: string[] = []
     for (const presentation of groups.advanced) {
@@ -499,14 +481,22 @@ function QuickCreateParameterPanel({
     <div className="quick-create-parameter-panel">
       <div className="quick-create-parameter-grid">
         {groups.common.map((presentation) => (
-          <QuickCreateParameterControl
-            key={`${presentation.field.name}-${customSizeHistoryVersion}`}
-            presentation={presentation}
-            value={values[presentation.field.name] ?? ''}
-            parameterScope={parameterScope}
-            onChange={(next) => onChange(presentation.field.name, next)}
-            onRemoveCustomSize={removeCustomSize}
-          />
+          <div
+            className={`quick-create-parameter-cell${
+              presentation.control === 'aspect-ratio' || presentation.control === 'size'
+                ? ' is-wide'
+                : ''
+            }`}
+            key={presentation.field.name}
+          >
+            <QuickCreateParameterControl
+              presentation={presentation}
+              value={values[presentation.field.name] ?? ''}
+              customValueHistoryKey={customValueHistoryKey}
+              legacyParameterScope={legacyParameterScope}
+              onChange={(next) => onChange(presentation.field.name, next)}
+            />
+          </div>
         ))}
         {groups.advanced.length > 0 && (
           <button
@@ -525,14 +515,22 @@ function QuickCreateParameterPanel({
       {advancedOpen && groups.advanced.length > 0 && (
         <div className="quick-create-parameter-grid is-advanced">
           {groups.advanced.map((presentation) => (
-            <QuickCreateParameterControl
-              key={`${presentation.field.name}-${customSizeHistoryVersion}`}
-              presentation={presentation}
-              value={values[presentation.field.name] ?? ''}
-              parameterScope={parameterScope}
-              onChange={(next) => onChange(presentation.field.name, next)}
-              onRemoveCustomSize={removeCustomSize}
-            />
+            <div
+              className={`quick-create-parameter-cell${
+                presentation.control === 'aspect-ratio' || presentation.control === 'size'
+                  ? ' is-wide'
+                  : ''
+              }`}
+              key={presentation.field.name}
+            >
+              <QuickCreateParameterControl
+                presentation={presentation}
+                value={values[presentation.field.name] ?? ''}
+                customValueHistoryKey={customValueHistoryKey}
+                legacyParameterScope={legacyParameterScope}
+                onChange={(next) => onChange(presentation.field.name, next)}
+              />
+            </div>
           ))}
         </div>
       )}
@@ -612,6 +610,15 @@ async function preparePastedImage(file: File, index: number): Promise<QuickInput
   }
 }
 
+/** 反推固定指令；用户在提示词框的补充文字会拼接在其后 */
+const REVERSE_BASE_INSTRUCTION =
+  '请分析输入图片并反推出可直接用于图片生成的详细提示词。输出主体、构图、镜头、光线、色彩、材质和风格，直接给出提示词，不要解释。'
+
+function buildReversePrompt(extraInstruction: string): string {
+  const extra = extraInstruction.trim()
+  return extra ? `${REVERSE_BASE_INSTRUCTION}\n用户补充要求：${extra}` : REVERSE_BASE_INSTRUCTION
+}
+
 function operationFor(mode: QuickCreateMode, inputs: readonly QuickInput[]): CanvasOperationType {
   if (mode === 'reverse') return 'image_prompt_reverse'
   if (mode === 'image') return inputs.length > 0 ? 'image_edit' : 'text_to_image'
@@ -656,7 +663,6 @@ export function QuickCreateView() {
   const [activeTab, setActiveTab] = useState<'compose' | 'tasks'>('compose')
   const [mode, setMode] = useState<QuickCreateMode>(savedPreferences?.mode ?? 'image')
   const [prompt, setPrompt] = useState('')
-  const [negativePrompt, setNegativePrompt] = useState('')
   const [inputs, setInputs] = useState<QuickInput[]>([])
   const [tasks, setTasks] = useState<QuickCreateTaskRecord[]>(readQuickCreateTasks)
   const [models, setModels] = useState<CanvasMediaModelSummary[]>([])
@@ -668,14 +674,18 @@ export function QuickCreateView() {
   const [modelsLoading, setModelsLoading] = useState(true)
   const [promptLibrary, setPromptLibrary] = useState<GlobalPromptLibraryItem[]>([])
   const [promptPickerOpen, setPromptPickerOpen] = useState(false)
-  const [negativeOpen, setNegativeOpen] = useState(false)
   const [promptSearch, setPromptSearch] = useState('')
   const [pendingSubmissions, setPendingSubmissions] = useState(0)
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null)
+  const [dragOverForm, setDragOverForm] = useState(false)
   const [paramReadyScope, setParamReadyScope] = useState('')
   const taskIdsRef = useRef(new Set(tasks.map((task) => task.id)))
   const hydratingParamsRef = useRef(false)
+
+  const invalidateFocusedTask = useCallback(() => {
+    setFocusedTaskId(null)
+  }, [])
 
   const updateTask = useCallback((id: string, patch: Partial<QuickCreateTaskRecord>) => {
     setTasks((current) => {
@@ -755,6 +765,17 @@ export function QuickCreateView() {
       }),
     [capabilityId, effectiveModelKey, operation],
   )
+  const parameterHistoryKey = useMemo(
+    () =>
+      effectiveModelKey
+        ? canvasParameterHistoryScope({
+            operation,
+            modelKey: effectiveModelKey,
+            ...(capabilityId ? { capabilityId } : {}),
+          })
+        : undefined,
+    [capabilityId, effectiveModelKey, operation],
+  )
   const filteredPrompts = useMemo(() => {
     const keyword = promptSearch.trim().toLowerCase()
     return promptLibrary.filter(
@@ -772,7 +793,7 @@ export function QuickCreateView() {
     [tasks],
   )
   const focusedTask = useMemo(
-    () => (focusedTaskId ? tasks.find((task) => task.id === focusedTaskId) : undefined) ?? tasks[0],
+    () => (focusedTaskId ? tasks.find((task) => task.id === focusedTaskId) : undefined),
     [focusedTaskId, tasks],
   )
 
@@ -936,12 +957,7 @@ export function QuickCreateView() {
 
   const handleChooseFiles = useCallback(
     async (filePaths: string[]) => {
-      const allowedKind = mode === 'video' ? undefined : 'image'
-      const selectedPaths = allowedKind
-        ? filePaths.filter((filePath) => /\.(png|jpe?g|webp|gif|bmp|heic|heif)$/i.test(filePath))
-        : filePaths.filter((filePath) =>
-            /\.(png|jpe?g|webp|gif|bmp|heic|heif|mp4|mov|webm|m4v)$/i.test(filePath),
-          )
+      const selectedPaths = selectQuickCreateInputPaths(filePaths, mode)
       if (selectedPaths.length === 0) {
         message.warning(mode === 'video' ? '请选择图片或视频素材' : '请选择图片素材')
         return
@@ -954,20 +970,92 @@ export function QuickCreateView() {
         const prepared = await Promise.all(
           selectedPaths
             .slice(0, mode === 'reverse' ? 1 : 6)
-            .map((filePath) =>
-              prepareInputFile(
-                filePath,
-                /\.(mp4|mov|webm|m4v)$/i.test(filePath) ? 'video' : 'image',
-              ),
-            ),
+            .map((filePath) => prepareInputFile(filePath, quickInputKindForPath(filePath))),
         )
+        invalidateFocusedTask()
         setInputs(mode === 'reverse' ? prepared.slice(0, 1) : prepared)
       } catch (error) {
         message.error(error instanceof Error ? error.message : '读取输入素材失败')
       }
     },
-    [mode],
+    [invalidateFocusedTask, mode],
   )
+
+  /** 拖入素材与粘贴同一语义：反推整组替换，其余模式追加并封顶 6 个 */
+  const handleDropInput = useCallback(
+    async (filePaths: string[]) => {
+      const selectedPaths = selectQuickCreateInputPaths(filePaths, mode)
+      if (selectedPaths.length === 0) {
+        message.warning(mode === 'video' ? '仅支持拖入图片或视频素材' : '仅支持拖入图片素材')
+        return
+      }
+      if (mode === 'reverse' && selectedPaths.length > 1) {
+        message.warning('图片反推仅支持一张输入图片')
+        return
+      }
+      const limit = mode === 'reverse' ? 1 : 6
+      try {
+        const prepared = await Promise.all(
+          selectedPaths
+            .slice(0, limit)
+            .map((filePath) => prepareInputFile(filePath, quickInputKindForPath(filePath))),
+        )
+        invalidateFocusedTask()
+        setInputs((current) =>
+          mode === 'reverse' ? prepared.slice(0, 1) : [...current, ...prepared].slice(0, limit),
+        )
+        message.success(`已添加 ${prepared.length} 个素材`)
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '读取拖入素材失败')
+      }
+    },
+    [invalidateFocusedTask, mode],
+  )
+
+  const dragDepthRef = useRef(0)
+
+  const handleFormDragEnter = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDataTransfer(event.dataTransfer)) return
+    event.preventDefault()
+    dragDepthRef.current += 1
+    setDragOverForm(true)
+  }, [])
+
+  const handleFormDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDataTransfer(event.dataTransfer)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleFormDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDataTransfer(event.dataTransfer)) return
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+    if (dragDepthRef.current === 0) setDragOverForm(false)
+  }, [])
+
+  const handleFormDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!hasFileDataTransfer(event.dataTransfer)) return
+      event.preventDefault()
+      event.stopPropagation()
+      dragDepthRef.current = 0
+      setDragOverForm(false)
+      const paths = getDataTransferFilePaths(event.dataTransfer)
+      if (paths.length === 0) {
+        if (isUnresolvableFileDrop(event.dataTransfer, paths)) {
+          message.error('无法读取拖入的文件，请从访达或桌面拖拽本地文件')
+        }
+        return
+      }
+      void handleDropInput(paths)
+    },
+    [handleDropInput],
+  )
+
+  /** 拖拽落点不在表单时也要阻止默认行为，否则 Electron 会用窗口直接打开该文件 */
+  const handleRootDragGuard = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (hasFileDataTransfer(event.dataTransfer)) event.preventDefault()
+  }, [])
 
   const handlePasteInput = useCallback(
     async (event: ReactClipboardEvent<HTMLDivElement>) => {
@@ -985,6 +1073,7 @@ export function QuickCreateView() {
         )
         const prepared = pasted.filter((item): item is QuickInput => item != null)
         if (prepared.length === 0) return
+        invalidateFocusedTask()
         setInputs((current) =>
           mode === 'reverse' ? prepared.slice(0, 1) : [...current, ...prepared].slice(0, 6),
         )
@@ -993,7 +1082,7 @@ export function QuickCreateView() {
         message.error(error instanceof Error ? error.message : '粘贴图片失败')
       }
     },
-    [mode],
+    [invalidateFocusedTask, mode],
   )
 
   const handlePickFiles = useCallback(async () => {
@@ -1037,48 +1126,89 @@ export function QuickCreateView() {
   }, [handleChooseFiles, mode])
 
   const handleModeChange = (nextMode: QuickCreateMode) => {
+    invalidateFocusedTask()
     setMode(nextMode)
     setPrompt('')
-    setNegativePrompt('')
-    setNegativeOpen(false)
     setInputs([])
     setPromptPickerOpen(false)
   }
 
-  const saveCurrentPrompt = useCallback(async () => {
-    const text = prompt.trim()
-    if (!text) {
-      message.warning('请输入提示词后再保存')
-      return
+  const resetForm = useCallback(() => {
+    const defaults: Record<string, unknown> = {
+      ...operationDefaultModelParams(operation, selectedModel),
+      ...(selectedCapability?.defaults ?? {}),
     }
-    try {
-      const library = await readGlobalPromptLibrary()
-      const existing = library.items.find((item) => item.text.trim() === text)
-      const timestamp = now()
-      const item: GlobalPromptLibraryItem = existing
-        ? { ...existing, usageCount: existing.usageCount + 1, updatedAt: timestamp }
-        : {
-            id: `quick-create-${Date.now()}`,
-            title: titleForPrompt(text, mode),
-            text,
-            category: '快速创作',
-            tags: [modeLabel(mode)],
-            coverUrl: null,
-            coverMimeType: null,
-            usageCount: 1,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          }
-      const next = existing
-        ? library.items.map((candidate) => (candidate.id === existing.id ? item : candidate))
-        : [item, ...library.items]
-      await writeGlobalPromptLibrary({ ...library, items: next })
-      setPromptLibrary(next)
-      message.success(existing ? '已记录本次使用' : '已保存到提示词库')
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '保存提示词失败')
+    const nextParams: Record<string, string> = {}
+    for (const field of fields) {
+      const value = resolveInitialModelParamDraftValue({
+        operation,
+        field,
+        fieldName: field.name,
+        presetParams: {},
+        existingParams: {},
+        defaultParams: defaults,
+      })
+      if (value) nextParams[field.name] = value
     }
-  }, [mode, prompt])
+    invalidateFocusedTask()
+    setPrompt('')
+    setInputs([])
+    setPromptPickerOpen(false)
+    setPromptSearch('')
+    setModelParamDraft(nextParams)
+  }, [fields, invalidateFocusedTask, operation, selectedCapability, selectedModel])
+
+  const savePromptToLibrary = useCallback(
+    async (
+      value: string,
+      promptMode: QuickCreateMode,
+      cover: { url: string; mimeType: string } | null,
+    ) => {
+      const text = value.trim()
+      if (!text) {
+        message.warning('请输入提示词后再保存')
+        return
+      }
+      try {
+        const library = await readGlobalPromptLibrary()
+        const existing = library.items.find((item) => item.text.trim() === text)
+        const timestamp = now()
+        // 已有条目保留原封面；旧条目没存过封面时用本次产物图补上
+        const coverPair = existing?.coverUrl
+          ? { url: existing.coverUrl, mimeType: existing.coverMimeType }
+          : cover
+        const item: GlobalPromptLibraryItem = existing
+          ? {
+              ...existing,
+              usageCount: existing.usageCount + 1,
+              updatedAt: timestamp,
+              coverUrl: coverPair?.url ?? null,
+              coverMimeType: coverPair?.mimeType ?? null,
+            }
+          : {
+              id: `quick-create-${Date.now()}`,
+              title: titleForPrompt(text, promptMode),
+              text,
+              category: '快速创作',
+              tags: [modeLabel(promptMode)],
+              coverUrl: coverPair?.url ?? null,
+              coverMimeType: coverPair?.mimeType ?? null,
+              usageCount: 1,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            }
+        const next = existing
+          ? library.items.map((candidate) => (candidate.id === existing.id ? item : candidate))
+          : [item, ...library.items]
+        await writeGlobalPromptLibrary({ ...library, items: next })
+        setPromptLibrary(next)
+        message.success(existing ? '已记录本次使用' : '已保存到提示词库')
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : '保存提示词失败')
+      }
+    },
+    [],
+  )
 
   const submitTask = useCallback(
     async (source?: QuickCreateTaskRecord) => {
@@ -1116,9 +1246,6 @@ export function QuickCreateView() {
         mode: taskMode,
         operation: taskOperation,
         prompt: taskPrompt,
-        ...((source?.negativePrompt ?? negativePrompt.trim())
-          ? { negativePrompt: source?.negativePrompt ?? negativePrompt.trim() }
-          : {}),
         inputFiles: taskInputs.map((input) => {
           const { id: _id, name: _name, previewUrl: _previewUrl, ...file } = input as QuickInput
           return file
@@ -1144,8 +1271,7 @@ export function QuickCreateView() {
         if (taskMode === 'reverse') {
           const response = (await window.spark.invoke('canvas:task:generate-text', {
             operation: 'image_prompt_reverse',
-            prompt:
-              '请分析输入图片并反推出可直接用于图片生成的详细提示词。输出主体、构图、镜头、光线、色彩、材质和风格，直接给出提示词，不要解释。',
+            prompt: buildReversePrompt(record.prompt),
             inputFiles: record.inputFiles,
             ...(record.providerProfileId ? { providerProfileId: record.providerProfileId } : {}),
             ...(record.modelId ? { modelId: record.modelId } : {}),
@@ -1166,7 +1292,6 @@ export function QuickCreateView() {
           const response = (await window.spark.invoke('canvas:task:create-media', {
             operation: taskOperation,
             prompt: record.prompt,
-            ...(record.negativePrompt ? { negativePrompt: record.negativePrompt } : {}),
             inputFiles: record.inputFiles,
             ...(record.providerProfileId ? { providerProfileId: record.providerProfileId } : {}),
             ...(record.manifestId ? { manifestId: record.manifestId } : {}),
@@ -1214,26 +1339,10 @@ export function QuickCreateView() {
           }
         }
         if (!source && requestAccepted && taskMode !== 'reverse') {
-          for (const field of fields) {
-            if (
-              field.allowCustom &&
-              (field.name === 'size' || /ratio|width|height/i.test(field.name))
-            ) {
-              recordQuickCreateCustomSize(
-                parameterScope,
-                field.name,
-                params[field.name],
-                field.enumValues,
-              )
-            }
-          }
+          recordCanvasCustomParameterHistory(parameterHistoryKey, fields, params)
         }
         if (!source) {
           setPrompt((current) => (current.trim() === taskPrompt ? '' : current))
-          const submittedNegativePrompt = negativePrompt.trim()
-          setNegativePrompt((current) =>
-            current.trim() === submittedNegativePrompt ? '' : current,
-          )
         }
       } catch (error) {
         updateTask(taskId, {
@@ -1253,20 +1362,21 @@ export function QuickCreateView() {
       fields,
       mode,
       modelParamDraft,
-      negativePrompt,
       prompt,
       requestInputs,
       selectedModel,
       effectiveTextModelId,
       effectiveTextProviderId,
-      parameterScope,
+      parameterHistoryKey,
       updateTask,
     ],
   )
 
   const retryTask = useCallback(
     (task: QuickCreateTaskRecord) => {
-      void submitTask(task)
+      // 成功任务重试新建记录（复用原 id 会触发替换语义清掉旧产物）；
+      // 失败/已取消任务无产物可丢失，维持原地替换。
+      void submitTask(task.status === 'succeeded' ? retryTaskRecord(task) : task)
     },
     [submitTask],
   )
@@ -1285,13 +1395,32 @@ export function QuickCreateView() {
   )
 
   const deleteTask = (taskId: string) => {
+    const task = tasks.find((item) => item.id === taskId)
     Modal.confirm({
-      title: '移除这条创作记录？',
-      content: '只会移除快速创作历史，不会删除已经生成的图片或视频文件。',
-      okText: '移除记录',
+      title: '删除这条创作任务？',
+      content:
+        '将同时删除本次任务的输入拷贝与生成产物文件；你的原始文件和共享素材（如粘贴图）不会被删除。',
+      okText: '删除任务',
       cancelText: '取消',
       okButtonProps: { danger: true },
-      onOk: () => {
+      onOk: async () => {
+        // 先按主进程白名单策略清理专属文件（产物 + quick-create-inputs 输入拷贝），再移除记录
+        try {
+          await window.spark.invoke('quick-create:cleanup-task-resources', {
+            inputPaths: (task?.inputFiles ?? [])
+              .map((input) => input.path)
+              .filter((path): path is string => Boolean(path)),
+            assetPaths: (task?.assets ?? [])
+              .map((asset) => asset.filePath)
+              .filter((path): path is string => Boolean(path)),
+          })
+        } catch (error) {
+          message.warning(
+            `产物文件清理失败，已仅移除任务记录：${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+        }
         taskIdsRef.current.delete(taskId)
         setTasks((current) => {
           const next = current.filter((task) => task.id !== taskId)
@@ -1319,7 +1448,6 @@ export function QuickCreateView() {
     (task: QuickCreateTaskRecord) => {
       setMode(task.mode)
       setPrompt(task.prompt)
-      setNegativePrompt(task.negativePrompt ?? '')
       setInputs(task.inputFiles.map(quickInputFromTaskFile))
       const taskParams = Object.fromEntries(
         Object.entries(task.modelParams).map(([name, value]) => [name, String(value)]),
@@ -1362,7 +1490,8 @@ export function QuickCreateView() {
       } else if (reusedModel) {
         setModelKey(reusedModelKey)
       }
-      setFocusedTaskId(task.id)
+      // 复用只回填新草稿，不把被复用任务的旧产物继续显示在创作结果区。
+      setFocusedTaskId(null)
       setActiveTab('compose')
       setExpandedTaskId(null)
       window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -1375,13 +1504,12 @@ export function QuickCreateView() {
     setExpandedTaskId((current) => (current === task.id ? null : task.id))
   }, [])
 
-  const handleFocusTaskInWorkbench = useCallback((task: QuickCreateTaskRecord) => {
-    setFocusedTaskId(task.id)
-    setActiveTab('compose')
-  }, [])
-
   return (
-    <div className="quick-create-view">
+    <div
+      className="quick-create-view"
+      onDragOver={handleRootDragGuard}
+      onDrop={handleRootDragGuard}
+    >
       <div
         className={`quick-create-tabbar${t.sidebarHidden ? ' is-sidebar-hidden' : ''}`}
         onDoubleClick={() => {
@@ -1389,23 +1517,15 @@ export function QuickCreateView() {
         }}
       >
         {t.sidebarHidden && <SidebarExpandButton />}
-        <nav className="quick-create-tabs" role="tablist" aria-label="快速创作工作区">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'compose'}
-            className={activeTab === 'compose' ? 'is-active' : ''}
-            onClick={() => setActiveTab('compose')}
-          >
-            <Icons.Brush size={14} /> 创作表单
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'tasks'}
-            className={activeTab === 'tasks' ? 'is-active' : ''}
-            onClick={() => setActiveTab('tasks')}
-          >
+        <div className="quick-create-brand">
+          <span className="quick-create-brand-mark">
+            <Icons.Image size={16} />
+          </span>
+          <strong>快速创作</strong>
+          <span>图片与视频</span>
+        </div>
+        <nav className="quick-create-tabs" aria-label="快速创作任务">
+          <button type="button" onClick={() => setActiveTab('tasks')}>
             <Icons.ListTodo size={14} /> 任务管理
             {stats.running > 0 && <small>{stats.running}</small>}
           </button>
@@ -1413,153 +1533,64 @@ export function QuickCreateView() {
       </div>
 
       <main className="quick-create-main">
-        {activeTab === 'compose' ? (
-          <section className="quick-create-workbench" aria-label="创作配置与输出">
-            <div className="quick-create-form-pane">
-              <div className="quick-create-mode-rail" role="tablist" aria-label="创作模式">
-                {MODE_ITEMS.map((item) => {
-                  const Icon = item.icon
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      role="tab"
-                      aria-selected={mode === item.id}
-                      className={`quick-create-mode${mode === item.id ? ' is-active' : ''}`}
-                      onClick={() => handleModeChange(item.id)}
-                    >
-                      <Icon size={17} />
-                      <strong>{item.label}</strong>
-                    </button>
-                  )
-                })}
+        <section className="quick-create-workbench" aria-label="创作配置与输出">
+          <div
+            className={`quick-create-form-pane${dragOverForm ? ' is-drag-over' : ''}`}
+            onDragEnter={handleFormDragEnter}
+            onDragOver={handleFormDragOver}
+            onDragLeave={handleFormDragLeave}
+            onDrop={handleFormDrop}
+          >
+            <div className="quick-create-mode-rail" role="tablist" aria-label="创作模式">
+              <div className="quick-create-mode-segment">
+                {MODE_ITEMS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === item.id}
+                    className={`quick-create-mode${mode === item.id ? ' is-active' : ''}`}
+                    onClick={() => handleModeChange(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
               </div>
+              <span className="quick-create-mode-note">
+                {mode === 'reverse'
+                  ? '上传 1 张图片，可补充文字要求，反推可编辑提示词'
+                  : mode === 'image'
+                    ? inputs.length > 0
+                      ? '已添加参考素材，当前按图像编辑处理'
+                      : '添加参考素材后自动切换为图像编辑'
+                    : '可添加首帧或参考素材生成视频'}
+              </span>
+            </div>
 
-              <div className="quick-create-form">
-                <div className="quick-create-prompt-wrap">
-                  <textarea
-                    id="quick-create-prompt"
-                    className="quick-create-prompt"
-                    value={prompt}
-                    onChange={(event) => setPrompt(event.target.value)}
-                    aria-label="提示词"
-                    placeholder={
-                      mode === 'reverse'
-                        ? '选择一张图片后开始反推；这里不需要填写提示词'
-                        : mode === 'video'
-                          ? '描述主体、动作、镜头运动和时长，例如：雨夜街头，霓虹倒影，镜头缓慢推进…'
-                          : '描述主体、构图、光线和风格，例如：清晨窗边的产品静物，柔和侧光…'
-                    }
-                    disabled={mode === 'reverse'}
-                  />
-                  {mode !== 'reverse' && (
-                    <div className="quick-create-prompt-tools">
-                      <button
-                        type="button"
-                        title="从提示词库插入"
-                        aria-label="从提示词库插入"
-                        onClick={() => {
-                          setPromptPickerOpen((value) => !value)
-                          setPromptSearch('')
-                        }}
-                      >
-                        <Icons.Book size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        title="保存提示词"
-                        aria-label="保存提示词"
-                        onClick={() => void saveCurrentPrompt()}
-                      >
-                        <Icons.Plus size={14} />
-                      </button>
-                    </div>
-                  )}
-                  {promptPickerOpen && mode !== 'reverse' && (
-                    <div className="quick-create-prompt-picker">
-                      <div className="quick-create-picker-head">
-                        <strong>提示词库</strong>
-                        <span>{promptLibrary.length} 条</span>
-                        <button
-                          type="button"
-                          aria-label="关闭提示词库"
-                          onClick={() => setPromptPickerOpen(false)}
-                        >
-                          <Icons.X size={14} />
-                        </button>
-                      </div>
-                      <Input
-                        prefix={<Icons.Search size={14} />}
-                        value={promptSearch}
-                        onChange={(event) => setPromptSearch(event.target.value)}
-                        placeholder="搜索标题、内容或标签"
-                        allowClear
-                      />
-                      <div className="quick-create-picker-list">
-                        {filteredPrompts.length === 0 ? (
-                          <span className="quick-create-picker-empty">还没有匹配的提示词</span>
-                        ) : (
-                          filteredPrompts.slice(0, 8).map((item) => (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => {
-                                setPrompt(item.text)
-                                setPromptPickerOpen(false)
-                              }}
-                            >
-                              <strong>{item.title}</strong>
-                              <small>{item.text}</small>
-                              <em>{item.usageCount} 次使用</em>
-                            </button>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {mode !== 'reverse' && (negativeOpen || negativePrompt.trim()) && (
-                    <div className="quick-create-negative-inline">
-                      <Input
-                        aria-label="反向提示词"
-                        value={negativePrompt}
-                        onChange={(event) => setNegativePrompt(event.target.value)}
-                        placeholder="反向提示词：模糊、低清、文字水印…"
-                        variant="borderless"
-                        autoComplete="off"
-                      />
-                      <button
-                        type="button"
-                        title="收起反向提示词"
-                        aria-label="收起反向提示词"
-                        onClick={() => {
-                          setNegativeOpen(false)
-                          setNegativePrompt('')
-                        }}
-                      >
-                        <Icons.X size={12} />
-                      </button>
-                    </div>
-                  )}
-                  {mode !== 'reverse' && !negativeOpen && !negativePrompt.trim() && (
-                    <div className="quick-create-negative-bar">
-                      <button type="button" onClick={() => setNegativeOpen(true)}>
-                        <Icons.EyeOff size={11} />
-                        反向提示词
-                      </button>
-                    </div>
-                  )}
+            {/* 粘贴监听挂在整个表单：焦点在提示词、素材区或任意控件时粘贴图片都能作为素材加入 */}
+            <div className="quick-create-form" onPaste={(event) => void handlePasteInput(event)}>
+              <section className="quick-create-reference-section" aria-label="参考素材">
+                <div className="quick-create-section-head">
+                  <div>
+                    <strong>{mode === 'reverse' ? '输入图片' : '参考素材'}</strong>
+                    <span>
+                      {mode === 'reverse'
+                        ? '支持粘贴或从本地选择，反推可编辑提示词'
+                        : '可选 · 支持粘贴或从本地选择'}
+                    </span>
+                  </div>
+                  <small>
+                    {inputs.length}/{mode === 'reverse' ? 1 : 6}
+                  </small>
                 </div>
-
                 <div
                   className="quick-create-input-zone"
-                  tabIndex={0}
                   role="group"
                   aria-label={
                     mode === 'reverse'
                       ? '输入图片，仅支持 1 张，可直接粘贴'
                       : '参考素材，可选，可直接粘贴图片'
                   }
-                  onPaste={(event) => void handlePasteInput(event)}
                 >
                   <div className="quick-create-input-list">
                     {inputs.map((input) => (
@@ -1573,9 +1604,10 @@ export function QuickCreateView() {
                         <button
                           type="button"
                           aria-label={`移除 ${input.name}`}
-                          onClick={() =>
+                          onClick={() => {
+                            invalidateFocusedTask()
                             setInputs((current) => current.filter((item) => item.id !== input.id))
-                          }
+                          }}
                         >
                           <Icons.X size={12} />
                         </button>
@@ -1588,113 +1620,288 @@ export function QuickCreateView() {
                         aria-label="添加素材，也可直接粘贴"
                         onClick={() => void handlePickFiles()}
                       >
-                        <Icons.ImagePlus size={16} />
+                        <Icons.ImagePlus size={17} />
+                        <span>添加素材</span>
                       </button>
                     )}
                   </div>
                 </div>
+              </section>
 
-                {mode === 'reverse' ? (
-                  <div className="quick-create-control-row quick-create-text-model-row">
-                    <label htmlFor="quick-create-provider">视觉理解模型</label>
-                    <Select
-                      id="quick-create-provider"
-                      value={effectiveTextProviderId || undefined}
-                      placeholder="选择 Provider"
-                      options={textProviders.map((provider) => ({
-                        label: provider.name,
-                        value: provider.id,
-                      }))}
-                      onChange={(value) => {
-                        setTextProviderId(value ?? '')
-                        const provider = textProviders.find((item) => item.id === value)
-                        setTextModelId(provider?.defaultModel ?? '')
-                      }}
-                    />
-                    <Select
-                      aria-label="选择视觉理解模型"
-                      value={effectiveTextModelId || undefined}
-                      placeholder="选择模型"
-                      options={(
-                        textProviders.find((provider) => provider.id === textProviderId)
-                          ?.modelIds ?? []
-                      ).map((model) => ({ label: model, value: model }))}
-                      onChange={(value) => setTextModelId(value ?? '')}
-                    />
+              <div className="quick-create-prompt-wrap">
+                <div className="quick-create-prompt-head">
+                  <div>
+                    <strong>{mode === 'reverse' ? '反推要求' : '提示词'}</strong>
+                    <span>
+                      {mode === 'reverse'
+                        ? '可选 · 补充反推侧重点'
+                        : mode === 'video'
+                          ? '描述主体、动作、镜头与氛围'
+                          : '描述主体、构图、光线与风格'}
+                    </span>
                   </div>
-                ) : (
-                  <>
-                    <div className="quick-create-control-row">
-                      <div className="quick-create-model-control">
-                        <span className="quick-create-control-label">模型</span>
-                        {modelsLoading ? (
-                          <Spin size="small" />
-                        ) : (
-                          <CanvasModelPicker
-                            models={compatibleModels}
-                            value={effectiveModelKey}
-                            loading={modelsLoading}
-                            onChange={setModelKey}
-                          />
-                        )}
-                      </div>
-                      {!modelsLoading && !selectedModel && (
-                        <span className="quick-create-capability-hint">
-                          暂无匹配的已启用模型，请先到模型服务配置
-                        </span>
+                  {mode !== 'reverse' && (
+                    <div className="quick-create-prompt-tools">
+                      <button
+                        type="button"
+                        title="从提示词库插入"
+                        aria-label="从提示词库插入"
+                        onClick={() => {
+                          invalidateFocusedTask()
+                          setPromptPickerOpen(true)
+                          setPromptSearch('')
+                        }}
+                      >
+                        <Icons.Book size={14} />
+                        <span>提示词库</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <textarea
+                  id="quick-create-prompt"
+                  className="quick-create-prompt"
+                  value={prompt}
+                  onChange={(event) => {
+                    invalidateFocusedTask()
+                    setPrompt(event.target.value)
+                  }}
+                  aria-label={mode === 'reverse' ? '反推补充要求' : '提示词'}
+                  placeholder={
+                    mode === 'reverse'
+                      ? '可选：补充反推侧重点，例如「重点描述人物服装与光线」，留空则输出完整提示词'
+                      : mode === 'video'
+                        ? '描述主体、动作、镜头运动和时长，例如：雨夜街头，霓虹倒影，镜头缓慢推进…'
+                        : '描述主体、构图、光线和风格，例如：清晨窗边的产品静物，柔和侧光…'
+                  }
+                />
+                <div className="quick-create-prompt-meta">
+                  <span>
+                    {mode === 'reverse'
+                      ? '补充要求会与固定反推指令一起发送'
+                      : '建议先写清主体，再补充环境、构图和风格'}
+                  </span>
+                  <small>{prompt.length} 字</small>
+                </div>
+              </div>
+              {promptPickerOpen && mode !== 'reverse' && (
+                <Modal
+                  open
+                  width={720}
+                  centered
+                  footer={null}
+                  title="提示词库"
+                  className="quick-create-prompt-library-modal"
+                  closeIcon={<Icons.X size={15} />}
+                  onCancel={() => setPromptPickerOpen(false)}
+                >
+                  <div className="quick-create-library-body">
+                    <p className="quick-create-library-hint">
+                      选择后会替换当前提示词 · 共 {promptLibrary.length} 条
+                    </p>
+                    <Input
+                      prefix={<Icons.Search size={14} />}
+                      value={promptSearch}
+                      onChange={(event) => setPromptSearch(event.target.value)}
+                      placeholder="搜索标题、内容或标签"
+                      allowClear
+                    />
+                    <div className="quick-create-library-grid">
+                      {filteredPrompts.length === 0 ? (
+                        <span className="quick-create-picker-empty">还没有匹配的提示词</span>
+                      ) : (
+                        filteredPrompts.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className="quick-create-library-card"
+                            title={item.text}
+                            onClick={() => {
+                              invalidateFocusedTask()
+                              setPrompt(item.text)
+                              setPromptPickerOpen(false)
+                            }}
+                          >
+                            <span className="quick-create-library-card-cover">
+                              {item.coverUrl ? (
+                                <RemoteAssetImage src={item.coverUrl} alt="" />
+                              ) : (
+                                <span className="quick-create-library-card-fallback">
+                                  {item.title.trim().slice(0, 2) || '提示'}
+                                </span>
+                              )}
+                            </span>
+                            <span className="quick-create-library-card-body">
+                              <strong>{item.title}</strong>
+                              <small>{item.text}</small>
+                              <em>{item.usageCount} 次使用</em>
+                            </span>
+                          </button>
+                        ))
                       )}
                     </div>
-                    <QuickCreateParameterPanel
-                      fields={fields}
-                      values={modelParamDraft}
-                      parameterScope={parameterScope}
-                      onChange={(name, value) =>
-                        setModelParamDraft((current) =>
-                          updateModelParamDraftValue(current, name, value),
-                        )
-                      }
-                    />
-                  </>
-                )}
+                  </div>
+                </Modal>
+              )}
 
-                <div className="quick-create-submit-row">
-                  {pendingSubmissions > 0 && (
-                    <span className="quick-create-submit-status" aria-live="polite">
-                      <Icons.ListTodo size={13} />
-                      {pendingSubmissions} 个任务提交中
-                    </span>
-                  )}
+              {mode === 'reverse' ? (
+                <div className="quick-create-control-row quick-create-text-model-row">
+                  <label htmlFor="quick-create-provider">视觉理解模型</label>
+                  <Select
+                    id="quick-create-provider"
+                    value={effectiveTextProviderId || undefined}
+                    placeholder="选择 Provider"
+                    options={textProviders.map((provider) => ({
+                      label: provider.name,
+                      value: provider.id,
+                    }))}
+                    onChange={(value) => {
+                      invalidateFocusedTask()
+                      setTextProviderId(value ?? '')
+                      const provider = textProviders.find((item) => item.id === value)
+                      setTextModelId(provider?.defaultModel ?? '')
+                    }}
+                  />
+                  <Select
+                    aria-label="选择视觉理解模型"
+                    value={effectiveTextModelId || undefined}
+                    placeholder="选择模型"
+                    options={(
+                      textProviders.find((provider) => provider.id === textProviderId)?.modelIds ??
+                      []
+                    ).map((model) => ({ label: model, value: model }))}
+                    onChange={(value) => {
+                      invalidateFocusedTask()
+                      setTextModelId(value ?? '')
+                    }}
+                  />
+                </div>
+              ) : (
+                <>
+                  <div className="quick-create-control-row">
+                    <div className="quick-create-model-control">
+                      {modelsLoading ? (
+                        <Spin size="small" />
+                      ) : (
+                        <CanvasModelPicker
+                          models={compatibleModels}
+                          value={effectiveModelKey}
+                          loading={modelsLoading}
+                          onChange={(value) => {
+                            invalidateFocusedTask()
+                            setModelKey(value)
+                          }}
+                        />
+                      )}
+                    </div>
+                    {!modelsLoading && !selectedModel && (
+                      <span className="quick-create-capability-hint">
+                        暂无匹配的已启用模型，请先到模型服务配置
+                      </span>
+                    )}
+                  </div>
+                  <QuickCreateParameterPanel
+                    fields={fields}
+                    values={modelParamDraft}
+                    customValueHistoryKey={parameterHistoryKey}
+                    legacyParameterScope={parameterScope}
+                    onChange={(name, value) => {
+                      invalidateFocusedTask()
+                      setModelParamDraft((current) =>
+                        updateModelParamDraftValue(current, name, value),
+                      )
+                    }}
+                  />
+                </>
+              )}
+
+              <div className="quick-create-submit-row">
+                {pendingSubmissions > 0 && (
+                  <span className="quick-create-submit-status" aria-live="polite">
+                    <Icons.ListTodo size={13} />
+                    {pendingSubmissions} 个任务提交中
+                  </span>
+                )}
+                <div className="quick-create-submit-actions">
+                  <Button type="default" className="quick-create-reset-button" onClick={resetForm}>
+                    重置
+                  </Button>
                   <Button
                     type="primary"
+                    className="quick-create-generate-button"
                     disabled={
                       modelsLoading || (mode === 'reverse' ? inputs.length !== 1 : !prompt.trim())
                     }
                     onClick={() => void submitTask()}
                   >
-                    <Icons.Sparkles size={15} /> 开始创作
+                    <Icons.Play size={13} /> 生成
                   </Button>
                 </div>
               </div>
             </div>
-            <QuickCreateOutputPanel
-              key={focusedTask?.id ?? 'empty'}
-              task={focusedTask}
-              onOpenOutput={openOutput}
-            />
-          </section>
-        ) : (
-          <QuickCreateTaskHistory
-            tasks={tasks}
-            expandedTaskId={expandedTaskId}
-            onRowActivate={handleTaskRowActivate}
-            onFocusTask={handleFocusTaskInWorkbench}
-            onReuse={handleReuseTask}
-            onCancel={(task) => void cancelTask(task)}
-            onRetry={retryTask}
-            onDelete={deleteTask}
-            onOpenOutput={(asset) => void openOutput(asset)}
-          />
-        )}
+            {dragOverForm && (
+              <div className="quick-create-drop-hint" aria-hidden="true">
+                <span>松开以添加素材</span>
+              </div>
+            )}
+          </div>
+          <div className="quick-create-result-pane">
+            <div className="quick-create-result-heading">
+              <div>
+                <strong>输出</strong>
+                <span>
+                  {activeTab === 'tasks'
+                    ? `${tasks.length} 条记录`
+                    : focusedTask
+                      ? '当前任务'
+                      : '等待生成'}
+                </span>
+              </div>
+            </div>
+            <div className="quick-create-result-tabs" role="tablist" aria-label="创作结果与历史">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === 'compose'}
+                className={activeTab === 'compose' ? 'is-active' : ''}
+                onClick={() => setActiveTab('compose')}
+              >
+                <Icons.Image size={16} /> 创作结果
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === 'tasks'}
+                className={activeTab === 'tasks' ? 'is-active' : ''}
+                onClick={() => setActiveTab('tasks')}
+              >
+                <Icons.History size={16} /> 创作历史
+                {stats.running > 0 && <small>{stats.running}</small>}
+              </button>
+            </div>
+            {activeTab === 'compose' ? (
+              <QuickCreateOutputPanel key={focusedTask?.id ?? 'empty'} task={focusedTask} />
+            ) : (
+              <QuickCreateTaskHistory
+                tasks={tasks}
+                expandedTaskId={expandedTaskId}
+                onRowActivate={handleTaskRowActivate}
+                onReuse={handleReuseTask}
+                onCancel={(task) => void cancelTask(task)}
+                onRetry={retryTask}
+                onDelete={deleteTask}
+                onOpenOutput={(asset) => void openOutput(asset)}
+                onSavePrompt={(task) =>
+                  void savePromptToLibrary(
+                    task.prompt,
+                    task.mode,
+                    promptCoverFromTaskAssets(task.assets),
+                  )
+                }
+              />
+            )}
+          </div>
+        </section>
       </main>
     </div>
   )

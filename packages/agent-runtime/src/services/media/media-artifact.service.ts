@@ -55,6 +55,39 @@ export interface MediaArtifactServiceOptions {
   retryDelayMs?: number | undefined
 }
 
+/**
+ * 产物下载鉴权上下文：结构上兼容 MediaProviderContext（可直接传 ctx 子集）。
+ * 仅当产物 URL 与 apiEndpoint 同源时才会附加 Bearer 头，见 sameOriginAuthHeaders。
+ */
+export interface MediaDownloadAuth {
+  apiKey: string
+  apiEndpoint: string
+}
+
+/**
+ * 计算产物下载需要附加的鉴权头：仅当产物 URL 与 Provider API endpoint
+ * 同源（protocol + host + port 一致，path 不参与）时返回 Bearer 头。
+ * 自建网关（如 OpenAI-ComfyUI-Proxy）全站鉴权、产物 URL 就在网关自身上，
+ * 需要带 key 下载；第三方预签名 URL（OpenAI / Bailian OSS 等）不同源，
+ * 不附加，避免把 key 泄露给外部对象存储。
+ */
+export function sameOriginAuthHeaders(
+  url: string,
+  auth: MediaDownloadAuth | undefined,
+): Record<string, string> | undefined {
+  if (!auth || !auth.apiKey.trim()) return undefined
+  let artifactUrl: URL
+  let endpointUrl: URL
+  try {
+    artifactUrl = new URL(url)
+    endpointUrl = new URL(auth.apiEndpoint)
+  } catch {
+    return undefined
+  }
+  if (artifactUrl.origin !== endpointUrl.origin) return undefined
+  return { authorization: `Bearer ${auth.apiKey}` }
+}
+
 /** 单次产物下载的最大尝试次数（初始请求 + 两次重试）。 */
 const MAX_DOWNLOAD_ATTEMPTS = 3
 /** 产物下载重试退避上限（ms）。 */
@@ -74,12 +107,13 @@ export class MediaArtifactService {
     filename: string,
     fetchImpl?: typeof fetch,
     timeoutMs?: number,
+    auth?: MediaDownloadAuth,
   ): Promise<MediaGeneratedAsset> {
     const dir = path.join(outputDir, 'images')
     await mkdir(dir, { recursive: true })
     const buffer =
       image.kind === 'url'
-        ? await this.downloadBuffer(image.value, fetchImpl, timeoutMs)
+        ? await this.downloadBuffer(image.value, fetchImpl, timeoutMs, auth)
         : Buffer.from(image.value, 'base64')
     const mimeType = image.mimeType ?? 'image/png'
     const file = this.resolveUniquePath(dir, filename, extFromMime(mimeType))
@@ -116,8 +150,9 @@ export class MediaArtifactService {
     filename: string,
     fetchImpl?: typeof fetch,
     timeoutMs?: number,
+    auth?: MediaDownloadAuth,
   ): Promise<MediaGeneratedAsset> {
-    const buffer = await this.downloadBuffer(url, fetchImpl, timeoutMs)
+    const buffer = await this.downloadBuffer(url, fetchImpl, timeoutMs, auth)
     // 从 url 后缀或 content-type 推断 mime
     const ext = path.extname(new URL(url).pathname).toLowerCase()
     const mimeType = mimeFromExt(`x${ext}`) ?? (kind === 'audio' ? 'audio/mpeg' : 'video/mp4')
@@ -161,14 +196,17 @@ export class MediaArtifactService {
    * 最多 MAX_DOWNLOAD_ATTEMPTS 次；确定性 4xx、超时、用尽重试后立即抛
    * artifact_download_failed。错误消息含底层 cause 与尝试次数，但不带签名 URL。
    * timeoutMs 为整轮下载（所有尝试 + 退避等待）的总时限。
+   * auth 提供且产物 URL 与 apiEndpoint 同源时，下载请求附带 Bearer 鉴权头。
    */
   private async downloadBuffer(
     url: string,
     fetchImpl?: typeof fetch,
     timeoutMs?: number,
+    auth?: MediaDownloadAuth,
   ): Promise<Buffer> {
     const impl = fetchImpl ?? fetch
     const deadline = timeoutMs != null ? Date.now() + timeoutMs : undefined
+    const headers = sameOriginAuthHeaders(url, auth)
     let attempt = 0
     let nextBackoffMs = this.retryDelayMs
 
@@ -183,9 +221,9 @@ export class MediaArtifactService {
       }
       const budgetMs = deadline != null ? Math.max(1, deadline - Date.now()) : undefined
       log.info(
-        `event=download-attempt attempt=${attempt}/${MAX_DOWNLOAD_ATTEMPTS} url=${JSON.stringify(sanitizeRequestUrl(url))} budgetMs=${budgetMs ?? '(unlimited)'}`,
+        `event=download-attempt attempt=${attempt}/${MAX_DOWNLOAD_ATTEMPTS} url=${JSON.stringify(sanitizeRequestUrl(url))} authed=${headers != null} budgetMs=${budgetMs ?? '(unlimited)'}`,
       )
-      const result = await this.attemptDownload(url, impl, budgetMs)
+      const result = await this.attemptDownload(url, impl, budgetMs, headers)
       if (result.kind === 'ok') return result.buffer
 
       log.warn(
@@ -220,6 +258,7 @@ export class MediaArtifactService {
     url: string,
     impl: typeof fetch,
     budgetMs: number | undefined,
+    headers?: Record<string, string>,
   ): Promise<DownloadAttemptResult> {
     const controller = budgetMs != null ? new AbortController() : undefined
     let timedOut = false
@@ -233,7 +272,10 @@ export class MediaArtifactService {
     try {
       let res: Response
       try {
-        res = await impl(url, controller ? { signal: controller.signal } : undefined)
+        const init: RequestInit = {}
+        if (controller) init.signal = controller.signal
+        if (headers) init.headers = headers
+        res = await impl(url, controller || headers ? init : undefined)
       } catch (err) {
         if (timedOut) {
           log.warn(
