@@ -51,6 +51,7 @@ import { normalizeEduAssetUrl, resolveModelContextWindowForProvider } from '@spa
 import { getLastAssistantMessageMarkdown, isLocalCopySlashCommand } from '../chat-copy'
 import { projectQueuedTurnsForDisplay } from './internal-turn-message-visibility'
 import { SessionWorkflowPicker } from './workflow/SessionWorkflowPicker'
+import { useNewSessionWorkflowDraft } from './workflow/useNewSessionWorkflowDraft'
 import {
   CLAUDE_AUTO_ROUTER_PROVIDER_ID,
   CLAUDE_AUTO_ROUTER_PROVIDER_NAME,
@@ -80,6 +81,7 @@ import {
   type SessionQueuedTurn,
   type SessionAttachment,
   type SessionReferenceCandidate,
+  type SessionWorkflowBindingCreate,
   type TeamModeConfig,
   type WorkspaceInfo,
   type WorkspaceGitStatusResponse,
@@ -795,6 +797,7 @@ export function ComposerV2({
     fastMode?: boolean
     debugMode?: boolean
     cliSparkOverride?: CliSparkOverride | null
+    workflowBinding?: SessionWorkflowBindingCreate
     activate?: boolean
     createWorktree?: boolean
     worktreeBranch?: string
@@ -949,6 +952,8 @@ export function ComposerV2({
   // 调试模式开关（per-session）。刻意不从全局 composer-prefs 继承——它是逐会话 opt-in 的
   // 能力开关，不该被「上次用过」粘到每个新会话上。
   const [draftDebugMode, setDraftDebugMode] = useState<boolean>(false)
+  const { binding: draftWorkflowBinding, setBinding: setDraftWorkflowBinding } =
+    useNewSessionWorkflowDraft(session?.id ?? null)
   const [previewAttachment, setPreviewAttachment] = useState<ComposerAttachment | null>(null)
   const [textEditMenu, setTextEditMenu] = useState<TextEditMenuState | null>(null)
   const textareaRef = useRef<ComposerLexicalInputHandle | null>(null)
@@ -1983,6 +1988,7 @@ export function ComposerV2({
               permissionMode: effectivePermissionMode,
               debugMode: effectiveDebugMode,
               ...(cliSparkOverride != null ? { cliSparkOverride } : {}),
+              ...(draftWorkflowBinding != null ? { workflowBinding: draftWorkflowBinding } : {}),
               ...(teamConfig.enabled ? { teamConfig } : {}),
               ...(createWorktree
                 ? {
@@ -2107,6 +2113,7 @@ export function ComposerV2({
             fastMode: effectiveFastMode,
             debugMode: effectiveDebugMode,
             ...(cliSparkOverride != null ? { cliSparkOverride } : {}),
+            ...(draftWorkflowBinding != null ? { workflowBinding: draftWorkflowBinding } : {}),
             ...(teamConfig.enabled ? { teamConfig } : {}),
             ...(createWorktree
               ? {
@@ -2182,6 +2189,7 @@ export function ComposerV2({
       effectiveHostAgentId,
       clearDraftBuckets,
       draftBucketKey,
+      draftWorkflowBinding,
       flushPendingRuntimePatch,
       getCurrentRuntimePatch,
       onCreateSession,
@@ -4526,16 +4534,6 @@ export function ComposerV2({
                   onChange={handleProviderModelChange}
                 />
               )}
-              <SessionWorkflowPicker
-                sessionId={session?.id ?? null}
-                disabled={sending || isWorking}
-                mentionActive={
-                  teamConfig.enabled &&
-                  pendingMention != null &&
-                  value.includes(`@${pendingMention.name}`) &&
-                  pendingMention.agentId !== effectiveHostAgentId
-                }
-              />
               {showProjectPicker && (
                 <ProjectPicker
                   workspaces={workspaces}
@@ -4735,6 +4733,18 @@ export function ComposerV2({
             <Icons.Bug size={14} style={{ marginTop: 2 }} />
             <span>调试{effectiveDebugMode ? '中' : ''}</span>
           </button>
+          <SessionWorkflowPicker
+            sessionId={session?.id ?? null}
+            draftBinding={draftWorkflowBinding}
+            onDraftBindingChange={setDraftWorkflowBinding}
+            disabled={sending || isWorking}
+            mentionActive={
+              teamConfig.enabled &&
+              pendingMention != null &&
+              value.includes(`@${pendingMention.name}`) &&
+              pendingMention.agentId !== effectiveHostAgentId
+            }
+          />
           {contextWindow > 0 && (
             <ContextMeterWithPopup
               contextRatio={contextRatio}

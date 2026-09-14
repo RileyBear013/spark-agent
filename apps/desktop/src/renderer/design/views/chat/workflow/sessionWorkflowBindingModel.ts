@@ -2,6 +2,8 @@ import type {
   BindingChangeBlocker,
   EffectiveWorkflowSummary,
   SessionWorkflowBinding,
+  SessionWorkflowBindingCreate,
+  WorkflowItem,
   WorkflowPreflightIssue,
 } from '@spark/protocol'
 
@@ -13,6 +15,17 @@ export function workflowBindingLabel(
   if (effective.workflowName == null) return binding == null ? '工作流' : '继承 · 无工作流'
   if (binding?.mode === 'override') return `会话 · ${effective.workflowName}`
   return `Agent · ${effective.workflowName}`
+}
+
+export function draftWorkflowBindingLabel(
+  binding: SessionWorkflowBindingCreate | null,
+  workflows: WorkflowItem[],
+): string {
+  if (binding == null) return '工作流'
+  if (binding.mode === 'disabled') return '工作流已停用'
+  if (binding.mode === 'inherit') return '继承 Agent 默认'
+  const workflow = workflows.find((item) => item.id === binding.workflowId)
+  return workflow == null ? '会话工作流' : `会话 · ${workflow.name}`
 }
 
 export function workflowExecutionModeLabel(

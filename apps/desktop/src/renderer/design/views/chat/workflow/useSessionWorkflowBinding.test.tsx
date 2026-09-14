@@ -9,6 +9,7 @@ const harness = vi.hoisted(() => ({
   getBinding: vi.fn(),
   setBinding: vi.fn(),
   listWorkflows: vi.fn(),
+  getSetting: vi.fn(),
   abandonRun: vi.fn(),
   streamSubscriptions: new Map<string, (payload: unknown) => void>(),
 }))
@@ -22,7 +23,9 @@ vi.mock('../../../hooks/useIpc', () => ({
           ? harness.setBinding
           : channel === 'session:abandon-workflow-run'
             ? harness.abandonRun
-            : harness.listWorkflows,
+            : channel === 'settings:get'
+              ? harness.getSetting
+              : harness.listWorkflows,
     loading: false,
     error: null,
   }),
@@ -36,10 +39,15 @@ import { useSessionWorkflowBinding } from './useSessionWorkflowBinding'
 
 let latestAbandon: (() => Promise<void>) | null = null
 
-function Probe(props: { sessionId: string }): React.JSX.Element {
+function Probe(props: { sessionId: string | null }): React.JSX.Element {
   const binding = useSessionWorkflowBinding(props.sessionId)
   latestAbandon = binding.abandonRun
-  return <div>{binding.state?.binding?.sessionId ?? 'empty'}</div>
+  return (
+    <div>
+      {binding.state?.binding?.sessionId ??
+        (binding.features?.writeEnabled ? `draft:${binding.workflows.length}` : 'empty')}
+    </div>
+  )
 }
 
 describe('useSessionWorkflowBinding', () => {
@@ -53,9 +61,40 @@ describe('useSessionWorkflowBinding', () => {
     harness.getBinding.mockReset()
     harness.setBinding.mockReset()
     harness.listWorkflows.mockReset().mockResolvedValue({ workflows: [] })
+    harness.getSetting.mockReset().mockResolvedValue({ value: false })
     harness.abandonRun.mockReset()
     harness.streamSubscriptions.clear()
     latestAbandon = null
+  })
+
+  it('loads feature flags and published workflows for a new-session draft', async () => {
+    harness.getSetting.mockImplementation(({ key }: { key: string }) => ({
+      value: key === 'writeEnabled',
+    }))
+    harness.listWorkflows.mockResolvedValue({
+      workflows: [
+        {
+          id: 'workflow-a',
+          name: 'Workflow A',
+          description: '',
+          scope: 'global',
+          tags: [],
+          status: 'active',
+          enabled: true,
+          version: '1.0.0',
+          graph: { nodes: [], edges: [] },
+          createdAt: '2026-09-15T00:00:00.000Z',
+          updatedAt: '2026-09-15T00:00:00.000Z',
+        },
+      ],
+    })
+
+    await act(async () => root.render(<Probe sessionId={null} />))
+
+    expect(container.textContent).toBe('draft:1')
+    expect(harness.getBinding).not.toHaveBeenCalled()
+    expect(harness.getSetting).toHaveBeenCalledTimes(2)
+    expect(harness.listWorkflows).toHaveBeenCalledWith({ includeArchived: false })
   })
 
   afterEach(async () => {

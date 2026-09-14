@@ -1561,6 +1561,7 @@ function Shell() {
 
   const handleNewBlankSession = useCallback(() => {
     sessionCtx.setActiveSession(null)
+    window.dispatchEvent(new CustomEvent('spark:composer:reset-draft'))
     // Keep current workspace so new session inherits the active project context
     setTweak('view', 'chat')
   }, [sessionCtx, setTweak])

@@ -1,94 +1,122 @@
 .session-workflow-picker {
   position: relative;
+  flex: 0 0 auto;
   min-width: 0;
 }
 
-.session-workflow-chip {
+.session-workflow-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: min(220px, 32vw);
-  height: 28px;
-  padding: 0 9px;
+  justify-content: center;
+  width: 29px;
+  height: 29px;
+  padding: 0;
   border: 0;
   border-radius: 6px;
   color: var(--color-text-secondary);
   background: transparent;
   cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
 }
 
-.session-workflow-chip:hover,
-.session-workflow-chip[aria-expanded='true'] {
+.session-workflow-trigger:hover,
+.session-workflow-trigger[aria-expanded='true'] {
   color: var(--color-text-primary);
   background: var(--color-fill-secondary);
 }
 
-.session-workflow-chip:focus-visible {
+.session-workflow-trigger.is-selected {
+  color: var(--color-primary);
+  background: var(--color-fill-tertiary);
+}
+
+.session-workflow-trigger:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 1px;
 }
 
-.session-workflow-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--color-primary);
+.session-workflow-trigger:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
-.session-workflow-chip-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.session-workflow-trigger > span {
+  display: inline-flex;
+  line-height: 0;
 }
 
 .session-workflow-menu {
-  position: absolute;
-  z-index: 80;
-  left: 0;
-  bottom: calc(100% + 8px);
+  position: fixed;
+  z-index: var(--z-dropdown, 100);
   width: min(320px, calc(100vw - 32px));
   max-height: min(420px, 60vh);
   overflow: auto;
   padding: 6px;
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 8px;
-  color: var(--color-text-primary);
-  background: var(--color-bg-elevated);
-  box-shadow: 0 10px 28px rgb(0 0 0 / 16%);
+  border-radius: var(--r-md);
+  color: var(--text);
+  /* 与权限策略 / 推理强度弹窗（composer-menu permission/enriched）同一套视觉：
+   * --panel 实色背景 + --shadow-lg 阴影 + --r-md 圆角，不加边框。 */
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+  isolation: isolate;
 }
 
 .session-workflow-menu-head,
 .session-workflow-section-label {
   display: flex;
+  gap: 8px;
   justify-content: space-between;
-  padding: 6px 8px;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  min-width: 0;
+  padding: 4px 2px 6px;
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+  font-weight: 650;
+}
+
+.session-workflow-menu-head > span,
+.session-workflow-section-label > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-workflow-menu-head > span:last-child {
+  flex: 0 0 auto;
+  font-weight: 450;
 }
 
 .session-workflow-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   width: 100%;
+  min-width: 0;
   min-height: 34px;
   padding: 7px 8px;
   border: 0;
-  border-radius: 5px;
+  border-radius: var(--r-sm);
   color: inherit;
   background: transparent;
   text-align: left;
   cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
 }
 
-.session-workflow-option:hover:not(:disabled) {
-  background: var(--color-fill-secondary);
-}
-
+.session-workflow-option:hover:not(:disabled),
 .session-workflow-option.is-active {
-  color: var(--color-primary);
-  background: var(--color-fill-tertiary);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.session-workflow-option-check {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--text-muted) 80%, var(--text));
+  stroke-width: 2;
 }
 
 .session-workflow-option:disabled {
@@ -96,30 +124,48 @@
   opacity: 0.5;
 }
 
+.session-workflow-option-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-workflow-option-description {
+  flex: 0 0 auto;
+  max-width: 84px;
+  overflow: hidden;
+  color: var(--text-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-workflow-option small {
-  color: var(--color-text-tertiary);
+  color: var(--text-faint);
 }
 
 .session-workflow-divider {
   height: 1px;
   margin: 5px 8px;
-  background: var(--color-border-secondary);
+  background: var(--border);
 }
 
-.session-workflow-empty,
 .session-workflow-notice,
 .session-workflow-error {
   padding: 8px;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
+  color: var(--text-faint);
+  font-size: var(--font-xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .session-workflow-error {
-  color: var(--color-error);
+  color: var(--danger);
 }
 
 .session-workflow-notice.is-warning {
-  color: var(--color-warning);
+  color: var(--warning);
 }
 
 .session-workflow-abandon,
@@ -128,19 +174,19 @@
   height: 24px;
   margin-top: 6px;
   padding: 0 8px;
-  border: 1px solid var(--color-border-secondary);
-  border-radius: 5px;
-  color: var(--color-text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
   background: transparent;
-  font-size: 12px;
+  font-size: var(--font-xs);
   cursor: pointer;
 }
 
 .session-workflow-abandon:hover:not(:disabled),
 .session-workflow-abandon-accept:hover:not(:disabled),
 .session-workflow-abandon-cancel:hover:not(:disabled) {
-  color: var(--color-text-primary);
-  background: var(--color-fill-secondary);
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
 }
 
 .session-workflow-abandon:disabled,
@@ -168,8 +214,8 @@
   border-color: var(--color-error);
 }
 
-@media (max-width: 560px) {
-  .session-workflow-chip {
-    max-width: 150px;
+@media (prefers-reduced-motion: reduce) {
+  .session-workflow-trigger {
+    transition: none;
   }
 }

@@ -7,12 +7,20 @@ import type {
 import { useIpcInvoke, useIpcStream } from '../../../hooks/useIpc'
 import { localizeBindingError } from './sessionWorkflowBindingModel'
 
+export type SessionWorkflowFeatureFlags = SessionGetWorkflowBindingResponse['features']
+
+const SETTINGS_CATEGORY = 'sessionWorkflowBinding'
+const KEY_WRITE_ENABLED = 'writeEnabled'
+const KEY_RUNTIME_ENABLED = 'runtimeEnabled'
+
 export function useSessionWorkflowBinding(sessionId: string | null) {
   const getBinding = useIpcInvoke('session:get-workflow-binding')
   const setBinding = useIpcInvoke('session:set-workflow-binding')
   const abandonRunInvoke = useIpcInvoke('session:abandon-workflow-run')
   const listWorkflows = useIpcInvoke('workflow:list')
+  const getSetting = useIpcInvoke('settings:get')
   const [state, setState] = useState<SessionGetWorkflowBindingResponse | null>(null)
+  const [draftFeatures, setDraftFeatures] = useState<SessionWorkflowFeatureFlags | null>(null)
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const activeSessionRef = useRef(sessionId)
@@ -20,13 +28,31 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
 
   const reload = useCallback(async () => {
     const requestedSessionId = sessionId
-    if (requestedSessionId == null) return
     const requestGeneration = ++requestGenerationRef.current
     try {
-      const [bindingResult, workflowResult] = await Promise.all([
-        getBinding.invoke({ sessionId: requestedSessionId }),
-        listWorkflows.invoke({ includeArchived: false }),
-      ])
+      const workflowRequest = listWorkflows.invoke({ includeArchived: false })
+      const [bindingResult, workflowResult, nextDraftFeatures] =
+        requestedSessionId == null
+          ? await Promise.all([
+              Promise.resolve(null),
+              workflowRequest,
+              Promise.all([
+                getSetting.invoke({ category: SETTINGS_CATEGORY, key: KEY_WRITE_ENABLED }),
+                getSetting.invoke({ category: SETTINGS_CATEGORY, key: KEY_RUNTIME_ENABLED }),
+              ]).then(([writeResult, runtimeResult]) => {
+                const runtimeRequested = runtimeResult.value === true
+                return {
+                  writeEnabled: writeResult.value === true,
+                  runtimeRequested,
+                  runtimeEnabled: runtimeRequested,
+                }
+              }),
+            ])
+          : await Promise.all([
+              getBinding.invoke({ sessionId: requestedSessionId }),
+              workflowRequest,
+              Promise.resolve(null),
+            ])
       if (
         activeSessionRef.current !== requestedSessionId ||
         requestGenerationRef.current !== requestGeneration
@@ -34,6 +60,7 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
         return
       }
       setState(bindingResult)
+      setDraftFeatures(nextDraftFeatures)
       setWorkflows(
         workflowResult.workflows.filter(
           (workflow) => workflow.enabled && workflow.status === 'active',
@@ -49,12 +76,13 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
       }
       setError(localizeBindingError(cause))
     }
-  }, [getBinding.invoke, listWorkflows.invoke, sessionId])
+  }, [getBinding.invoke, getSetting.invoke, listWorkflows.invoke, sessionId])
 
   useEffect(() => {
     activeSessionRef.current = sessionId
     requestGenerationRef.current += 1
     setState(null)
+    setDraftFeatures(null)
     setWorkflows([])
     setError(null)
     void reload()
@@ -143,8 +171,9 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
 
   return {
     state,
+    features: state?.features ?? draftFeatures,
     workflows,
-    loading: getBinding.loading || listWorkflows.loading,
+    loading: getBinding.loading || getSetting.loading || listWorkflows.loading,
     saving: setBinding.loading,
     abandoning: abandonRunInvoke.loading,
     error,

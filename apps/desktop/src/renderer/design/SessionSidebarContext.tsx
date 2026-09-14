@@ -33,7 +33,7 @@ import type {
   TerminalStreamEvent,
   SidebarOrderState,
 } from '@spark/protocol'
-import { isAutoRouterProvider } from '@spark/protocol'
+import { isAutoRouterProvider, SessionWorkflowBindingCreateSchema } from '@spark/protocol'
 import { SerialTaskQueue } from './sidebar-manual-order'
 import {
   getPreferredProviderWithAdapterFallback,
@@ -1196,11 +1196,17 @@ export function SessionSidebarProvider({
                   ? { providerProfileId, modelId }
                   : undefined
               })()
+        const workflowBinding =
+          options.workflowBinding === undefined
+            ? undefined
+            : SessionWorkflowBindingCreateSchema.parse(options.workflowBinding)
 
         // 如果该项目下有未使用的会话（没有消息、未归档），直接复用。
         // 复用前必须把 provider/model/agent 等运行时同步到该空会话，否则 UI label
         // 可能靠 draft/prefs 兜底显示为新模型，但实际 session 仍保留旧 provider/model。
-        const shouldReuseUnusedSession = options.forceNew !== true
+        // 带草稿工作流的新会话必须走 session:create 的原子 Binding 写入，不能复用
+        // 旧空会话后再补写，否则首次 Turn 可能抢在 Binding 持久化之前接单。
+        const shouldReuseUnusedSession = options.forceNew !== true && workflowBinding == null
         const unusedSession = shouldReuseUnusedSession
           ? sessions.find(
               (s) =>
@@ -1264,6 +1270,7 @@ export function SessionSidebarProvider({
           fastMode,
           ...(debugMode !== undefined ? { debugMode } : {}),
           ...(cliSparkOverride !== undefined ? { cliSparkOverride } : {}),
+          ...(workflowBinding !== undefined ? { workflowBinding } : {}),
           workspaceId: wsId,
         })
         if (res.session != null) upsertSessionInList(res.session)

@@ -7,6 +7,7 @@ import type { SessionGetWorkflowBindingResponse, WorkflowItem } from '@spark/pro
 
 const harness = vi.hoisted(() => ({
   state: null as SessionGetWorkflowBindingResponse | null,
+  features: null as SessionGetWorkflowBindingResponse['features'] | null,
   workflows: [] as WorkflowItem[],
   loading: false,
   error: null as string | null,
@@ -18,6 +19,7 @@ const harness = vi.hoisted(() => ({
 vi.mock('./useSessionWorkflowBinding', () => ({
   useSessionWorkflowBinding: () => ({
     state: harness.state,
+    features: harness.state?.features ?? harness.features,
     workflows: harness.workflows,
     loading: harness.loading,
     saving: false,
@@ -43,9 +45,173 @@ describe('SessionWorkflowPicker', () => {
     harness.update.mockReset()
     harness.reload.mockReset()
     harness.abandonRun.mockReset()
-    harness.workflows = []
+    harness.state = null
+    harness.workflows = [makeWorkflow('workflow-a', 'Workflow A')]
     harness.loading = false
     harness.error = null
+    harness.features = null
+  })
+
+  it('lets a new session choose a workflow before the session is created', async () => {
+    harness.state = null
+    harness.features = {
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    }
+    harness.workflows = [makeWorkflow('workflow-b', 'Workflow B')]
+    const onDraftBindingChange = vi.fn()
+
+    await act(async () =>
+      root.render(
+        <SessionWorkflowPicker
+          sessionId={null}
+          draftBinding={null}
+          onDraftBindingChange={onDraftBindingChange}
+        />,
+      ),
+    )
+
+    const trigger = container.querySelector<HTMLButtonElement>('.session-workflow-trigger')
+    expect(trigger?.textContent).toBe('')
+    expect(trigger?.getAttribute('aria-label')).toBe('选择新会话使用的工作流')
+    await act(async () => trigger?.click())
+    expect(document.body.textContent).toContain('Workflow B')
+
+    const workflowOption = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ].find((button) => button.textContent?.includes('Workflow B'))
+    await act(async () => workflowOption?.click())
+
+    expect(onDraftBindingChange).toHaveBeenCalledWith({
+      mode: 'override',
+      workflowId: 'workflow-b',
+    })
+    expect(document.querySelector('.session-workflow-menu')).toBeNull()
+    expect(harness.update).not.toHaveBeenCalled()
+  })
+
+  // 弹层必须 Portal 到 body 直接子节点并以 fixed 定位渲染。
+  // 若回退为就地渲染，会被输入区祖先的 overflow/层叠裁剪导致“点了但弹层不可见”。
+  it('renders the open menu as a portal on document.body with fixed positioning', async () => {
+    harness.features = {
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    }
+
+    await act(async () =>
+      root.render(
+        <SessionWorkflowPicker
+          sessionId={null}
+          draftBinding={null}
+          onDraftBindingChange={vi.fn()}
+        />,
+      ),
+    )
+
+    expect(container.querySelector('.session-workflow-menu')).toBeNull()
+    const trigger = container.querySelector<HTMLButtonElement>('.session-workflow-trigger')
+    await act(async () => trigger?.click())
+
+    const menu = document.body.querySelector<HTMLDivElement>(':scope > .session-workflow-menu')
+    expect(menu).not.toBeNull()
+    expect(menu?.style.visibility).toBe('visible')
+    expect(menu?.style.left).not.toBe('')
+    expect(menu?.style.bottom).not.toBe('')
+
+    await act(async () => trigger?.click())
+    expect(document.body.querySelector(':scope > .session-workflow-menu')).toBeNull()
+  })
+
+  it('shows an icon-only selected state without rendering the workflow name', async () => {
+    harness.features = {
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    }
+
+    await act(async () =>
+      root.render(
+        <SessionWorkflowPicker
+          sessionId={null}
+          draftBinding={{ mode: 'override', workflowId: 'workflow-a' }}
+          onDraftBindingChange={vi.fn()}
+        />,
+      ),
+    )
+
+    const trigger = container.querySelector<HTMLButtonElement>('.session-workflow-trigger')
+    expect(trigger?.classList.contains('is-selected')).toBe(true)
+    expect(trigger?.dataset.selected).toBe('true')
+    expect(trigger?.getAttribute('aria-label')).toContain('Workflow A')
+    expect(trigger?.textContent).toBe('')
+  })
+
+  it('closes the workflow menu with Escape', async () => {
+    harness.state = makeState({
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    })
+    await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
+    )
+    expect(document.querySelector('.session-workflow-menu')).not.toBeNull()
+    document.querySelector<HTMLButtonElement>('[role="menuitemradio"]')?.focus()
+
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })))
+    expect(document.querySelector('.session-workflow-menu')).toBeNull()
+    expect(document.activeElement).toBe(
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger'),
+    )
+  })
+
+  it('clears a pending draft selection when workflow writes are turned off', async () => {
+    harness.state = null
+    harness.features = {
+      writeEnabled: false,
+      runtimeRequested: false,
+      runtimeEnabled: false,
+    }
+    const onDraftBindingChange = vi.fn()
+
+    await act(async () =>
+      root.render(
+        <SessionWorkflowPicker
+          sessionId={null}
+          draftBinding={{ mode: 'override', workflowId: 'workflow-a' }}
+          onDraftBindingChange={onDraftBindingChange}
+        />,
+      ),
+    )
+
+    expect(onDraftBindingChange).toHaveBeenCalledWith(null)
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('clears a pending draft selection when no published workflow remains', async () => {
+    harness.features = {
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    }
+    harness.workflows = []
+    const onDraftBindingChange = vi.fn()
+
+    await act(async () =>
+      root.render(
+        <SessionWorkflowPicker
+          sessionId={null}
+          draftBinding={{ mode: 'override', workflowId: 'workflow-a' }}
+          onDraftBindingChange={onDraftBindingChange}
+        />,
+      ),
+    )
+
+    expect(onDraftBindingChange).toHaveBeenCalledWith(null)
+    expect(container.innerHTML).toBe('')
   })
 
   afterEach(async () => {
@@ -53,7 +219,7 @@ describe('SessionWorkflowPicker', () => {
     container.remove()
   })
 
-  it('keeps an existing binding visible but read-only when writes are disabled', async () => {
+  it('hides an existing binding when the session workflow feature is disabled', async () => {
     harness.state = makeState({
       writeEnabled: false,
       runtimeRequested: false,
@@ -61,17 +227,7 @@ describe('SessionWorkflowPicker', () => {
     })
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
 
-    const chip = container.querySelector<HTMLButtonElement>('.session-workflow-chip')
-    expect(chip?.textContent).toContain('会话 · Workflow A')
-    await act(async () => chip?.click())
-
-    expect(container.textContent).toContain('当前挂载为只读，暂时不能修改。')
-    expect(container.textContent).toContain('当前消息仍按 Agent 默认配置执行。')
-    expect(
-      [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].every(
-        (button) => button.disabled,
-      ),
-    ).toBe(true)
+    expect(container.innerHTML).toBe('')
   })
 
   it('explains that a mention turn uses the member workflow', async () => {
@@ -84,10 +240,10 @@ describe('SessionWorkflowPicker', () => {
       root.render(<SessionWorkflowPicker sessionId="session-a" mentionActive />),
     )
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-chip')?.click(),
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
     )
 
-    expect(container.textContent).toContain('本条 @成员消息不应用会话工作流')
+    expect(document.body.textContent).toContain('本条 @成员消息不应用会话工作流')
   })
 
   it('stays hidden for untouched sessions while the write feature is disabled', async () => {
@@ -95,6 +251,19 @@ describe('SessionWorkflowPicker', () => {
       ...makeState({ writeEnabled: false, runtimeRequested: false, runtimeEnabled: false }),
       binding: null,
     }
+    await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
+
+    expect(container.innerHTML).toBe('')
+  })
+
+  it('stays hidden when there are no published workflows', async () => {
+    harness.state = makeState({
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    })
+    harness.workflows = []
+
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
 
     expect(container.innerHTML).toBe('')
@@ -123,13 +292,13 @@ describe('SessionWorkflowPicker', () => {
     ]
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-chip')?.click(),
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
     )
 
-    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    const options = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
     expect(options).toHaveLength(3)
     expect(options.every((button) => button.disabled)).toBe(true)
-    expect(container.textContent).toContain('仍有消息等待处理')
+    expect(document.body.textContent).toContain('仍有消息等待处理')
 
     harness.state = makeState({
       writeEnabled: true,
@@ -138,13 +307,14 @@ describe('SessionWorkflowPicker', () => {
     })
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
     const workflowB = [
-      ...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+      ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
     ].find((button) => button.textContent?.includes('Workflow B'))
     await act(async () => workflowB?.click())
     expect(harness.update).toHaveBeenCalledWith({
       mode: 'override',
       workflowId: 'workflow-b',
     })
+    expect(document.querySelector('.session-workflow-menu')).toBeNull()
   })
 
   it('does not show a rollback warning while the requested runtime is active', async () => {
@@ -155,21 +325,40 @@ describe('SessionWorkflowPicker', () => {
     })
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-chip')?.click(),
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
     )
 
-    expect(container.textContent).not.toContain('当前消息仍按 Agent 默认配置执行')
+    expect(document.body.textContent).not.toContain('当前消息仍按 Agent 默认配置执行')
   })
 
-  it('shows a retry affordance when initial binding loading fails', async () => {
+  it('does not expose a partial picker when initial binding loading fails', async () => {
     harness.state = null
     harness.error = '读取失败'
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
 
-    const retry = container.querySelector<HTMLButtonElement>('.session-workflow-chip')
-    expect(retry?.textContent).toContain('工作流状态加载失败，重试')
-    await act(async () => retry?.click())
-    expect(harness.reload).toHaveBeenCalledTimes(1)
+    expect(container.innerHTML).toBe('')
+    expect(harness.reload).not.toHaveBeenCalled()
+  })
+
+  it('keeps long workflow names on one truncated line and exposes the full label', async () => {
+    const longName = '这是一个非常非常长且不应该挤压版本号或换行的会话工作流名称'
+    harness.state = makeState({
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    })
+    harness.workflows = [makeWorkflow('workflow-long', longName)]
+
+    await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
+    )
+
+    const workflowLabel = [
+      ...document.querySelectorAll<HTMLElement>('.session-workflow-option-label'),
+    ].find((item) => item.textContent === longName)
+    expect(workflowLabel?.title).toBe(longName)
+    expect(workflowLabel?.nextElementSibling?.textContent).toBe('v1.0.0')
   })
 
   it('requires a separate confirmation before abandoning a failed run', async () => {
@@ -188,26 +377,26 @@ describe('SessionWorkflowPicker', () => {
     }
     await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-chip')?.click(),
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
     )
 
-    expect(container.textContent).toContain('上次运行失败，下一条 Host 消息将继续此运行')
-    const abandon = container.querySelector<HTMLButtonElement>('.session-workflow-abandon')
+    expect(document.body.textContent).toContain('上次运行失败，下一条 Host 消息将继续此运行')
+    const abandon = document.querySelector<HTMLButtonElement>('.session-workflow-abandon')
     expect(abandon).not.toBeNull()
     // 单独确认：第一次点击只展开确认，不触发放弃。
     await act(async () => abandon?.click())
     expect(harness.abandonRun).not.toHaveBeenCalled()
-    expect(container.textContent).toContain('确认放弃此运行？')
+    expect(document.body.textContent).toContain('确认放弃此运行？')
 
-    const cancel = container.querySelector<HTMLButtonElement>('.session-workflow-abandon-cancel')
+    const cancel = document.querySelector<HTMLButtonElement>('.session-workflow-abandon-cancel')
     await act(async () => cancel?.click())
-    expect(container.textContent).not.toContain('确认放弃此运行？')
+    expect(document.body.textContent).not.toContain('确认放弃此运行？')
 
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-abandon')?.click(),
+      document.querySelector<HTMLButtonElement>('.session-workflow-abandon')?.click(),
     )
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('.session-workflow-abandon-accept')?.click(),
+      document.querySelector<HTMLButtonElement>('.session-workflow-abandon-accept')?.click(),
     )
     expect(harness.abandonRun).toHaveBeenCalledTimes(1)
   })
@@ -240,5 +429,21 @@ function makeState(
     canChange: true,
     changeBlockers: [],
     features,
+  }
+}
+
+function makeWorkflow(id: string, name: string): WorkflowItem {
+  return {
+    id,
+    name,
+    description: '',
+    scope: 'global',
+    tags: [],
+    status: 'active',
+    enabled: true,
+    version: '1.0.0',
+    graph: { nodes: [], edges: [] },
+    createdAt: '2026-09-15T00:00:00.000Z',
+    updatedAt: '2026-09-15T00:00:00.000Z',
   }
 }

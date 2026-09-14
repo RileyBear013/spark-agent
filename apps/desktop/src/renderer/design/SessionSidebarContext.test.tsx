@@ -1082,6 +1082,7 @@ describe('SessionSidebarContext', () => {
     const nextProviderId = 'next-provider'
     const agentId = 'platform-manager-agent'
     const updatedSessions: Record<string, unknown>[] = []
+    const createdSessions: Record<string, unknown>[] = []
     const updatedTeamConfigs: Record<string, unknown>[] = []
 
     const invoke = vi.fn(async (channel: string, request?: Record<string, unknown>) => {
@@ -1184,6 +1185,10 @@ describe('SessionSidebarContext', () => {
           },
         }
       }
+      if (channel === 'session:create') {
+        createdSessions.push(request ?? {})
+        return { sessionId: 'workflow-session' }
+      }
       if (channel === 'team:update') {
         updatedTeamConfigs.push(request ?? {})
         return { config: request?.config }
@@ -1264,6 +1269,22 @@ describe('SessionSidebarContext', () => {
         },
       },
     ])
+
+    await act(async () => {
+      await latestCtxRef.current?.handleNewSession(workspace.id, {
+        workflowBinding: { mode: 'override', workflowId: 'workflow-drawing' },
+      })
+    })
+
+    // A pending workflow selection must bypass the reusable empty session so the
+    // session row and Binding row are created in the same main-process transaction.
+    expect(updatedSessions).toHaveLength(1)
+    expect(createdSessions).toHaveLength(1)
+    expect(createdSessions[0]).toEqual(
+      expect.objectContaining({
+        workflowBinding: { mode: 'override', workflowId: 'workflow-drawing' },
+      }),
+    )
   })
 
   it('keeps the created session model aligned with the selected provider', async () => {
