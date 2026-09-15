@@ -38,10 +38,14 @@ import { useSessionWorkflowBinding } from './useSessionWorkflowBinding'
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 let latestAbandon: (() => Promise<void>) | null = null
+let latestUpdate:
+  | ((next: { mode: 'inherit' | 'disabled' } | { mode: 'override'; workflowId: string }) => Promise<boolean>)
+  | null = null
 
 function Probe(props: { sessionId: string | null }): React.JSX.Element {
   const binding = useSessionWorkflowBinding(props.sessionId)
   latestAbandon = binding.abandonRun
+  latestUpdate = binding.update
   return (
     <div>
       {binding.state?.binding?.sessionId ??
@@ -65,6 +69,7 @@ describe('useSessionWorkflowBinding', () => {
     harness.abandonRun.mockReset()
     harness.streamSubscriptions.clear()
     latestAbandon = null
+    latestUpdate = null
   })
 
   it('loads feature flags and published workflows for a new-session draft', async () => {
@@ -138,6 +143,50 @@ describe('useSessionWorkflowBinding', () => {
     )
     await act(async () => onConfigChanged?.({ scope: 'provider', action: 'update' }))
     expect(harness.getBinding).toHaveBeenCalledTimes(2)
+  })
+
+  // 返回值是选择器「失败就别关弹窗」的判据：预检不通过 / IPC 报错都要回 false。
+  it('reports whether a binding write actually succeeded', async () => {
+    harness.getBinding.mockResolvedValue(makeState('session-a'))
+    await act(async () => root.render(<Probe sessionId="session-a" />))
+
+    harness.setBinding.mockResolvedValueOnce({
+      binding: {
+        sessionId: 'session-a',
+        bindingInstanceId: 'binding-session-a',
+        mode: 'override',
+        workflowId: 'workflow-b',
+        createdAt: '2026-09-12T00:00:00.000Z',
+        updatedAt: '2026-09-12T00:00:00.000Z',
+      },
+      effective: makeState('session-a').effective,
+      resumableRun: null,
+      preflight: { ok: true, issues: [], warnings: [] },
+      error: null,
+    })
+    let saved = false
+    await act(async () => {
+      saved = (await latestUpdate?.({ mode: 'override', workflowId: 'workflow-b' })) ?? false
+    })
+    expect(saved).toBe(true)
+
+    // 预检不通过：写入被主进程拒绝，必须回 false 让弹窗保留并显示原因。
+    harness.setBinding.mockResolvedValueOnce({
+      binding: null,
+      effective: makeState('session-a').effective,
+      resumableRun: null,
+      preflight: {
+        ok: false,
+        issues: [{ code: 'unsupported_node_kind', nodeId: 'release-output', params: { kind: 'output' } }],
+        warnings: [],
+      },
+      error: null,
+    })
+    let rejected = true
+    await act(async () => {
+      rejected = (await latestUpdate?.({ mode: 'override', workflowId: 'workflow-c' })) ?? true
+    })
+    expect(rejected).toBe(false)
   })
 
   it('abandons the failed run with the observed generation and refreshes on conflict', async () => {

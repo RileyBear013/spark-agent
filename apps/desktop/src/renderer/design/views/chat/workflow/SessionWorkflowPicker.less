@@ -4,6 +4,12 @@
   min-width: 0;
 }
 
+/* 图标按钮配色统一走本项目真实 token。
+ * 旧写法引用的 --color-text-secondary / --color-text-primary / --color-fill-secondary /
+ * --color-fill-tertiary / --color-primary 在本项目并不存在，声明属于
+ * invalid at computed-value time 会整条失效，导致 hover / 展开 / 选中 / 焦点态
+ * 全都不生效（选中与否只靠图标描边 1.6 → 2.2 的微弱差别）。
+ * 未选中态取参数栏继承的 --text-muted，与修复前的实际渲染一致。 */
 .session-workflow-trigger {
   display: inline-flex;
   align-items: center;
@@ -13,7 +19,7 @@
   padding: 0;
   border: 0;
   border-radius: 6px;
-  color: var(--color-text-secondary);
+  color: var(--text-muted);
   background: transparent;
   cursor: pointer;
   transition:
@@ -21,19 +27,28 @@
     background-color 0.15s ease;
 }
 
-.session-workflow-trigger:hover,
-.session-workflow-trigger[aria-expanded='true'] {
-  color: var(--color-text-primary);
-  background: var(--color-fill-secondary);
+.session-workflow-trigger:hover:not(:disabled),
+.session-workflow-trigger[aria-expanded='true']:not(.is-selected) {
+  color: var(--text);
+  background: var(--hover);
 }
 
+/* 已选中工作流（本会话 override 绑定）：主题色图标 + 主题色浅底（--selected 即 --primary-soft）。
+ * 必须排在 hover / 展开规则之后并排除 .is-selected，
+ * 否则 hover 时 (0,3,0) 的中性色规则会盖掉 (0,2,0) 的选中高亮。 */
 .session-workflow-trigger.is-selected {
-  color: var(--color-primary);
-  background: var(--color-fill-tertiary);
+  color: var(--primary);
+  background: var(--selected);
+}
+
+.session-workflow-trigger.is-selected:hover:not(:disabled),
+.session-workflow-trigger.is-selected[aria-expanded='true'] {
+  color: var(--primary-hover);
+  background: var(--selected);
 }
 
 .session-workflow-trigger:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--primary);
   outline-offset: 1px;
 }
 
@@ -183,8 +198,17 @@
   overflow-wrap: anywhere;
 }
 
+/* 报错吸附在菜单顶部并整行通栏：菜单内容可滚动，历史实现把报错放在末尾，
+ * 列表一长它就被滚出可视区，用户点完既看不到失败原因也不确定点没点上。
+ * 通栏靠分割线收口（本项目不做卡片/盒子分组），底色与菜单一致，不叠阴影。 */
 .session-workflow-error {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: -6px -6px 6px;
   color: var(--danger);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
 }
 
 .session-workflow-notice.is-warning {

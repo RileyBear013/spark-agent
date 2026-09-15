@@ -19,8 +19,18 @@ export function SessionWorkflowPicker(props: {
   mentionActive?: boolean
 }): React.JSX.Element | null {
   const { sessionId, draftBinding, onDraftBindingChange } = props
-  const { state, features, workflows, loading, saving, abandoning, error, update, abandonRun } =
-    useSessionWorkflowBinding(sessionId)
+  const {
+    state,
+    features,
+    workflows,
+    loading,
+    saving,
+    abandoning,
+    error,
+    clearError,
+    update,
+    abandonRun,
+  } = useSessionWorkflowBinding(sessionId)
   const [open, setOpen] = useState(false)
   const [confirmAbandon, setConfirmAbandon] = useState(false)
   const [menuPosition, setMenuPosition] = useState<{ left: number; bottom: number } | null>(null)
@@ -107,16 +117,34 @@ export function SessionWorkflowPicker(props: {
       : workflowBindingLabel(state.binding, state.effective)
   const selected = selectedBinding?.mode === 'override'
   const accessibleLabel = selected ? `${title}，当前为${selectedLabel}` : title
+  const closeMenu = () => {
+    setConfirmAbandon(false)
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+
   const selectBinding = (next: SessionWorkflowBindingCreate) => {
     if (draftMode) {
       onDraftBindingChange?.(next)
-      triggerRef.current?.focus()
-      setOpen(false)
+      closeMenu()
       return
     }
-    void update(next)
-    triggerRef.current?.focus()
-    setOpen(false)
+    // 只有真正写成功才关闭弹窗：失败时保留菜单并让顶部报错留在原地，
+    // 否则用户点完什么也看不到（历史实现就是这样把失败静默吞掉的）。
+    void update(next).then((saved) => {
+      if (saved) closeMenu()
+    })
+  }
+
+  const toggleMenu = () => {
+    if (open) {
+      closeMenu()
+      return
+    }
+    // 重新打开先清陈旧错误，避免把上一次的报错误读成本次结果。
+    clearError()
+    setConfirmAbandon(false)
+    setOpen(true)
   }
 
   const menu = open
@@ -144,6 +172,12 @@ export function SessionWorkflowPicker(props: {
                   : workflowExecutionModeLabel(state.effective.executionMode)}
             </span>
           </div>
+          {/* 失败原因排在所有提示之前并吸顶：写入失败时它是用户唯一需要先看到的信息。 */}
+          {error && (
+            <div className="session-workflow-error" role="alert">
+              {error}
+            </div>
+          )}
           {!effectiveFeatures.runtimeEnabled && (
             <div className="session-workflow-notice is-warning">
               {effectiveFeatures.runtimeRequested
@@ -225,7 +259,6 @@ export function SessionWorkflowPicker(props: {
               {localizeBindingBlocker(state.changeBlockers[0])}
             </div>
           )}
-          {error && <div className="session-workflow-error">{error}</div>}
         </div>,
         document.body,
       )
@@ -243,7 +276,7 @@ export function SessionWorkflowPicker(props: {
         data-selected={selected ? 'true' : 'false'}
         disabled={loading}
         title={accessibleLabel}
-        onClick={() => setOpen((value) => !value)}
+        onClick={toggleMenu}
       >
         <span aria-hidden="true">
           <Icons.Workflow size={15} strokeWidth={selected ? 2.2 : 1.6} />

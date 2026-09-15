@@ -33,6 +33,42 @@ describe('SessionWorkflowPicker styles', () => {
     )
   })
 
+  it('highlights the selected trigger with real theme tokens', () => {
+    const styles = readFileSync(new URL('./SessionWorkflowPicker.less', import.meta.url), 'utf8')
+    // 只看触发器那一段规则（到菜单容器规则为止）
+    const triggerBlock = styles.slice(
+      styles.indexOf('.session-workflow-trigger'),
+      styles.indexOf('.session-workflow-menu {'),
+    )
+
+    // 选中态必须用本项目真实存在的主题色 token：--primary 图标 + --selected(--primary-soft) 浅底
+    expect(triggerBlock).toMatch(
+      /\.session-workflow-trigger\.is-selected\s*\{[^}]*color: var\(--primary\);/,
+    )
+    expect(triggerBlock).toMatch(
+      /\.session-workflow-trigger\.is-selected\s*\{[^}]*background: var\(--selected\);/,
+    )
+    // --color-* 系列 token 本项目未定义，声明整条失效会让选中/hover/焦点态全部静默消失
+    expect(triggerBlock).not.toMatch(/var\(--color-/)
+    // hover / 展开的高亮不能盖掉选中态（排除 .is-selected 后仍有更高特异性）
+    expect(triggerBlock).toMatch(
+      /\.session-workflow-trigger:hover:not\(:disabled\),[\s\S]*?:not\(\.is-selected\)\s*\{/,
+    )
+  })
+
+  it('pins the failure notice to the top of the scrollable menu', () => {
+    const styles = readFileSync(new URL('./SessionWorkflowPicker.less', import.meta.url), 'utf8')
+
+    // 报错必须吸顶：菜单可滚动，放末尾会被滚出可视区（用户点完看不到失败原因）。
+    expect(styles).toMatch(
+      /\.session-workflow-error\s*\{[\s\S]*?position: sticky;[\s\S]*?top: 0;/,
+    )
+    // 吸顶块需要与菜单同色，否则滚动时下层文字会透出来。
+    expect(styles).toMatch(/\.session-workflow-error\s*\{[\s\S]*?background: var\(--panel\);/)
+    // 通栏收口用分割线，不引入卡片式边框盒子。
+    expect(styles).toMatch(/\.session-workflow-error\s*\{[\s\S]*?border-bottom: 1px solid var\(--border\);/)
+  })
+
   it('places the picker in the outer parameter bar immediately after the debug toggle', () => {
     const source = readFileSync(new URL('../ComposerV2.tsx', import.meta.url), 'utf8')
     const pickerOccurrences = source.match(/<SessionWorkflowPicker/g) ?? []

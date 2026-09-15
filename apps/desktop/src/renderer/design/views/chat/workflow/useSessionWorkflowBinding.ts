@@ -98,9 +98,15 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
     if (event.scope === 'settings' && event.id === 'sessionWorkflowBinding') void reload()
   })
 
+  /**
+   * 切换本会话绑定的工作流。
+   *
+   * 返回值表达「是否真的写成功」：预检不通过、IPC 报错、CAS 冲突都返回 false，
+   * 调用方据此保留弹窗并就地展示原因，而不是关掉弹窗让用户对着没有任何反馈的界面发呆。
+   */
   const update = useCallback(
     async (next: { mode: 'inherit' | 'disabled' } | { mode: 'override'; workflowId: string }) => {
-      if (sessionId == null || state == null) return
+      if (sessionId == null || state == null) return false
       try {
         const result = await setBinding.invoke({
           sessionId,
@@ -110,11 +116,11 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
         if (result.error != null) {
           setError(localizeBindingError(result.error))
           await reload()
-          return
+          return false
         }
         if (!result.preflight.ok || result.binding == null) {
           setError(localizeBindingError(result.preflight.issues))
-          return
+          return false
         }
         setState({
           binding: result.binding,
@@ -125,13 +131,20 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
           features: state.features,
         })
         setError(null)
+        return true
       } catch (cause) {
         setError(localizeBindingError(cause))
         await reload()
+        return false
       }
     },
     [reload, sessionId, setBinding.invoke, state],
   )
+
+  /** 清掉上一次操作的错误提示：重新打开菜单时不应把陈旧报错当成本次操作的结果。 */
+  const clearError = useCallback(() => {
+    setError(null)
+  }, [])
 
   /** 「放弃并新建运行」：放弃当前代次失败 Run 并轮换代次；错误时刷新状态。 */
   const abandonRun = useCallback(async () => {
@@ -177,6 +190,7 @@ export function useSessionWorkflowBinding(sessionId: string | null) {
     saving: setBinding.loading,
     abandoning: abandonRunInvoke.loading,
     error,
+    clearError,
     reload,
     update,
     abandonRun,

@@ -12,6 +12,7 @@ const harness = vi.hoisted(() => ({
   loading: false,
   error: null as string | null,
   reload: vi.fn(),
+  clearError: vi.fn(),
   update: vi.fn(),
   abandonRun: vi.fn(),
 }))
@@ -26,6 +27,7 @@ vi.mock('./useSessionWorkflowBinding', () => ({
     abandoning: false,
     error: harness.error,
     reload: harness.reload,
+    clearError: harness.clearError,
     update: harness.update,
     abandonRun: harness.abandonRun,
   }),
@@ -42,8 +44,10 @@ describe('SessionWorkflowPicker', () => {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
-    harness.update.mockReset()
+    // 默认「保存成功」：菜单在这些用例里应当正常关闭；失败路径由专门用例覆盖。
+    harness.update.mockReset().mockResolvedValue(true)
     harness.reload.mockReset()
+    harness.clearError.mockReset()
     harness.abandonRun.mockReset()
     harness.state = null
     harness.workflows = [makeWorkflow('workflow-a', 'Workflow A')]
@@ -359,6 +363,44 @@ describe('SessionWorkflowPicker', () => {
     ].find((item) => item.textContent === longName)
     expect(workflowLabel?.title).toBe(longName)
     expect(workflowLabel?.nextElementSibling?.textContent).toBe('v1.0.0')
+  })
+
+  // 保存失败（预检不通过 / IPC 报错）时必须留在弹窗里把原因摆在顶部：
+  // 历史实现先关弹窗、报错又挂在菜单末尾，用户点完既看不到原因也不知道有没有点上。
+  it('keeps the menu open and pins the failure at the top when saving fails', async () => {
+    const failure = '工作流包含不支持节点类型「output」（节点 release-output）。'
+    harness.state = makeState({
+      writeEnabled: true,
+      runtimeRequested: true,
+      runtimeEnabled: true,
+    })
+    harness.update.mockResolvedValue(false)
+    await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('.session-workflow-trigger')?.click(),
+    )
+    expect(harness.clearError).toHaveBeenCalledTimes(1)
+
+    const workflowB = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'),
+    ].find((button) => button.textContent?.includes('Workflow B'))
+    await act(async () => workflowB?.click())
+    expect(document.querySelector('.session-workflow-menu')).not.toBeNull()
+
+    // hook 写入错误后重渲染：报错必须出现在菜单首屏、位于选项之前，并带 alert 语义。
+    harness.error = failure
+    await act(async () => root.render(<SessionWorkflowPicker sessionId="session-a" />))
+
+    const menu = document.body.querySelector<HTMLDivElement>(':scope > .session-workflow-menu')
+    const alert = menu?.querySelector<HTMLDivElement>('.session-workflow-error')
+    expect(alert?.getAttribute('role')).toBe('alert')
+    expect(alert?.textContent).toBe(failure)
+    const firstOption = menu?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+    expect(alert).not.toBeNull()
+    expect(firstOption).not.toBeNull()
+    expect(
+      alert!.compareDocumentPosition(firstOption!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
   })
 
   it('requires a separate confirmation before abandoning a failed run', async () => {
