@@ -79,3 +79,32 @@ describe('canReorderSidebarSessions', () => {
     expect(canReorderSidebarSessions(DEFAULT_SIDEBAR_FILTER, true)).toBe(false)
   })
 })
+
+describe('SidebarFilterMenu session-label filter', () => {
+  it('treats any non-default label filter as active', () => {
+    expect(isDefaultFilter({ ...DEFAULT_SIDEBAR_FILTER })).toBe(true)
+    expect(isDefaultFilter({ ...DEFAULT_SIDEBAR_FILTER, labels: 'labeled' })).toBe(false)
+    expect(isDefaultFilter({ ...DEFAULT_SIDEBAR_FILTER, labels: 'unlabeled' })).toBe(false)
+    expect(isDefaultFilter({ ...DEFAULT_SIDEBAR_FILTER, labels: 'suspended' })).toBe(false)
+  })
+
+  it('blocks reordering because the label filter hides sessions', () => {
+    expect(canReorderSidebarSessions({ ...DEFAULT_SIDEBAR_FILTER, labels: 'labeled' }, false)).toBe(
+      false,
+    )
+    expect(
+      canReorderSidebarSessions({ ...DEFAULT_SIDEBAR_FILTER, labels: 'pending-review' }, false),
+    ).toBe(false)
+    expect(canReorderSidebarSessions({ ...DEFAULT_SIDEBAR_FILTER, labels: 'all' }, false)).toBe(
+      true,
+    )
+  })
+
+  it('clears the label filter together with the other filters', () => {
+    const cleared = clearSidebarFilters({
+      ...DEFAULT_SIDEBAR_FILTER,
+      labels: 'undelivered',
+    })
+    expect(cleared.labels).toBe('all')
+  })
+})

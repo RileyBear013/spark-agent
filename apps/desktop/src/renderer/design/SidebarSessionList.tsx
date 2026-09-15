@@ -68,6 +68,19 @@ import {
   type SidebarLastActivityFilter,
   type SidebarScheduledTasksFilter,
 } from './SidebarFilterMenu'
+import type { SidebarActionMenuItem } from './SidebarActionMenu'
+import { SidebarActionMenu } from './SidebarActionMenu'
+import { SessionLabelMenu } from './SessionLabelMenu'
+import { SessionLabelTag } from './SessionLabelTag'
+import './session-labels.less'
+import {
+  getSessionLabelMeta,
+  isSessionPinnedZone,
+  isSidebarLabelFilterValue,
+  matchesSidebarLabelFilter,
+  type SessionLabelKey,
+  type SidebarLabelsFilter,
+} from './session-labels'
 import type { SessionScheduleSummaries } from './session-schedule-summary'
 import { isModalOverlayVisible, useSessionDeleteShortcut } from './hooks/useAppDialogKeyboard'
 import {
@@ -269,6 +282,9 @@ function readSidebarFilter(): SidebarFilterState {
       scheduledTasks: parsed.scheduledTasks ?? DEFAULT_SIDEBAR_FILTER.scheduledTasks,
       canvasProjects: parsed.canvasProjects ?? DEFAULT_SIDEBAR_FILTER.canvasProjects,
       groupBy: parsed.groupBy ?? DEFAULT_SIDEBAR_FILTER.groupBy,
+      labels: isSidebarLabelFilterValue(parsed.labels)
+        ? parsed.labels
+        : DEFAULT_SIDEBAR_FILTER.labels,
     }
   } catch {
     return { ...DEFAULT_SIDEBAR_FILTER }
@@ -343,6 +359,14 @@ function filterByScheduledTasks(
   })
 }
 
+function filterBySessionLabel(
+  sessions: SessionSummary[],
+  filter: SidebarLabelsFilter,
+): SessionSummary[] {
+  if (filter === 'all') return sessions
+  return sessions.filter((session) => matchesSidebarLabelFilter(session, filter))
+}
+
 export function applySessionFilters(
   sessions: SessionSummary[],
   filter: SidebarFilterState,
@@ -353,7 +377,10 @@ export function applySessionFilters(
     filter.canvasProjects === 'show' ? sessions : filterCanvasSessions(sessions, workspaces)
   return filterByLastActivity(
     filterByScheduledTasks(
-      filterByProject(filterByStatus(canvasVisibleSessions, filter.status), filter.projectIds),
+      filterByProject(
+        filterBySessionLabel(filterByStatus(canvasVisibleSessions, filter.status), filter.labels),
+        filter.projectIds,
+      ),
       filter.scheduledTasks,
       scheduleSummaries,
     ),
@@ -519,7 +546,7 @@ function shouldShowSessionDateMarker(
   previousSession: SessionSummary | undefined,
 ): boolean {
   if (previousSession == null) return false
-  if (session.pinnedAt != null || previousSession.pinnedAt != null) return false
+  if (isSessionPinnedZone(session) || isSessionPinnedZone(previousSession)) return false
   const currentKey = getSessionLocalDateKey(session.updatedAt)
   const previousKey = getSessionLocalDateKey(previousSession.updatedAt)
   return currentKey != null && previousKey != null && currentKey !== previousKey
@@ -623,58 +650,12 @@ function getStatusBadgeInfo(
   }
 }
 
-/* ─── ActionMenu ─── */
-function ActionMenu({
-  items,
-  onAction,
-}: {
-  items: Array<{ icon: ReactNode; label: string; danger?: boolean; onClick: () => void }>
-  onAction?: () => void
-}) {
-  const actionQueuedRef = useRef(false)
-  const runAction = (item: { onClick: () => void }) => {
-    if (actionQueuedRef.current) return
-    actionQueuedRef.current = true
-    onAction?.()
-    window.setTimeout(() => {
-      actionQueuedRef.current = false
-      item.onClick()
-    }, 0)
-  }
-
-  return (
-    <div
-      className="action-menu"
-      onClick={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
-    >
-      {items.map((item) => (
-        <button
-          type="button"
-          key={item.label}
-          className={`action-menu-item${item.danger ? ' danger' : ''}`}
-          onPointerDown={(e) => {
-            e.stopPropagation()
-            runAction(item)
-          }}
-          onClick={(e) => {
-            e.stopPropagation()
-            runAction(item)
-          }}
-        >
-          {item.icon}
-          <span>{item.label}</span>
-        </button>
-      ))}
-    </div>
-  )
-}
-
-// 注:ActionMenu 在 antd Dropdown 下通过 popupRender 注入 JSX 内容
+// 注:一级菜单与二级浮层由 SidebarActionMenu / SessionLabelMenu 提供
 
 /* ─── SessionHoverCard — 会话行悬浮信息面板（扁平简约卡片） ─── */
-function SessionHoverCard({
+export function SessionHoverCard({
   title,
+  labelKey,
   projectName,
   branch,
   absoluteTime,
@@ -685,6 +666,8 @@ function SessionHoverCard({
   onCommitTitle,
 }: {
   title: string
+  /** 会话当前标记：非空时在标题行右侧渲染带标记配色的状态标签。 */
+  labelKey?: SessionLabelKey | null | undefined
   projectName: string | null
   branch?: string | undefined
   absoluteTime: string
@@ -783,6 +766,8 @@ function SessionHoverCard({
             {title}
           </span>
         )}
+        {/* 标记标签与标题同一行，靠右上角对齐；未标记时组件自身渲染 null */}
+        <SessionLabelTag labelKey={labelKey} />
       </div>
       <div className="session-hover-card-rows">{rows}</div>
     </div>
@@ -801,6 +786,7 @@ function ChatListItem({
   onRename,
   onCommitTitle,
   onTogglePinned,
+  onSetLabel,
   onArchive,
   onDelete,
   onCollaborate,
@@ -820,6 +806,8 @@ function ChatListItem({
   onRename?: (session: SessionSummary) => void
   onCommitTitle?: (session: SessionSummary, title: string) => Promise<void>
   onTogglePinned?: (session: SessionSummary) => void
+  /** 设置/取消会话标记；null 表示取消标记 */
+  onSetLabel?: (session: SessionSummary, next: SessionLabelKey | null) => void
   onArchive?: (session: SessionSummary) => void
   onDelete?: (session: SessionSummary) => void
   onCollaborate?: (session: SessionSummary) => void
@@ -873,6 +861,12 @@ function ChatListItem({
     }
     return sessionWorkspace.name || null
   }, [sessionWorkspace, noProjectWorkspace, t])
+  // 会话标记（打标）：决定是否进入置顶区，以及置顶图标的着色与提示
+  const labelMeta = s.sessionLabel != null ? getSessionLabelMeta(s.sessionLabel) : null
+  const inPinnedZone = isSessionPinnedZone(s)
+  const labelText = labelMeta != null ? t(labelMeta.labelKey) : null
+  const pinTitle =
+    labelText != null ? t('sidebar.session.labeledAutoPinned', { label: labelText }) : null
   // 悬浮卡时间信息（hover 态才渲染，普通计算即可，无需 useMemo 缓存）
   const hoverTitle = s.title || t('sidebar.newSession')
   const absoluteTime = formatAbsoluteDateTime(s.updatedAt)
@@ -906,6 +900,7 @@ function ChatListItem({
       content={
         <SessionHoverCard
           title={hoverTitle}
+          labelKey={s.sessionLabel}
           projectName={projectLabel}
           branch={worktreeBranch}
           absoluteTime={absoluteTime}
@@ -971,7 +966,18 @@ function ChatListItem({
                 </span>
               ) : null
             })()}
-            {s.pinnedAt != null && <Pin size={11} fill="currentColor" className="pinned-icon" />}
+            {inPinnedZone &&
+              (labelMeta != null ? (
+                <span
+                  className={`session-pin-wrap ${labelMeta.colorClass}`}
+                  title={pinTitle ?? undefined}
+                  aria-label={pinTitle ?? undefined}
+                >
+                  <Pin size={11} fill="currentColor" className="pinned-icon" />
+                </span>
+              ) : (
+                <Pin size={11} fill="currentColor" className="pinned-icon" />
+              ))}
             {worktreeBranch != null && (
               <span
                 className="worktree-branch-icon"
@@ -1050,7 +1056,7 @@ function ChatListItem({
                 placement="topRight"
                 align={{ overflow: { shiftX: true, adjustY: true } }}
                 popupRender={() => (
-                  <ActionMenu
+                  <SidebarActionMenu
                     onAction={() => setMenuOpen(false)}
                     items={[
                       {
@@ -1059,7 +1065,29 @@ function ChatListItem({
                           s.pinnedAt == null
                             ? t('sidebar.session.pin')
                             : t('sidebar.session.unpin'),
+                        // 已标记会话恒定落在置顶区：置顶开关不再生效，禁用并说明原因，
+                        // 避免出现「点了取消置顶但仍排在顶部」的矛盾状态。
+                        ...(labelText != null
+                          ? { disabled: true, hint: t('sidebar.session.labeledPinLocked') }
+                          : {}),
                         onClick: () => onTogglePinned?.(s),
+                      },
+                      {
+                        icon: <Icons.Tag size={14} />,
+                        label:
+                          labelText != null
+                            ? `${t('sidebar.session.label')}：${labelText}`
+                            : t('sidebar.session.label'),
+                        submenu: (
+                          <SessionLabelMenu
+                            current={s.sessionLabel ?? null}
+                            onSelect={(next) => {
+                              setMenuOpen(false)
+                              setContextOpen(false)
+                              onSetLabel?.(s, next)
+                            }}
+                          />
+                        ),
                       },
                       {
                         icon: <Icons.Edit size={14} />,
@@ -1139,6 +1167,7 @@ export function ProjectSessionGroup({
   onRenameSession,
   onCommitSessionTitle,
   onToggleSessionPinned,
+  onSetLabelSession,
   onArchiveSession,
   onDeleteSession,
   onCollaborate,
@@ -1168,6 +1197,8 @@ export function ProjectSessionGroup({
   onRenameSession: (session: SessionSummary) => void
   onCommitSessionTitle: (session: SessionSummary, title: string) => Promise<void>
   onToggleSessionPinned: (session: SessionSummary) => void
+  /** 设置/取消会话标记（null = 取消） */
+  onSetLabelSession: (session: SessionSummary, next: SessionLabelKey | null) => void
   onArchiveSession: (session: SessionSummary) => void
   onDeleteSession: (session: SessionSummary) => void
   onCollaborate?: (session: SessionSummary) => void
@@ -1193,7 +1224,7 @@ export function ProjectSessionGroup({
     }
   }, [group.workspace.rootPath, optionalToast])
 
-  const projectMenuItems = [
+  const projectMenuItems: SidebarActionMenuItem[] = [
     {
       icon: <Icons.Code size={14} />,
       label: t('sidebar.project.openInEditor'),
@@ -1236,9 +1267,9 @@ export function ProjectSessionGroup({
   const sessions = group.sessions
   // 置顶会话始终展示、不占用折叠阈值名额；阈值只作用于非置顶会话。
   // sessions 进入前已被 sortSessionsByPinned 预排为「置顶段在前、普通段在后」，
-  // 因此按 pinnedAt 拆分后顺序稳定，不会打乱置顶段内 / 普通段内的既有序。
-  const pinnedSessions = sessions.filter((s) => s.pinnedAt != null)
-  const unpinnedSessions = sessions.filter((s) => s.pinnedAt == null)
+  // 因此按置顶区谓词（手动置顶或已打标）拆分后顺序稳定，不会打乱两段内的既有序。
+  const pinnedSessions = sessions.filter((s) => isSessionPinnedZone(s))
+  const unpinnedSessions = sessions.filter((s) => !isSessionPinnedZone(s))
   const hasMoreSessions = unpinnedSessions.length > visibleSessionCount
   const canCollapseSessions = visibleSessionCount > PROJECT_SESSION_INITIAL_VISIBLE
   const visibleSessions = [...pinnedSessions, ...unpinnedSessions.slice(0, visibleSessionCount)]
@@ -1260,7 +1291,7 @@ export function ProjectSessionGroup({
         trigger={['contextMenu']}
         placement="bottomLeft"
         popupRender={() => (
-          <ActionMenu onAction={() => setContextMenuOpen(false)} items={projectMenuItems} />
+          <SidebarActionMenu onAction={() => setContextMenuOpen(false)} items={projectMenuItems} />
         )}
       >
         <div
@@ -1343,7 +1374,7 @@ export function ProjectSessionGroup({
               placement="topRight"
               align={{ overflow: { shiftX: true, adjustY: true } }}
               popupRender={() => (
-                <ActionMenu onAction={() => setMenuOpen(false)} items={projectMenuItems} />
+                <SidebarActionMenu onAction={() => setMenuOpen(false)} items={projectMenuItems} />
               )}
             >
               <Tooltip title={t('sidebar.project.actions')} mouseEnterDelay={0.05}>
@@ -1406,6 +1437,7 @@ export function ProjectSessionGroup({
                         onRename={onRenameSession}
                         onCommitTitle={onCommitSessionTitle}
                         onTogglePinned={onToggleSessionPinned}
+                        onSetLabel={onSetLabelSession}
                         onArchive={onArchiveSession}
                         onDelete={onDeleteSession}
                         {...(onCollaborate != null ? { onCollaborate } : {})}
@@ -1421,7 +1453,7 @@ export function ProjectSessionGroup({
                     <SortableSessionContainer
                       key={session.id}
                       id={sessionSortableId(sessionSortProjectId, session.id)}
-                      pinned={session.pinnedAt != null}
+                      pinned={isSessionPinnedZone(session)}
                     >
                       {(dragActivatorProps) => renderSession(dragActivatorProps)}
                     </SortableSessionContainer>
@@ -1466,6 +1498,8 @@ type FlatGroupActions = {
   onRenameSession: (session: SessionSummary) => Promise<void>
   onCommitSessionTitle: (session: SessionSummary, title: string) => Promise<void>
   onToggleSessionPinned: (session: SessionSummary) => Promise<void>
+  /** 设置/取消会话标记（null = 取消） */
+  onSetLabelSession: (session: SessionSummary, next: SessionLabelKey | null) => void
   onArchiveSession: (session: SessionSummary) => Promise<void>
   onDeleteSession: (session: SessionSummary) => Promise<void>
   onCollaborate?: (session: SessionSummary) => void
@@ -1511,12 +1545,7 @@ export function FlatGroup({
   onTogglePinned?: (() => void) | undefined
   open: boolean
   onOpenChange: (next: boolean) => void
-  menuItems?: Array<{
-    icon: ReactNode
-    label: string
-    danger?: boolean
-    onClick: () => void
-  }>
+  menuItems?: SidebarActionMenuItem[]
   actions: FlatGroupActions
   projectDragActivatorProps?: React.HTMLAttributes<HTMLDivElement> | undefined
   sessionSortProjectId?: string
@@ -1531,8 +1560,10 @@ export function FlatGroup({
   const paginateSessions = groupId === 'project:no-project'
   // 置顶会话始终展示、不占用折叠阈值名额；阈值只作用于非置顶会话。
   // 仅分页分组（no-project）需要拆分；非分页分组直接用原 sessions，避免无谓计算。
-  const pinnedSessions = paginateSessions ? sessions.filter((s) => s.pinnedAt != null) : []
-  const unpinnedSessions = paginateSessions ? sessions.filter((s) => s.pinnedAt == null) : sessions
+  const pinnedSessions = paginateSessions ? sessions.filter((s) => isSessionPinnedZone(s)) : []
+  const unpinnedSessions = paginateSessions
+    ? sessions.filter((s) => !isSessionPinnedZone(s))
+    : sessions
   const visibleSessions = paginateSessions
     ? [...pinnedSessions, ...unpinnedSessions.slice(0, visibleSessionCount)]
     : sessions
@@ -1631,7 +1662,7 @@ export function FlatGroup({
               placement="topRight"
               align={{ overflow: { shiftX: true, adjustY: true } }}
               popupRender={() => (
-                <ActionMenu onAction={() => setMenuOpen(false)} items={menuItems} />
+                <SidebarActionMenu onAction={() => setMenuOpen(false)} items={menuItems} />
               )}
             >
               <Tooltip
@@ -1683,6 +1714,7 @@ export function FlatGroup({
                   onRename={actions.onRenameSession}
                   onCommitTitle={actions.onCommitSessionTitle}
                   onTogglePinned={actions.onToggleSessionPinned}
+                  onSetLabel={actions.onSetLabelSession}
                   onArchive={actions.onArchiveSession}
                   onDelete={actions.onDeleteSession}
                   {...(actions.onCollaborate != null
@@ -1701,7 +1733,7 @@ export function FlatGroup({
                 <SortableSessionContainer
                   key={session.id}
                   id={sessionSortableId(sessionSortProjectId, session.id)}
-                  pinned={session.pinnedAt != null}
+                  pinned={isSessionPinnedZone(session)}
                 >
                   {(dragActivatorProps) => renderSession(dragActivatorProps)}
                 </SortableSessionContainer>
@@ -2337,7 +2369,7 @@ export function SidebarSessionList() {
   const pinnedSessionIdSet = useMemo(
     () =>
       new Set<string>(
-        ctx.sessions.filter((session) => session.pinnedAt != null).map((session) => session.id),
+        ctx.sessions.filter((session) => isSessionPinnedZone(session)).map((session) => session.id),
       ),
     [ctx.sessions],
   )
@@ -2436,7 +2468,7 @@ export function SidebarSessionList() {
         return
       }
       const zoneIds: string[] = group.sessions
-        .filter((session) => (session.pinnedAt != null) === activePinned)
+        .filter((session) => isSessionPinnedZone(session) === activePinned)
         .map((session) => session.id)
       const next = moveItem(
         zoneIds,
@@ -2711,6 +2743,7 @@ export function SidebarSessionList() {
                               onRenameSession={ctx.handleRenameSession}
                               onCommitSessionTitle={ctx.commitSessionTitle}
                               onToggleSessionPinned={ctx.handleToggleSessionPinned}
+                              onSetLabelSession={ctx.handleSetSessionLabel}
                               onArchiveSession={ctx.handleArchiveSession}
                               onDeleteSession={ctx.handleDeleteSession}
                               onCollaborate={handleCollaborateSession}
@@ -2891,6 +2924,7 @@ export function SidebarSessionList() {
                           onRenameSession: ctx.handleRenameSession,
                           onCommitSessionTitle: ctx.commitSessionTitle,
                           onToggleSessionPinned: ctx.handleToggleSessionPinned,
+                          onSetLabelSession: ctx.handleSetSessionLabel,
                           onArchiveSession: ctx.handleArchiveSession,
                           onDeleteSession: ctx.handleDeleteSession,
                           onCollaborate: handleCollaborateSession,

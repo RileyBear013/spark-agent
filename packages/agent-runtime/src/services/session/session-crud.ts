@@ -19,6 +19,7 @@ import type {
   SessionChatMode,
   SessionExtractTitleResponse,
   SessionId,
+  SessionLabelKey,
   SessionListResponse,
   SessionPermissionMode,
   SessionReference,
@@ -32,6 +33,8 @@ import {
   getCliSparkOverrideFromMetadata,
   getDebugModeFromMetadata,
   getFastModeFromMetadata,
+  getSessionLabelFromMetadata,
+  getSessionLabeledAtFromMetadata,
   getImportedFromMetadata,
   getLastRunOutcomeFromMetadata,
   normalizeCliSparkOverride,
@@ -267,6 +270,8 @@ export class SessionCrudController {
       turnCount: row.turn_count,
       logicalMessageCount: row.logical_message_count,
       messageCount: row.logical_message_count,
+      sessionLabel: getSessionLabelFromMetadata(row.metadata_json),
+      labeledAt: getSessionLabeledAtFromMetadata(row.metadata_json),
       ...(getImportedFromMetadata(row.metadata_json) != null
         ? { importedFrom: getImportedFromMetadata(row.metadata_json)! }
         : {}),
@@ -354,6 +359,8 @@ export class SessionCrudController {
     reasoningEffort?: SparkReasoningEffort
     fastMode?: boolean
     debugMode?: boolean
+    /** null 取消标记；undefined 不修改 */
+    sessionLabel?: SessionLabelKey | null
     cliSparkOverride?: CliSparkOverride | null
   }): Promise<{ session: SessionListResponse['sessions'][number] }> {
     const sessionRepo = new SessionRepository(this.db)
@@ -368,6 +375,15 @@ export class SessionCrudController {
 
     if (params.fastMode !== undefined) {
       sessionRepo.patchMetadata(params.sessionId, { fastMode: params.fastMode })
+    }
+
+    // 用户标记同样存 metadata（不新增列）：标记与打标时间成对写入，
+    // 取消标记（null）同时清空时间，渲染端据此把会话移出置顶区。
+    if (params.sessionLabel !== undefined) {
+      sessionRepo.patchMetadata(params.sessionId, {
+        sessionLabel: params.sessionLabel,
+        labeledAt: params.sessionLabel == null ? null : new Date().toISOString(),
+      })
     }
 
     if (params.cliSparkOverride !== undefined) {
@@ -448,6 +464,8 @@ export class SessionCrudController {
         turnCount: row.turn_count,
         logicalMessageCount: row.logical_message_count,
         messageCount: row.logical_message_count,
+        sessionLabel: getSessionLabelFromMetadata(row.metadata_json),
+        labeledAt: getSessionLabeledAtFromMetadata(row.metadata_json),
         debugMode: getDebugModeFromMetadata(row.metadata_json),
         runtimeWorktree: readSessionRuntimeWorktree(row.metadata_json),
         cliSparkOverride: getCliSparkOverrideFromMetadata(row.metadata_json),

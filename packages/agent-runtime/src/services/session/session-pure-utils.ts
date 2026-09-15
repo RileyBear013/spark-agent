@@ -32,6 +32,7 @@ import type {
   SessionChatMode,
   SessionAttachment,
   SessionId,
+  SessionLabelKey,
   SessionLineage,
   SessionPermissionMode,
   SessionReference,
@@ -44,6 +45,7 @@ import {
   LOCAL_CODEX_CLI_DEFAULT_MODEL,
   isLocalCodexCliProvider,
   filterBlockedModelIds,
+  SESSION_LABEL_KEYS,
   isScheduleActiveNow,
   parseModelSchedules,
   sanitizeModelSchedules,
@@ -1100,6 +1102,44 @@ export function getDebugModeFromMetadata(metadataJson: string | null | undefined
     return meta.debugMode === true
   } catch {
     return false
+  }
+}
+
+/** 把任意输入收窄为合法会话标记键；非法/缺失回退 null（未标记）。 */
+export function toSessionLabelKey(value: unknown): SessionLabelKey | null {
+  if (typeof value !== 'string') return null
+  return (SESSION_LABEL_KEYS as readonly string[]).includes(value)
+    ? (value as SessionLabelKey)
+    : null
+}
+
+/** 从 session.metadata_json 解析用户标记（per-session，缺省/非法值回退未标记）。 */
+export function getSessionLabelFromMetadata(
+  metadataJson: string | null | undefined,
+): SessionLabelKey | null {
+  if (metadataJson == null || metadataJson === '') return null
+  try {
+    const meta = JSON.parse(metadataJson) as { sessionLabel?: unknown }
+    return toSessionLabelKey(meta.sessionLabel)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 从 session.metadata_json 解析打标时间（ISO 8601）。
+ * 标记已被清除或时间缺失/非法时返回 null，调用方回落到 updatedAt 排序。
+ */
+export function getSessionLabeledAtFromMetadata(
+  metadataJson: string | null | undefined,
+): string | null {
+  if (metadataJson == null || metadataJson === '') return null
+  try {
+    const meta = JSON.parse(metadataJson) as { sessionLabel?: unknown; labeledAt?: unknown }
+    if (toSessionLabelKey(meta.sessionLabel) == null) return null
+    return typeof meta.labeledAt === 'string' && meta.labeledAt.length > 0 ? meta.labeledAt : null
+  } catch {
+    return null
   }
 }
 

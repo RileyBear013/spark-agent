@@ -1176,17 +1176,26 @@ button.session-terminal-indicator-btn {
   border-radius: 8px;
 }
 
+// 悬浮卡标题排版常量：标题行、标记标签、编辑态输入框共用，避免字号/行高在多处各写一份
+@hover-card-title-font-size: 12px;
+@hover-card-title-line-height: 1.3;
+
+// 标题行：标题占满剩余宽度，标记标签贴右上角（标题折行时标签停在首行右侧）
 .session-hover-card-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
   margin-bottom: 4px;
   color: var(--text);
-  font-size: 12px;
+  font-size: @hover-card-title-font-size;
   font-weight: 600;
-  line-height: 1.3;
+  line-height: @hover-card-title-line-height;
   min-width: 0;
 }
 
 .session-hover-card-title-text {
   display: -webkit-box;
+  flex: 1 1 auto;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -1194,14 +1203,23 @@ button.session-terminal-indicator-btn {
   cursor: text; // 暗示双击可改名
 }
 
+// 标记状态标签：与标题同排、只占自身宽度；高度取标题首行行盒高度，
+// flex-start 对齐下标签中心与首行文字中心天然重合（不靠 margin 微调）
+.session-hover-card-title > .session-label-tag {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  height: (@hover-card-title-font-size * @hover-card-title-line-height);
+}
+
 // 编辑态：紧凑输入框，继承标题字号字重，聚焦时主色高亮（容器前缀提优先级覆盖 antd 默认）
 .session-hover-card .session-hover-card-title-input {
-  width: 100%;
+  flex: 1 1 auto; // 与标签同排：占满剩余宽度，让出标签自身宽度
+  width: auto;
   min-width: 0;
   padding: 1px 6px;
-  font-size: 12px;
+  font-size: @hover-card-title-font-size;
   font-weight: 600;
-  line-height: 1.3;
+  line-height: @hover-card-title-line-height;
   color: var(--text);
   background: transparent;
   border: 1px solid var(--color-primary-5, rgba(74, 140, 255, 0.55));
@@ -1218,6 +1236,12 @@ button.session-terminal-indicator-btn {
 
 .session-hover-card.is-editing {
   min-width: 200px;
+}
+
+// 编辑态：标题行高度由输入框决定（输入框内边距与边框上下对称），
+// 标签改为行内居中，即与输入框文字中心严格重合
+.session-hover-card.is-editing .session-hover-card-title > .session-label-tag {
+  align-self: center;
 }
 
 .session-hover-card-rows {

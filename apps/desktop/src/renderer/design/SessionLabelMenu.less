@@ -1,0 +1,54 @@
+/* SessionLabelMenu — 会话标记二级浮层（容器 chrome 与 .action-menu 一致，无 border） */
+.session-label-menu {
+  min-width: 148px;
+  padding: 4px;
+  background: var(--panel);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-dropdown, 100);
+  overflow: hidden;
+}
+
+.session-label-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--hover);
+    outline: none;
+  }
+
+  &.is-active {
+    color: var(--primary, #2f6cff);
+  }
+}
+
+.session-label-menu-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-label-menu-check {
+  color: var(--primary, #2f6cff);
+  flex-shrink: 0;
+}
+
+.session-label-menu-divider {
+  margin: 4px 6px;
+  height: 1px;
+  background: var(--border);
+}

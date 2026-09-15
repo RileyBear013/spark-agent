@@ -12,7 +12,13 @@ import {
 
 function session(
   id: string,
-  opts: { pinnedAt?: string | null; updatedAt: string; workspaceIds?: string[] },
+  opts: {
+    pinnedAt?: string | null
+    updatedAt: string
+    workspaceIds?: string[]
+    sessionLabel?: SessionSummary['sessionLabel']
+    labeledAt?: string | null
+  },
 ): SessionSummary {
   return {
     id: id as SessionId,
@@ -20,6 +26,8 @@ function session(
     updatedAt: opts.updatedAt,
     pinnedAt: opts.pinnedAt ?? null,
     workspaceIds: opts.workspaceIds ?? [],
+    sessionLabel: opts.sessionLabel ?? null,
+    labeledAt: opts.labeledAt ?? null,
   } as unknown as SessionSummary
 }
 
@@ -76,6 +84,62 @@ describe('sortSessionsByPinned', () => {
     ]
     sortSessionsByPinned(input)
     expect(input.map((s) => s.id)).toEqual(['plain', 'pinned'])
+  })
+})
+
+describe('sortSessionsByPinned — 会话标记（打标）自动进置顶区', () => {
+  it('只打标（未手动置顶）的会话排进置顶段最前，且按打标时间倒序', () => {
+    const sorted = sortSessionsByPinned([
+      session('plain-new', { updatedAt: '2026-07-10T00:00:00.000Z' }),
+      session('labeled-old', {
+        sessionLabel: 'suspended',
+        labeledAt: '2026-07-02T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+      session('labeled-new', {
+        sessionLabel: 'undelivered',
+        labeledAt: '2026-07-08T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ])
+    expect(sorted.map((s) => s.id)).toEqual(['labeled-new', 'labeled-old', 'plain-new'])
+  })
+
+  it('标记与手动置顶混排时，手动置顶时间优先于打标时间', () => {
+    const sorted = sortSessionsByPinned([
+      session('pinned-older', {
+        pinnedAt: '2026-07-05T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+      session('labeled-newer', {
+        sessionLabel: 'pending-advance',
+        labeledAt: '2026-07-09T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+      session('pinned-and-labeled', {
+        pinnedAt: '2026-07-01T00:00:00.000Z',
+        sessionLabel: 'not-started',
+        labeledAt: '2026-07-20T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ])
+    // pinned-and-labeled 用 pinnedAt（07-01）参与排序，而非 labeledAt（07-20）
+    expect(sorted.map((s) => s.id)).toEqual(['labeled-newer', 'pinned-older', 'pinned-and-labeled'])
+  })
+})
+
+describe('composeProjectGroupSessions — 打标会话归入置顶段', () => {
+  it('打标会话进置顶段，非打标会话留在普通段', () => {
+    const sessions = sortSessionsByPinned([
+      session('normal-new', { updatedAt: '2026-07-10T00:00:00.000Z' }),
+      session('labeled', {
+        sessionLabel: 'pending-review',
+        labeledAt: '2026-07-04T00:00:00.000Z',
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ])
+    const composed = composeProjectGroupSessions(sessions, undefined, undefined)
+    expect(composed.map((s) => s.id)).toEqual(['labeled', 'normal-new'])
   })
 })
 

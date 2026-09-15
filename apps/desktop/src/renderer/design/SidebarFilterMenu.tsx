@@ -12,6 +12,13 @@ import './SidebarFilterMenu.less'
 import { Icons } from './Icons'
 import { useI18n } from './i18n'
 import { getCanvasWorkspaceIds } from './workspace-visibility'
+import './session-labels.less'
+import {
+  SIDEBAR_LABEL_FILTER_OPTIONS,
+  getSidebarLabelFilterColorClass,
+  getSidebarLabelFilterLabelKey,
+  type SidebarLabelsFilter,
+} from './session-labels'
 import type { WorkspaceInfo } from '@spark/protocol'
 
 export type SidebarStatusFilter =
@@ -34,6 +41,8 @@ export interface SidebarFilterState {
   scheduledTasks: SidebarScheduledTasksFilter
   canvasProjects: SidebarCanvasProjectsFilter
   groupBy: SidebarGroupBy
+  /** 会话标记筛选：全部 / 已标记 / 未标记 / 某个具体标记 */
+  labels: SidebarLabelsFilter
 }
 
 export const DEFAULT_SIDEBAR_FILTER: SidebarFilterState = {
@@ -43,6 +52,7 @@ export const DEFAULT_SIDEBAR_FILTER: SidebarFilterState = {
   scheduledTasks: 'all',
   canvasProjects: 'show',
   groupBy: 'project',
+  labels: 'all',
 }
 
 export function isDefaultFilter(state: SidebarFilterState): boolean {
@@ -52,7 +62,8 @@ export function isDefaultFilter(state: SidebarFilterState): boolean {
     state.lastActivity === DEFAULT_SIDEBAR_FILTER.lastActivity &&
     state.scheduledTasks === DEFAULT_SIDEBAR_FILTER.scheduledTasks &&
     state.canvasProjects === DEFAULT_SIDEBAR_FILTER.canvasProjects &&
-    state.groupBy === DEFAULT_SIDEBAR_FILTER.groupBy
+    state.groupBy === DEFAULT_SIDEBAR_FILTER.groupBy &&
+    state.labels === DEFAULT_SIDEBAR_FILTER.labels
   )
 }
 
@@ -63,7 +74,7 @@ export function clearSidebarFilters(state: SidebarFilterState): SidebarFilterSta
 
 /**
  * 拖拽排序只被「会改变分组内会话集合」的因素阻断：非项目分组、状态/最近活动/
- * 计划任务筛选与搜索 —— 它们让分组内只剩余部分会话，此时拖拽会把被隐藏会话
+ * 计划任务/标记筛选与搜索 —— 它们让分组内只剩余部分会话，此时拖拽会把被隐藏会话
  * 挤出手动序。项目筛选与画布项目显隐只决定哪些项目分组可见，不改变分组内的
  * 会话列表，因此不禁用拖拽（隐藏项由合并逻辑保留手动序）。
  */
@@ -76,6 +87,7 @@ export function canReorderSidebarSessions(
     filter.status === DEFAULT_SIDEBAR_FILTER.status &&
     filter.lastActivity === DEFAULT_SIDEBAR_FILTER.lastActivity &&
     filter.scheduledTasks === DEFAULT_SIDEBAR_FILTER.scheduledTasks &&
+    filter.labels === DEFAULT_SIDEBAR_FILTER.labels &&
     !searchActive
   )
 }
@@ -141,7 +153,7 @@ function SubMenu<T extends string>({
   current,
   onSelect,
 }: {
-  options: Array<{ value: T; label: string; hint?: string }>
+  options: Array<{ value: T; label: string; hint?: string; dotClass?: string | undefined }>
   current: T | null
   onSelect: (value: T) => void
 }) {
@@ -157,7 +169,12 @@ function SubMenu<T extends string>({
             onClick={() => onSelect(opt.value)}
           >
             <span className="sidebar-filter-submenu-item-label">
-              <span className="sidebar-filter-submenu-item-text">{opt.label}</span>
+              <span className="sidebar-filter-submenu-item-text">
+                {opt.dotClass != null && (
+                  <span className={`session-label-dot ${opt.dotClass}`} aria-hidden />
+                )}
+                {opt.label}
+              </span>
               {opt.hint && <span className="sidebar-filter-submenu-item-hint">{opt.hint}</span>}
             </span>
             {active && <Icons.Check size={14} className="sidebar-filter-submenu-check" />}
@@ -270,6 +287,16 @@ function FilterPopupContent({
       })),
     [t],
   )
+  const labelOptions = useMemo(
+    () =>
+      SIDEBAR_LABEL_FILTER_OPTIONS.map((option) => ({
+        value: option.value,
+        label: t(option.labelKey),
+        // 具体标记带状态色点，与右键二级菜单共用同一套色板
+        dotClass: getSidebarLabelFilterColorClass(option.value),
+      })),
+    [t],
+  )
   const projectOptions = useMemo(() => {
     const list: Array<{ value: string; label: string; hint?: string }> = [
       { value: 'all', label: t('sidebar.filter.allProjects') },
@@ -322,6 +349,7 @@ function FilterPopupContent({
   const projectHighlight = state.projectIds.length > 0
   const lastActivityHighlight = state.lastActivity !== 'all'
   const scheduledTasksHighlight = state.scheduledTasks !== 'all'
+  const labelsHighlight = state.labels !== 'all'
 
   return (
     <div className="sidebar-filter-menu" onClick={(e) => e.stopPropagation()}>
@@ -368,6 +396,18 @@ function FilterPopupContent({
           options={scheduledTaskOptions}
           current={state.scheduledTasks}
           onSelect={(value) => onChange({ ...state, scheduledTasks: value })}
+        />
+      </FilterRow>
+      <div className="sidebar-filter-divider" />
+      <FilterRow
+        label={t('sidebar.filter.rowLabels')}
+        valueLabel={t(getSidebarLabelFilterLabelKey(state.labels))}
+        highlighted={labelsHighlight}
+      >
+        <SubMenu
+          options={labelOptions}
+          current={state.labels}
+          onSelect={(value) => onChange({ ...state, labels: value })}
         />
       </FilterRow>
       <div className="sidebar-filter-divider" />

@@ -39,26 +39,40 @@ vi.mock('./SessionSidebarContext', async (importOriginal) => ({
 vi.mock('./i18n', () => ({
   useI18n: () => ({
     lang: 'zh',
-    t: (key: string) =>
-      ({
-        'sidebar.showLess': '收起',
-        'sidebar.showMore': '显示更多',
-        'sidebar.project.openInEditor': '打开项目',
-        'sidebar.projectsToolbar.title': '项目',
-        'sidebar.projectsToolbar.collapseAll': '折叠所有项目',
-        'sidebar.projectsToolbar.expandAll': '展开所有项目',
-        'sidebar.importHistory': '「从Claude、Codex」导入继续会话',
-        'sidebar.addProject': '添加项目',
-        'sidebar.empty.welcomeTitle': '从这里开始',
-        'sidebar.empty.welcomeDesc': '选择一种方式，马上进入你的工作空间',
-        'sidebar.empty.createProject': '新建项目',
-        'sidebar.empty.createProjectDesc': '从本地文件夹开始',
-        'sidebar.empty.startSession': '直接开始会话',
-        'sidebar.empty.startingSession': '正在准备会话…',
-        'sidebar.empty.startSessionDesc': '使用临时会话，不绑定项目',
-        'sidebar.empty.dropFolder': '把文件夹拖到这里',
-        'sidebar.empty.dropFolderDesc': '自动添加为项目',
-      })[key] ?? key,
+    t: (key: string, params?: Record<string, string | number>) => {
+      const template =
+        {
+          'sidebar.showLess': '收起',
+          'sidebar.showMore': '显示更多',
+          'sidebar.project.openInEditor': '打开项目',
+          'sidebar.projectsToolbar.title': '项目',
+          'sidebar.projectsToolbar.collapseAll': '折叠所有项目',
+          'sidebar.projectsToolbar.expandAll': '展开所有项目',
+          'sidebar.importHistory': '「从Claude、Codex」导入继续会话',
+          'sidebar.addProject': '添加项目',
+          'sidebar.label.suspended': '挂起',
+          'sidebar.label.notStarted': '未开始',
+          'sidebar.label.pendingReview': '待审查',
+          'sidebar.label.pendingAdvance': '待推进',
+          'sidebar.label.undelivered': '未交付',
+          'sidebar.session.pin': '置顶',
+          'sidebar.session.unpin': '取消置顶',
+          'sidebar.session.label': '标记',
+          'sidebar.session.labeledAutoPinned': '{{label}}（已标记，自动置顶）',
+          'sidebar.session.labeledPinLocked': '已标记，自动置顶',
+          'sidebar.empty.welcomeTitle': '从这里开始',
+          'sidebar.empty.welcomeDesc': '选择一种方式，马上进入你的工作空间',
+          'sidebar.empty.createProject': '新建项目',
+          'sidebar.empty.createProjectDesc': '从本地文件夹开始',
+          'sidebar.empty.startSession': '直接开始会话',
+          'sidebar.empty.startingSession': '正在准备会话…',
+          'sidebar.empty.startSessionDesc': '使用临时会话，不绑定项目',
+          'sidebar.empty.dropFolder': '把文件夹拖到这里',
+          'sidebar.empty.dropFolderDesc': '自动添加为项目',
+        }[key] ?? key
+      if (params == null) return template
+      return template.replace(/{{(\w+)}}/g, (_, name: string) => String(params[name] ?? ''))
+    },
   }),
 }))
 
@@ -149,6 +163,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -219,6 +234,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={onArchiveSession}
           onDeleteSession={() => undefined}
         />,
@@ -283,6 +299,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -341,6 +358,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
           sessionSortProjectId={workspace.id}
@@ -393,6 +411,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -453,6 +472,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -518,6 +538,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -578,6 +599,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
           onAddToConversation={onAddToConversation}
@@ -660,6 +682,7 @@ describe('ProjectSessionGroup pagination', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -738,6 +761,7 @@ describe('session terminal indicator opens terminal panel', () => {
           onRenameSession={() => undefined}
           onCommitSessionTitle={async () => undefined}
           onToggleSessionPinned={() => undefined}
+          onSetLabelSession={() => undefined}
           onArchiveSession={() => undefined}
           onDeleteSession={() => undefined}
         />,
@@ -952,6 +976,7 @@ describe('FlatGroup temporary session pagination', () => {
             onRenameSession: async () => undefined,
             onCommitSessionTitle: async () => undefined,
             onToggleSessionPinned: async () => undefined,
+            onSetLabelSession: () => undefined,
             onArchiveSession: async () => undefined,
             onDeleteSession: async () => undefined,
           }}
@@ -1086,5 +1111,257 @@ describe('SidebarProjectsEmptyState', () => {
 
     act(() => root.unmount())
     container.remove()
+  })
+})
+
+describe('session label（打标）筛选', () => {
+  const labeledSessions = (): SessionSummary[] => {
+    const base = createSessions(1)[0]
+    if (base === undefined) throw new Error('Expected a base session fixture')
+    return [
+      { ...base, id: 'session-plain' as SessionId },
+      {
+        ...base,
+        id: 'session-labeled' as SessionId,
+        sessionLabel: 'pending-review',
+        labeledAt: '2026-07-29T09:00:00.000Z',
+      },
+      {
+        ...base,
+        id: 'session-suspended' as SessionId,
+        sessionLabel: 'suspended',
+        labeledAt: '2026-07-29T10:00:00.000Z',
+      },
+    ] as SessionSummary[]
+  }
+
+  it('keeps only labeled sessions for the labeled filter', () => {
+    expect(
+      applySessionFilters(labeledSessions(), {
+        ...DEFAULT_SIDEBAR_FILTER,
+        labels: 'labeled',
+      }).map((session) => session.id),
+    ).toEqual(['session-labeled', 'session-suspended'])
+  })
+
+  it('keeps only unlabeled sessions for the unlabeled filter', () => {
+    expect(
+      applySessionFilters(labeledSessions(), {
+        ...DEFAULT_SIDEBAR_FILTER,
+        labels: 'unlabeled',
+      }).map((session) => session.id),
+    ).toEqual(['session-plain'])
+  })
+
+  it('matches one concrete label only', () => {
+    expect(
+      applySessionFilters(labeledSessions(), {
+        ...DEFAULT_SIDEBAR_FILTER,
+        labels: 'suspended',
+      }).map((session) => session.id),
+    ).toEqual(['session-suspended'])
+  })
+})
+
+describe('session label（打标）渲染', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  const workspace: WorkspaceInfo = {
+    archivedAt: null,
+    createdAt: '2026-07-29T08:00:00.000Z',
+    id: 'workspace-1',
+    name: 'Spark-Agent',
+    pinnedAt: null,
+    rootPath: '/tmp/spark-agent',
+    updatedAt: '2026-07-29T08:00:00.000Z',
+    worktreeMeta: null,
+  }
+
+  const renderGroup = (sessions: SessionSummary[], onSetLabelSession = () => undefined) => {
+    act(() => {
+      root.render(
+        <ProjectSessionGroup
+          group={{ workspace, sessions }}
+          activeSessionId={null}
+          activeWorkspaceId={workspace.id}
+          sessionAgentStatuses={{}}
+          sessionTerminalActivity={{}}
+          unreviewedCompletedSessions={new Set()}
+          open
+          onOpenChange={() => undefined}
+          onSelectWorkspace={async () => undefined}
+          onSelectSession={() => undefined}
+          onNewSession={() => undefined}
+          onRenameProject={() => undefined}
+          onToggleProjectPinned={() => undefined}
+          onArchiveProject={() => undefined}
+          onDeleteProject={() => undefined}
+          onOpenProjectFolder={() => undefined}
+          onOpenProjectInEditor={() => undefined}
+          onRenameSession={() => undefined}
+          onCommitSessionTitle={async () => undefined}
+          onToggleSessionPinned={() => undefined}
+          onSetLabelSession={onSetLabelSession}
+          onArchiveSession={() => undefined}
+          onDeleteSession={() => undefined}
+        />,
+      )
+    })
+  }
+
+  const buildSessions = (patch: Partial<SessionSummary>): SessionSummary[] => {
+    const base = createSessions(1)[0]
+    if (base === undefined) throw new Error('Expected a base session fixture')
+    return [{ ...base, ...patch } as SessionSummary]
+  }
+
+  /** 一级条目（不含带二级浮层的「标记」入口）。 */
+  const plainMenuButton = (text: string): HTMLButtonElement | undefined =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.action-menu-item'))
+      .filter((button) => !button.classList.contains('action-menu-item-has-submenu'))
+      .find((button) => button.textContent?.includes(text))
+
+  beforeEach(() => {
+    // 二级浮层（标记子菜单）经由 antd Dropdown 挂载 rc-resize-observer，需要该全局对象
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    container.remove()
+  })
+
+  it('打标会话落在置顶位，并按住标记配色渲染置顶图标', () => {
+    renderGroup(
+      buildSessions({
+        sessionLabel: 'pending-review',
+        pinnedAt: null,
+        labeledAt: '2026-07-29T09:00:00.000Z',
+      }),
+    )
+
+    const pin = container.querySelector('.session-pin-wrap.label-pending-review .pinned-icon')
+    expect(pin).not.toBeNull()
+    // 提示里给出标记名称，说明它为什么在置顶位
+    expect(container.querySelector('.session-pin-wrap')?.getAttribute('title')).toBe(
+      '待审查（已标记，自动置顶）',
+    )
+  })
+
+  it('未打标会话的置顶图标保持原样（不加包裹、不加标记配色）', () => {
+    renderGroup(buildSessions({ pinnedAt: '2026-07-29T09:00:00.000Z' }))
+
+    expect(container.querySelector('.session-pin-wrap')).toBeNull()
+    expect(container.querySelector('.pinned-icon')).not.toBeNull()
+  })
+
+  it('右键菜单提供「标记」二级入口，并在已标记时禁用置顶开关', async () => {
+    renderGroup(
+      buildSessions({ sessionLabel: 'undelivered', labeledAt: '2026-07-29T09:00:00.000Z' }),
+    )
+
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '.session-item-actions .item-menu-wrap .item-menu-btn',
+    )
+    if (moreButton == null) throw new Error('Missing session actions button')
+    await act(async () => moreButton.click())
+
+    // 菜单内容由 antd Dropdown 渲染到 body 上的 portal，需从 document 查询
+    const labelRow = document.querySelector<HTMLButtonElement>('.action-menu-item-has-submenu')
+    // 一级入口直接回显当前标记；二级浮层的选中态由 SessionLabelMenu.test 覆盖
+    expect(labelRow?.textContent).toBe('标记：未交付')
+
+    const pinRow = plainMenuButton('置顶')
+    expect(pinRow?.disabled).toBe(true)
+    expect(pinRow?.textContent).toContain('已标记，自动置顶')
+  })
+
+  it('悬浮信息卡的标记标签与标题同行、贴右上角展示', async () => {
+    renderGroup(
+      buildSessions({
+        sessionLabel: 'pending-review',
+        pinnedAt: null,
+        labeledAt: '2026-07-29T09:00:00.000Z',
+      }),
+    )
+
+    // antd Popover 走悬浮触发且带 400ms 延时，这里手动推进入场计时
+    vi.useFakeTimers()
+    try {
+      const item = container.querySelector('.chat-item')
+      if (item == null) throw new Error('Missing session item')
+      await act(async () => {
+        item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(600)
+      })
+
+      const tag = document.querySelector<HTMLSpanElement>(
+        '.session-hover-card .session-label-tag.label-pending-review',
+      )
+      expect(tag?.textContent).toBe('待审查')
+      expect(tag?.querySelector('.session-label-dot.label-pending-review')).not.toBeNull()
+
+      // 与标题同一行：标签和标题文本同属标题行，且标题行内标签排在标题之后（右上角）
+      const titleRow = tag?.parentElement
+      expect(titleRow?.classList.contains('session-hover-card-title')).toBe(true)
+      const titleText = titleRow?.querySelector('.session-hover-card-title-text')
+      expect(titleText?.textContent).toBe('会话 1')
+      expect([...(titleRow?.children ?? [])]).toEqual([titleText, tag])
+
+      // 原先标题下方的独立标签行已移除，避免出现重复标签
+      expect(document.querySelector('.session-hover-card-label')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('未打标会话的悬浮信息卡不出现状态标签', async () => {
+    renderGroup(buildSessions({ pinnedAt: '2026-07-29T09:00:00.000Z' }))
+
+    vi.useFakeTimers()
+    try {
+      const item = container.querySelector('.chat-item')
+      if (item == null) throw new Error('Missing session item')
+      await act(async () => {
+        item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(600)
+      })
+
+      expect(document.querySelector('.session-label-tag')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('未打标会话的置顶开关保持可用', async () => {
+    renderGroup(buildSessions({}))
+
+    const moreButton = container.querySelector<HTMLButtonElement>(
+      '.session-item-actions .item-menu-wrap .item-menu-btn',
+    )
+    if (moreButton == null) throw new Error('Missing session actions button')
+    await act(async () => moreButton.click())
+
+    const pinRow = plainMenuButton('置顶')
+    expect(pinRow?.disabled).toBe(false)
+    expect(pinRow?.textContent).not.toContain('已标记，自动置顶')
+    expect(
+      document.querySelector<HTMLButtonElement>('.action-menu-item-has-submenu')?.textContent,
+    ).toBe('标记')
   })
 })

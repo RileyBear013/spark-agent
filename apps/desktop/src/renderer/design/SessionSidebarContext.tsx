@@ -41,6 +41,7 @@ import {
   isProviderCompatibleWithAdapter,
 } from './utils/provider-adapter'
 import { resolveSessionGroupId, sortSessionsByPinned, toTime } from './sidebar-session-sort'
+import { isSessionPinnedZone, type SessionLabelKey } from './session-labels'
 import { listAllWorkspaces } from './services/list-all-workspaces'
 import {
   addProjectsFromDroppedPaths,
@@ -377,6 +378,8 @@ type SessionSidebarCtx = {
     title?: string,
   ) => Promise<SessionId | null>
   handleToggleSessionPinned: (session: SessionSummary) => Promise<void>
+  /** 设置/取消会话标记（null = 取消标记）；标记会让会话自动进入置顶区 */
+  handleSetSessionLabel: (session: SessionSummary, next: SessionLabelKey | null) => Promise<void>
   commitSessionTitle: (session: SessionSummary, title: string) => Promise<void>
   handleRenameSession: (session: SessionSummary) => Promise<void>
   handleDeleteSession: (session: SessionSummary) => Promise<void>
@@ -1717,6 +1720,48 @@ export function SessionSidebarProvider({
     [toast, updateSession, updateSessionInList, workspaces],
   )
 
+  /**
+   * 设置/取消会话标记。
+   *
+   * 标记与手动置顶正交：标记只写 metadata（sessionLabel + labeledAt），
+   * 「有标记 ⇒ 进置顶区」由渲染端谓词推导，因此乐观更新 sessionLabel 即可让
+   * 会话即时归位/移出置顶区，无需换算 pinnedAt。
+   * 失败时回滚到服务端确认值并提示错误（打标不是高频操作，保证失败可见性优先）。
+   */
+  const handleSetSessionLabel = useCallback(
+    async (session: SessionSummary, next: SessionLabelKey | null) => {
+      const currentLabel = session.sessionLabel ?? null
+      if (currentLabel === next) return
+      const currentLabeledAt = session.labeledAt ?? null
+      updateSessionInList(session.id, {
+        sessionLabel: next,
+        labeledAt: next == null ? null : new Date().toISOString(),
+      })
+      // 与置顶开关同款：把 id 搬进/搬出置顶区的持久手动序，避免跨区残留旧秩。
+      moveSessionOrderZoneRef.current?.(
+        session.id,
+        resolveSessionGroupId(session, workspaces),
+        isSessionPinnedZone({ ...session, sessionLabel: next }),
+      )
+      try {
+        const updated = await updateSession({ sessionId: session.id, sessionLabel: next })
+        updateSessionInList(session.id, updated.session)
+      } catch (err) {
+        updateSessionInList(session.id, {
+          sessionLabel: currentLabel,
+          labeledAt: currentLabeledAt,
+        })
+        moveSessionOrderZoneRef.current?.(
+          session.id,
+          resolveSessionGroupId(session, workspaces),
+          isSessionPinnedZone(session),
+        )
+        toast.error(err instanceof Error ? err.message : t('sidebar.session.labelFailed'))
+      }
+    },
+    [t, toast, updateSession, updateSessionInList, workspaces],
+  )
+
   // 纯保存逻辑：弹窗改名与悬浮卡 inline 改名共用，避免两处重复实现
   const commitSessionTitle = useCallback(
     async (session: SessionSummary, title: string) => {
@@ -2144,6 +2189,7 @@ export function SessionSidebarProvider({
       handleNewSession,
       handleForkSession,
       handleToggleSessionPinned,
+      handleSetSessionLabel,
       commitSessionTitle,
       handleRenameSession,
       handleDeleteSession,
@@ -2207,6 +2253,7 @@ export function SessionSidebarProvider({
       bumpSessionMessageCount,
       handleNewSession,
       handleToggleSessionPinned,
+      handleSetSessionLabel,
       commitSessionTitle,
       handleRenameSession,
       handleDeleteSession,

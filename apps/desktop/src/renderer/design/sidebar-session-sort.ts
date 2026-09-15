@@ -4,6 +4,7 @@
  */
 import type { SessionListResponse } from '@spark/protocol'
 import { sortByManualOrder } from './sidebar-manual-order'
+import { getSessionPinTime, isSessionPinnedZone } from './session-labels'
 
 export type SessionSummary = SessionListResponse['sessions'][number]
 
@@ -15,19 +16,22 @@ export function toTime(value: string | null | undefined): number {
 }
 
 /**
- * 会话排序，与后端 SessionRepository.list 的 SQL 逐字对齐：
+ * 会话排序，与后端 SessionRepository.list 的 SQL 同口径：
  *   ORDER BY pinned_at IS NULL ASC, pinned_at DESC, updated_at DESC
  * 即：置顶在前（近期置顶更靠前），未置顶按最近更新时间倒序。
  * 乐观更新 pinnedAt 后依赖此排序让会话即时归位，避免等全量刷新。
+ *
+ * 会话标记（打标）复用同一段排序：置顶区内用「有效置顶时间 = pinnedAt ?? labeledAt」
+ * 倒序，因此刚打标的会话立刻浮到置顶区顶部，手动置顶仍优先于打标时间。
  */
 export function sortSessionsByPinned(sessions: SessionSummary[]): SessionSummary[] {
   return [...sessions].sort((a, b) => {
-    const aPinnedAt = a.pinnedAt
-    const bPinnedAt = b.pinnedAt
-    if (aPinnedAt != null && bPinnedAt == null) return -1
-    if (aPinnedAt == null && bPinnedAt != null) return 1
-    if (aPinnedAt != null && bPinnedAt != null) {
-      return toTime(bPinnedAt) - toTime(aPinnedAt)
+    const aInZone = isSessionPinnedZone(a)
+    const bInZone = isSessionPinnedZone(b)
+    if (aInZone && !bInZone) return -1
+    if (!aInZone && bInZone) return 1
+    if (aInZone && bInZone) {
+      return toTime(getSessionPinTime(b)) - toTime(getSessionPinTime(a))
     }
     return toTime(b.updatedAt) - toTime(a.updatedAt)
   })
@@ -68,8 +72,8 @@ export function composeProjectGroupSessions(
   normalIds: readonly string[] | undefined,
   pinnedIds: readonly string[] | undefined,
 ): SessionSummary[] {
-  const pinned = sessions.filter((session) => session.pinnedAt != null)
-  const normal = sessions.filter((session) => session.pinnedAt == null)
+  const pinned = sessions.filter((session) => isSessionPinnedZone(session))
+  const normal = sessions.filter((session) => !isSessionPinnedZone(session))
   return [
     ...sortByManualOrder(pinned, pinnedIds, (session) => session.id),
     ...sortByManualOrder(normal, normalIds, (session) => session.id),

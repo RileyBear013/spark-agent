@@ -1771,4 +1771,137 @@ describe('SessionSidebarContext', () => {
     expect(latestCtxRef.current?.sessions).toEqual([expect.objectContaining({ id: session.id })])
     expect(toastMocks.toast.success).toHaveBeenLastCalledWith('已撤销归档')
   })
+
+  describe('handleSetSessionLabel', () => {
+    const buildSession = (): SessionSummary =>
+      ({
+        id: 'session-label' as SessionId,
+        title: '打标会话',
+        projectId: 'workspace-label',
+        workspaceIds: [],
+        providerProfileId: 'provider-label',
+        modelId: null,
+        agentId: 'agent-label',
+        agentAdapter: 'claude',
+        permissionMode: 'claude-default',
+        chatMode: 'agent',
+        reasoningEffort: 'medium',
+        status: 'idle',
+        pinnedAt: null,
+        archivedAt: null,
+        createdAt: '2026-07-29T08:00:00.000Z',
+        updatedAt: '2026-07-29T08:00:00.000Z',
+        messageCount: 1,
+        sessionLabel: null,
+        labeledAt: null,
+      }) as unknown as SessionSummary
+
+    const mountProvider = async (
+      invoke: (channel: string, request?: Record<string, unknown>) => Promise<unknown>,
+    ): Promise<{ current: ReturnType<typeof useSessionSidebar> | null }> => {
+      vi.stubGlobal('spark', { invoke, on: vi.fn(() => vi.fn()) })
+      const latestCtxRef: { current: ReturnType<typeof useSessionSidebar> | null } = {
+        current: null,
+      }
+      function CaptureSessionSidebarContext() {
+        latestCtxRef.current = useSessionSidebar()
+        return null
+      }
+      await act(async () => {
+        root = createRoot(container)
+        root.render(
+          <ToastProvider>
+            <SessionSidebarProvider>
+              <CaptureSessionSidebarContext />
+            </SessionSidebarProvider>
+          </ToastProvider>,
+        )
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      })
+      await vi.waitFor(() => expect(latestCtxRef.current?.sessions).toHaveLength(1))
+      return latestCtxRef
+    }
+
+    it('标记写入 metadata 并合并服务端返回的会话', async () => {
+      const session = buildSession()
+      const invoke = vi.fn(async (channel: string, request?: Record<string, unknown>) => {
+        if (channel === 'workspace:list') return { workspaces: [], total: 0 }
+        if (channel === 'session:list') return { sessions: [session], total: 1 }
+        if (channel === 'workspace:get-current') return { workspace: null }
+        if (channel === 'provider:list') return { profiles: [] }
+        if (channel === 'agent:list') return { agents: [] }
+        if (channel === 'terminal:list-active') return { sessions: [] }
+        if (channel === 'session:update') {
+          return {
+            session: {
+              ...session,
+              sessionLabel: request?.sessionLabel ?? null,
+              labeledAt: '2026-09-17T10:00:00.000Z',
+            },
+          }
+        }
+        return {}
+      })
+
+      const latestCtxRef = await mountProvider(invoke)
+
+      await act(async () => {
+        await latestCtxRef.current?.handleSetSessionLabel(session, 'pending-review')
+      })
+
+      expect(invoke).toHaveBeenCalledWith('session:update', {
+        sessionId: session.id,
+        sessionLabel: 'pending-review',
+      })
+      // 标记不改写 pinnedAt：置顶由渲染端谓词推导
+      expect(latestCtxRef.current?.sessions[0]?.sessionLabel).toBe('pending-review')
+      expect(latestCtxRef.current?.sessions[0]?.labeledAt).toBe('2026-09-17T10:00:00.000Z')
+      expect(latestCtxRef.current?.sessions[0]?.pinnedAt).toBeNull()
+      expect(toastMocks.toast.error).not.toHaveBeenCalled()
+    })
+
+    it('写入失败时回滚标记并提示错误', async () => {
+      const session = { ...buildSession(), sessionLabel: 'suspended' } as SessionSummary
+      const invoke = vi.fn(async (channel: string) => {
+        if (channel === 'workspace:list') return { workspaces: [], total: 0 }
+        if (channel === 'session:list') return { sessions: [session], total: 1 }
+        if (channel === 'workspace:get-current') return { workspace: null }
+        if (channel === 'provider:list') return { profiles: [] }
+        if (channel === 'agent:list') return { agents: [] }
+        if (channel === 'terminal:list-active') return { sessions: [] }
+        if (channel === 'session:update') throw new Error('label write failed')
+        return {}
+      })
+
+      const latestCtxRef = await mountProvider(invoke)
+
+      await act(async () => {
+        await latestCtxRef.current?.handleSetSessionLabel(session, 'undelivered')
+      })
+
+      expect(latestCtxRef.current?.sessions[0]?.sessionLabel).toBe('suspended')
+      expect(toastMocks.toast.error).toHaveBeenCalledWith('label write failed')
+    })
+
+    it('标记与当前一致时不发起写入', async () => {
+      const session = { ...buildSession(), sessionLabel: 'not-started' } as SessionSummary
+      const invoke = vi.fn(async (channel: string) => {
+        if (channel === 'workspace:list') return { workspaces: [], total: 0 }
+        if (channel === 'session:list') return { sessions: [session], total: 1 }
+        if (channel === 'workspace:get-current') return { workspace: null }
+        if (channel === 'provider:list') return { profiles: [] }
+        if (channel === 'agent:list') return { agents: [] }
+        if (channel === 'terminal:list-active') return { sessions: [] }
+        return {}
+      })
+
+      const latestCtxRef = await mountProvider(invoke)
+
+      await act(async () => {
+        await latestCtxRef.current?.handleSetSessionLabel(session, 'not-started')
+      })
+
+      expect(invoke).not.toHaveBeenCalledWith('session:update', expect.anything())
+    })
+  })
 })

@@ -62,6 +62,7 @@ import type {
   SessionGetQueueResponse,
   SessionGoalResponse,
   SessionId,
+  SessionLabelKey,
   SessionListResponse,
   SessionQueuedTurn,
   SessionSearchResponse,
@@ -10607,6 +10608,8 @@ export class SessionService {
     reasoningEffort?: SparkReasoningEffort
     fastMode?: boolean
     debugMode?: boolean
+    /** null 取消标记；undefined 不修改 */
+    sessionLabel?: SessionLabelKey | null
     cliSparkOverride?: CliSparkOverride | null
   }): Promise<{ session: SessionListResponse['sessions'][number] }> {
     return this.getCrudController().updateSession(params)

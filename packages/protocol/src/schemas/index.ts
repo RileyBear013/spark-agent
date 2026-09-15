@@ -535,6 +535,18 @@ export const SessionListRequestSchema = z.object({
   offset: z.number().int().min(0).optional().default(0),
 })
 
+/**
+ * 会话标记键。与 `@spark/protocol` 的 SessionLabelKey / SESSION_LABEL_KEYS 保持一致
+ * （沿用本文件其它 Session 枚举的内联写法，避免 schemas → ipc 的额外依赖）。
+ */
+export const SessionLabelKeySchema = z.enum([
+  'suspended',
+  'not-started',
+  'pending-review',
+  'pending-advance',
+  'undelivered',
+])
+
 export const SessionUpdateRequestSchema = z.object({
   sessionId: SessionIdSchema,
   title: z.string().min(1).max(200).optional(),
@@ -549,6 +561,8 @@ export const SessionUpdateRequestSchema = z.object({
   reasoningEffort: SessionReasoningEffortSchema.optional(),
   fastMode: z.boolean().optional(),
   debugMode: z.boolean().optional(),
+  /** null 取消标记，undefined 不修改 */
+  sessionLabel: SessionLabelKeySchema.nullable().optional(),
   cliSparkOverride: CliSparkOverrideSchema.nullable().optional(),
 })
 

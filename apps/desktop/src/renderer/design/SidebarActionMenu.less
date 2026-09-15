@@ -1,0 +1,44 @@
+/* SidebarActionMenu — 会话栏菜单（基础 .action-menu / .action-menu-item 样式在 views.css）
+   这里只补三类新增能力：二级浮层行、条目次要说明、禁用态。 */
+
+.action-menu-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.action-menu-item-hint {
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  font-weight: 400;
+}
+
+.action-menu-item-chev {
+  margin-left: auto;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.action-menu-item-has-submenu {
+  cursor: default;
+}
+
+.action-menu-item-has-submenu:hover,
+.action-menu-item-has-submenu:focus-visible,
+.action-menu-item-has-submenu.is-open {
+  background: var(--hover);
+  outline: none;
+}
+
+.action-menu-item:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.action-menu-item:disabled:hover,
+.action-menu-item:disabled:focus-visible {
+  background: transparent;
+  outline: none;
+}

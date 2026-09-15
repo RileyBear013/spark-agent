@@ -532,6 +532,23 @@ export interface SessionListRequest {
   offset?: number
 }
 
+/**
+ * 会话标记（用户手动打标）：挂起 / 未开始 / 待审查 / 待推进 / 未交付。
+ *
+ * 语义与手动置顶正交：标记持久化在会话 metadata（sessionLabel + labeledAt），
+ * 「有标记 ⇒ 进入置顶区」由渲染端统一谓词推导，不写回 pinned_at。
+ * 顺序即右键菜单/筛选器的展示顺序，新增状态只改这一处。
+ */
+export const SESSION_LABEL_KEYS = [
+  'suspended',
+  'not-started',
+  'pending-review',
+  'pending-advance',
+  'undelivered',
+] as const
+
+export type SessionLabelKey = (typeof SESSION_LABEL_KEYS)[number]
+
 export interface SessionUpdateRequest {
   sessionId: SessionId
   title?: string
@@ -548,6 +565,8 @@ export interface SessionUpdateRequest {
   fastMode?: boolean
   /** 调试模式开关（per-session，持久化到 metadata） */
   debugMode?: boolean
+  /** 会话标记（per-session，持久化到 metadata）；null = 取消标记，undefined = 不修改 */
+  sessionLabel?: SessionLabelKey | null
   /** Optional Spark provider/model used by a local CLI provider. null clears it. */
   cliSparkOverride?: CliSparkOverride | null
 }
@@ -796,6 +815,10 @@ export interface SessionListResponse {
     importedFrom?: HistoryImportSource
     /** 调试模式（per-session 能力开关）：与权限模式正交，开启后挂载 spark_debug + 显示快捷回复 */
     debugMode?: boolean
+    /** 用户手动标记（挂起/未开始/待审查/待推进/未交付）；null/undefined = 未标记 */
+    sessionLabel?: SessionLabelKey | null
+    /** 打标时间（ISO 8601），用于标记会话在置顶区内的排序；未标记时为 null */
+    labeledAt?: string | null
     /** 引擎级 worktree 状态（agent 上报/运行时检测）；null 表示不在 worktree 中 */
     runtimeWorktree?: SessionRuntimeWorktree | null
     /** Spark provider/model override for a local CLI provider. */

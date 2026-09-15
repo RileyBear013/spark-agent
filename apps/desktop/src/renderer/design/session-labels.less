@@ -1,0 +1,109 @@
+/* 会话标记（打标）配色 —— 与会话栏/筛选器共用一份色板
+   每个标记一个独立色相，保证同一列表里能一眼区分；未标记会话的置顶图标
+   仍沿用品牌色 --primary，不做改动。 */
+
+:root {
+  --session-label-suspended: #d97706;
+  --session-label-not-started: #6b7280;
+  --session-label-pending-review: #7c3aed;
+  --session-label-pending-advance: #0891b2;
+  --session-label-undelivered: #e11d48;
+}
+
+html[data-theme='dark'],
+.app.theme-dark {
+  --session-label-suspended: #fbbf24;
+  --session-label-not-started: #9ca3af;
+  --session-label-pending-review: #a78bfa;
+  --session-label-pending-advance: #22d3ee;
+  --session-label-undelivered: #fb7185;
+}
+
+/* 置顶图标外包裹：统一 svg 与文字基线的对齐（.pinned-icon 自身样式仍在 views.css） */
+.session-pin-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.session-pin-wrap.label-suspended .pinned-icon {
+  color: var(--session-label-suspended);
+}
+.session-pin-wrap.label-not-started .pinned-icon {
+  color: var(--session-label-not-started);
+}
+.session-pin-wrap.label-pending-review .pinned-icon {
+  color: var(--session-label-pending-review);
+}
+.session-pin-wrap.label-pending-advance .pinned-icon {
+  color: var(--session-label-pending-advance);
+}
+.session-pin-wrap.label-undelivered .pinned-icon {
+  color: var(--session-label-undelivered);
+}
+
+/* 二级菜单 / 筛选器里的标记色点 */
+.session-label-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-faint);
+}
+
+.session-label-dot.label-suspended {
+  background: var(--session-label-suspended);
+}
+.session-label-dot.label-not-started {
+  background: var(--session-label-not-started);
+}
+.session-label-dot.label-pending-review {
+  background: var(--session-label-pending-review);
+}
+.session-label-dot.label-pending-advance {
+  background: var(--session-label-pending-advance);
+}
+.session-label-dot.label-undelivered {
+  background: var(--session-label-undelivered);
+}
+
+/* 标记标签（色点 + 名称）：同色系淡底 + 同色描边，用于悬浮信息卡等需要写出标记名的位置。
+   颜色由各 label-<key> 类注入 --session-label-color，新增标记只需补一行。 */
+.session-label-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box; // 高度可被子容器（如悬浮卡标题行）精确约束以做中心对齐
+  max-width: 100%;
+  padding: 0 6px;
+  color: var(--session-label-color, var(--text-muted));
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--session-label-color, var(--text-muted)) 12%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--session-label-color, var(--text-muted)) 34%, transparent);
+  border-radius: 999px;
+}
+
+.session-label-tag .session-label-dot {
+  width: 5px;
+  height: 5px;
+}
+
+.session-label-tag.label-suspended {
+  --session-label-color: var(--session-label-suspended);
+}
+.session-label-tag.label-not-started {
+  --session-label-color: var(--session-label-not-started);
+}
+.session-label-tag.label-pending-review {
+  --session-label-color: var(--session-label-pending-review);
+}
+.session-label-tag.label-pending-advance {
+  --session-label-color: var(--session-label-pending-advance);
+}
+.session-label-tag.label-undelivered {
+  --session-label-color: var(--session-label-undelivered);
+}
