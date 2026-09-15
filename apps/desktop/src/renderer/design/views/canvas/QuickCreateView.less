@@ -2991,13 +2991,11 @@
   padding: 8px;
 }
 
-/* ── 本轮：列表展开行提示词默认 3 行折叠，溢出可手动展开；查看弹层保持全量 ── */
+/* ── 本轮：详情提示词折叠行数由组件内联 style 提供（列表展开行 3 行 / 查看弹窗 2 行）── */
 
 .quick-create-detail-prompt p.is-clamped {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
   overflow: hidden;
 }
 

@@ -151,6 +151,25 @@ describe('QuickCreateTaskHistory', () => {
     expect(document.querySelector('.quick-create-task-detail-modal')).not.toBeNull()
   })
 
+  it('弹窗提示词默认 2 行折叠，列表展开行保持 3 行折叠', () => {
+    renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
+
+    const listPrompt = document.querySelector<HTMLParagraphElement>(
+      '.quick-create-task-detail .quick-create-detail-prompt p',
+    )
+    expect(listPrompt?.classList.contains('is-clamped')).toBe(true)
+    expect(listPrompt?.style.webkitLineClamp).toBe('3')
+
+    act(() => document.querySelector<HTMLButtonElement>('[aria-label="卡片视图"]')?.click())
+    act(() => document.querySelector<HTMLButtonElement>('.quick-create-card-media')?.click())
+
+    const modalPrompt = document.querySelector<HTMLParagraphElement>(
+      '.quick-create-task-detail-modal .quick-create-detail-prompt p',
+    )
+    expect(modalPrompt?.classList.contains('is-clamped')).toBe(true)
+    expect(modalPrompt?.style.webkitLineClamp).toBe('2')
+  })
+
   it('列表详情内查看产物使用独立弹层，不切换创作结果区块', () => {
     renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
 

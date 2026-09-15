@@ -59,10 +59,21 @@ async function copyTaskPrompt(prompt: string) {
 }
 
 /**
- * 详情内提示词块：label 后带一键复制；clamp 时默认 3 行折叠、溢出可手动展开；
+ * 详情内提示词块：label 后带一键复制；clamp 时默认折叠（clampLines 行）、溢出可手动展开；
+ * 展开后若传入 expandedMaxHeight 则提示词固定高度内部滚动，避免长提示词挤压图片或撑高弹层；
  * 空提示词（反推任务）不出现复制按钮。
  */
-function DetailPrompt({ prompt, clamp = false }: { prompt: string; clamp?: boolean }) {
+function DetailPrompt({
+  prompt,
+  clamp = false,
+  clampLines = 3,
+  expandedMaxHeight,
+}: {
+  prompt: string
+  clamp?: boolean
+  clampLines?: number
+  expandedMaxHeight?: string
+}) {
   const textRef = useRef<HTMLParagraphElement>(null)
   const [expanded, setExpanded] = useState(false)
   const [overflowed, setOverflowed] = useState(false)
@@ -76,6 +87,7 @@ function DetailPrompt({ prompt, clamp = false }: { prompt: string; clamp?: boole
   }, [clamp, expanded, prompt])
 
   const clamped = clamp && !expanded
+  const expandedScroll = clamp && expanded && expandedMaxHeight !== undefined
 
   return (
     <div className="quick-create-detail-prompt">
@@ -92,7 +104,17 @@ function DetailPrompt({ prompt, clamp = false }: { prompt: string; clamp?: boole
           </button>
         )}
       </div>
-      <p ref={textRef} className={clamped ? 'is-clamped' : undefined}>
+      <p
+        ref={textRef}
+        className={clamped ? 'is-clamped' : undefined}
+        style={
+          clamped
+            ? { WebkitLineClamp: clampLines }
+            : expandedScroll
+              ? { maxHeight: expandedMaxHeight, overflowY: 'auto' }
+              : undefined
+        }
+      >
         {prompt || '图片反推任务'}
       </p>
       {clamp && (expanded || overflowed) && (
@@ -528,7 +550,13 @@ export function QuickCreateTaskHistory({
                 <span>这条任务没有产物图片。</span>
               </div>
             )}
-            <DetailPrompt prompt={detailTask.prompt} />
+            {/* 弹窗提示词默认 2 行折叠；展开后固定高度内部滚动，产物图区域不被长提示词挤压 */}
+            <DetailPrompt
+              prompt={detailTask.prompt}
+              clamp
+              clampLines={2}
+              expandedMaxHeight="min(36vh, 240px)"
+            />
             {detailTask.error && (
               <div className="quick-create-task-error">
                 <Icons.AlertTriangle size={14} /> {detailTask.error.message}
