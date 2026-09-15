@@ -87,6 +87,10 @@ import {
   type QuickCreateMode,
   type QuickCreateTaskRecord,
 } from './quickCreateTaskStore'
+import {
+  ensureQuickCreateTaskStreamSync,
+  reconcileQuickCreateRunningTasks,
+} from './quickCreateTaskStreamSync'
 import './QuickCreateView.less'
 
 type QuickInput = CanvasMediaTaskInputFile & {
@@ -697,6 +701,14 @@ export function QuickCreateView() {
     })
   }, [])
 
+  // 任务进度订阅分两层：视图内订阅负责挂载期间的界面即时刷新；
+  // 全局订阅随渲染进程常驻，负责切走视图期间后台完成任务的存储回写；
+  // 挂载时再对账一次，纠正事件丢失（如应用重启）导致停在 running 的记录。
+  useEffect(() => {
+    ensureQuickCreateTaskStreamSync()
+    void reconcileQuickCreateRunningTasks((id, patch) => updateTask(id, patch))
+  }, [updateTask])
+
   const operation = operationFor(mode, inputs)
   const compatibleModels = useMemo(
     () =>
@@ -1211,7 +1223,9 @@ export function QuickCreateView() {
   )
 
   const submitTask = useCallback(
-    async (source?: QuickCreateTaskRecord) => {
+    // keepActiveTab：从创作历史发起重试时使用，任务照常提交，但不把右侧切回「创作结果」，
+    // 让用户在历史列表里连续操作。
+    async (source?: QuickCreateTaskRecord, options?: { keepActiveTab?: boolean }) => {
       const taskId =
         source?.id ?? `quick-create-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const taskMode = source?.mode ?? mode
@@ -1263,7 +1277,7 @@ export function QuickCreateView() {
       }
       addTask(record)
       setFocusedTaskId(taskId)
-      setActiveTab('compose')
+      if (!options?.keepActiveTab) setActiveTab('compose')
       setExpandedTaskId(taskId)
       setPendingSubmissions((current) => current + 1)
       let requestAccepted = false
@@ -1376,7 +1390,9 @@ export function QuickCreateView() {
     (task: QuickCreateTaskRecord) => {
       // 成功任务重试新建记录（复用原 id 会触发替换语义清掉旧产物）；
       // 失败/已取消任务无产物可丢失，维持原地替换。
-      void submitTask(task.status === 'succeeded' ? retryTaskRecord(task) : task)
+      void submitTask(task.status === 'succeeded' ? retryTaskRecord(task) : task, {
+        keepActiveTab: true,
+      })
     },
     [submitTask],
   )

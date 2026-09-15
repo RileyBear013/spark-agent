@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { Button, Modal, message } from 'antd'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Button, Modal, Tooltip, message } from 'antd'
 import type { CanvasMediaTaskAsset } from '@spark/protocol'
 import { Icons } from '../../Icons'
 import { MediaArtifactViewer } from '../../components/MediaArtifactViewer'
@@ -16,6 +16,7 @@ import {
   type QuickCreateTaskViewMode,
 } from './quickCreatePreferences'
 import type { QuickCreateMode, QuickCreateTaskRecord } from './quickCreateTaskStore'
+import './QuickCreateTaskHistory.less'
 
 type HistoryProps = {
   tasks: QuickCreateTaskRecord[]
@@ -48,16 +49,34 @@ function viewableOutputsOf(task: QuickCreateTaskRecord): TaskViewableOutput[] {
 /** 独立产物查看：taskId + 可查看产物列表下标；不切换创作结果区块。 */
 type ViewerTarget = { taskId: string; outputIndex: number }
 
-/** 详情内提示词块：label 后带一键复制；空提示词（反推任务）不出现复制按钮。 */
-function DetailPrompt({ prompt }: { prompt: string }) {
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(prompt)
-      message.success('提示词已复制')
-    } catch {
-      message.error('复制提示词失败')
-    }
+async function copyTaskPrompt(prompt: string) {
+  try {
+    await navigator.clipboard.writeText(prompt)
+    message.success('提示词已复制')
+  } catch {
+    message.error('复制提示词失败')
   }
+}
+
+/**
+ * 详情内提示词块：label 后带一键复制；clamp 时默认 3 行折叠、溢出可手动展开；
+ * 空提示词（反推任务）不出现复制按钮。
+ */
+function DetailPrompt({ prompt, clamp = false }: { prompt: string; clamp?: boolean }) {
+  const textRef = useRef<HTMLParagraphElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [overflowed, setOverflowed] = useState(false)
+
+  useEffect(() => {
+    if (!clamp || expanded) return
+    const el = textRef.current
+    if (!el) return
+    // line-clamp 只做视觉截断，scrollHeight 仍是全量内容高；与可见高比较判断是否溢出
+    setOverflowed(el.scrollHeight > el.clientHeight + 1)
+  }, [clamp, expanded, prompt])
+
+  const clamped = clamp && !expanded
+
   return (
     <div className="quick-create-detail-prompt">
       <div className="quick-create-detail-prompt-label">
@@ -67,13 +86,25 @@ function DetailPrompt({ prompt }: { prompt: string }) {
             type="button"
             aria-label="复制提示词"
             title="复制提示词"
-            onClick={() => void copy()}
+            onClick={() => void copyTaskPrompt(prompt)}
           >
             <Icons.Copy size={12} />
           </button>
         )}
       </div>
-      <p>{prompt || '图片反推任务'}</p>
+      <p ref={textRef} className={clamped ? 'is-clamped' : undefined}>
+        {prompt || '图片反推任务'}
+      </p>
+      {clamp && (expanded || overflowed) && (
+        <button
+          type="button"
+          className="quick-create-prompt-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '收起' : '展开'}
+        </button>
+      )}
     </div>
   )
 }
@@ -143,6 +174,45 @@ export function QuickCreateTaskHistory({
     setFilter(next)
     writeQuickCreatePreferences({ ...readQuickCreatePreferences(), taskFilter: next })
   }
+
+  const renderListAction = (label: string, icon: ReactNode, onClick: () => void) => (
+    <Tooltip title={label} placement="top">
+      <Button
+        type="text"
+        size="small"
+        className="quick-create-list-action"
+        icon={icon}
+        aria-label={label}
+        title={label}
+        onClick={(event) => {
+          event.stopPropagation()
+          onClick()
+        }}
+      />
+    </Tooltip>
+  )
+
+  const renderListActions = (task: QuickCreateTaskRecord, output?: CanvasMediaTaskAsset) => (
+    <div className="quick-create-list-actions" aria-label="任务操作">
+      {task.prompt.trim() &&
+        renderListAction('复制提示词', <Icons.Copy size={14} />, () => {
+          void copyTaskPrompt(task.prompt)
+        })}
+      {task.status !== 'running' &&
+        renderListAction(
+          task.status === 'succeeded' ? '重新生成' : '重试',
+          <Icons.RotateCcw size={14} />,
+          () => onRetry(task),
+        )}
+      {renderListAction('复用配置', <Icons.Repeat size={14} />, () => onReuse(task))}
+      {task.prompt.trim() &&
+        renderListAction('存入提示词库', <Icons.Book size={14} />, () => onSavePrompt(task))}
+      {output?.filePath &&
+        renderListAction('打开产物', <Icons.FolderOpen size={14} />, () => {
+          void onOpenOutput(output)
+        })}
+    </div>
+  )
 
   const renderTaskActions = (task: QuickCreateTaskRecord, output?: CanvasMediaTaskAsset) => (
     <div className="quick-create-task-actions">
@@ -311,8 +381,9 @@ export function QuickCreateTaskHistory({
               <span>完成第一次生成后，任务会出现在这里。</span>
             </div>
           ) : (
-            visibleTasks.map((task) => {
+            visibleTasks.map((task, index) => {
               const output = task.assets[0]
+              const localOutput = task.assets.find((asset) => Boolean(asset.filePath))
               const taskOutputs = viewableOutputsOf(task)
               const firstOutput = taskOutputs[0]
               const expanded = expandedTaskId === task.id
@@ -321,43 +392,50 @@ export function QuickCreateTaskHistory({
                   className={`quick-create-task${expanded ? ' is-expanded' : ''}`}
                   key={task.id}
                 >
-                  <button
-                    type="button"
-                    className="quick-create-task-main"
-                    onClick={() => onRowActivate(task)}
-                  >
-                    <span className="quick-create-task-state">
-                      <span className={`quick-create-task-status is-${task.status}`}>
-                        <i />
-                        {statusLabel(task.status)}
+                  <div className="quick-create-task-row">
+                    <button
+                      type="button"
+                      className="quick-create-task-main"
+                      onClick={() => onRowActivate(task)}
+                    >
+                      <span className="quick-create-task-index" aria-hidden="true">
+                        {index + 1}
                       </span>
-                      {task.status === 'running' && task.progress !== undefined && (
-                        <small>{Math.round(task.progress)}%</small>
+                      <span className="quick-create-task-state">
+                        <span className={`quick-create-task-status is-${task.status}`}>
+                          <i />
+                          {statusLabel(task.status)}
+                        </span>
+                        {task.status === 'running' && task.progress !== undefined && (
+                          <small>{Math.round(task.progress)}%</small>
+                        )}
+                      </span>
+                      <span className="quick-create-task-copy">
+                        <strong>{titleForPrompt(task.prompt, task.mode)}</strong>
+                        <small>
+                          {modeLabel(task.mode)} ·{' '}
+                          {task.modelName ?? task.modelId ?? '自动选择模型'} ·{' '}
+                          {new Date(task.createdAt).toLocaleString()}
+                        </small>
+                      </span>
+                      {firstOutput && firstOutput.asset.type === 'image' ? (
+                        <img src={firstOutput.url} alt="生成结果预览" />
+                      ) : firstOutput ? (
+                        <video src={firstOutput.url} muted />
+                      ) : task.text ? (
+                        <span className="quick-create-text-preview">{task.text.slice(0, 80)}</span>
+                      ) : (
+                        <span className="quick-create-task-placeholder">
+                          <Icons.Clock size={15} />
+                        </span>
                       )}
-                    </span>
-                    <span className="quick-create-task-copy">
-                      <strong>{titleForPrompt(task.prompt, task.mode)}</strong>
-                      <small>
-                        {modeLabel(task.mode)} · {task.modelName ?? task.modelId ?? '自动选择模型'}{' '}
-                        · {new Date(task.createdAt).toLocaleString()}
-                      </small>
-                    </span>
-                    {firstOutput && firstOutput.asset.type === 'image' ? (
-                      <img src={firstOutput.url} alt="生成结果预览" />
-                    ) : firstOutput ? (
-                      <video src={firstOutput.url} muted />
-                    ) : task.text ? (
-                      <span className="quick-create-text-preview">{task.text.slice(0, 80)}</span>
-                    ) : (
-                      <span className="quick-create-task-placeholder">
-                        <Icons.Clock size={15} />
-                      </span>
-                    )}
-                    <Icons.ChevronDown size={15} className={expanded ? 'is-open' : ''} />
-                  </button>
+                      <Icons.ChevronDown size={15} className={expanded ? 'is-open' : ''} />
+                    </button>
+                    {renderListActions(task, localOutput)}
+                  </div>
                   {expanded && (
                     <div className="quick-create-task-detail">
-                      <DetailPrompt prompt={task.prompt} />
+                      <DetailPrompt prompt={task.prompt} clamp />
                       {task.error && (
                         <div className="quick-create-task-error">
                           <Icons.AlertTriangle size={14} /> {task.error.message}

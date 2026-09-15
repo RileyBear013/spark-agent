@@ -2793,15 +2793,15 @@
   }
 }
 
-/* ── 本轮：左表单限宽 520、右侧铺满；任务列表去分割线，层级靠间距与悬浮底色 ── */
+/* ── 本轮：左表单限宽 420、右侧铺满多占；任务列表去分割线，层级靠间距与悬浮底色 ── */
 
 .quick-create-workbench {
-  grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
+  grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
 }
 
 @media (max-width: 1080px) {
   .quick-create-workbench {
-    grid-template-columns: minmax(330px, 460px) minmax(0, 1fr);
+    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
   }
 }
 
@@ -2989,4 +2989,31 @@
 .quick-create-media-viewer-body {
   height: min(88vh, 940px);
   padding: 8px;
+}
+
+/* ── 本轮：列表展开行提示词默认 3 行折叠，溢出可手动展开；查看弹层保持全量 ── */
+
+.quick-create-detail-prompt p.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.quick-create-detail-prompt .quick-create-prompt-toggle {
+  grid-column: 2;
+  justify-self: start;
+  padding: 1px 0;
+  border: 0;
+  color: var(--quick-accent, var(--primary));
+  background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.quick-create-detail-prompt .quick-create-prompt-toggle:hover,
+.quick-create-detail-prompt .quick-create-prompt-toggle:focus-visible {
+  color: color-mix(in srgb, var(--quick-accent, var(--primary)) 78%, var(--text-muted));
+  outline: none;
 }

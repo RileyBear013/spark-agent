@@ -1,0 +1,113 @@
+/* 列表行与操作列：保持扁平层级，紧凑但不牺牲可点击区域。 */
+.quick-create-task-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  align-items: center;
+  gap: 8px;
+}
+
+.quick-create-task-row .quick-create-task-main {
+  min-width: 0;
+  grid-template-columns: 26px 72px minmax(0, 1fr) 76px 18px;
+  gap: 10px;
+}
+
+.quick-create-task-row .quick-create-task-index {
+  min-width: 26px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--text-faint);
+}
+
+.quick-create-task-row .quick-create-task-main > img,
+.quick-create-task-row .quick-create-task-main > video,
+.quick-create-task-row .quick-create-task-placeholder {
+  width: 76px;
+  height: 48px;
+}
+
+.quick-create-list-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.quick-create-list-actions .quick-create-list-action.ant-btn {
+  display: inline-flex;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-faint);
+  background: transparent;
+  box-shadow: none;
+}
+
+.quick-create-list-actions .quick-create-list-action.ant-btn:hover:not(:disabled),
+.quick-create-list-actions .quick-create-list-action.ant-btn:focus-visible:not(:disabled) {
+  color: var(--quick-accent, var(--primary));
+  background: color-mix(in srgb, var(--quick-accent, var(--primary)) 9%, transparent);
+}
+
+/* 展开详情与列表主行做低对比差异色分区，不增加卡片边框和阴影。 */
+.quick-create-task.is-expanded .quick-create-task-detail {
+  margin: 0;
+  padding: 12px 16px 14px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--quick-surface) 74%, var(--quick-field));
+}
+
+@media (max-width: 1080px) {
+  .quick-create-task-row {
+    grid-template-columns: minmax(0, 1fr) 92px;
+  }
+
+  .quick-create-task-row .quick-create-task-main {
+    grid-template-columns: 26px 68px minmax(0, 1fr) 60px 16px;
+    gap: 8px;
+  }
+
+  .quick-create-task-row .quick-create-task-main > img,
+  .quick-create-task-row .quick-create-task-main > video,
+  .quick-create-task-row .quick-create-task-placeholder {
+    width: 60px;
+    height: 42px;
+  }
+}
+
+@media (max-width: 820px) {
+  .quick-create-task-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .quick-create-list-actions {
+    justify-content: flex-start;
+    padding: 0 0 6px 78px;
+  }
+}
+
+@media (max-width: 560px) {
+  .quick-create-task-row .quick-create-task-main {
+    grid-template-columns: 26px 64px minmax(0, 1fr) 16px;
+  }
+
+  .quick-create-task-row .quick-create-task-main > img,
+  .quick-create-task-row .quick-create-task-main > video,
+  .quick-create-task-row .quick-create-task-placeholder,
+  .quick-create-task-row .quick-create-text-preview {
+    display: none;
+  }
+
+  .quick-create-list-actions {
+    padding-left: 72px;
+  }
+}
