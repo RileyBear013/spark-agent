@@ -335,12 +335,18 @@ export class TeamMcpService {
     private readonly pinsRepo: TeamAssetPinsRepository,
   ) {}
 
-  /** 浏览团队 MCP 列表（团队商店数据源；未配置时返回空） */
-  async listTeamServers(): Promise<TeamMcpListItem[]> {
+  /** 浏览团队 MCP 列表（团队商店数据源；未配置时返回空）。服务端分页 + blur 搜索。 */
+  async listTeamServers(
+    opts: { page?: number; pageSize?: number; query?: string } = {},
+  ): Promise<{ items: TeamMcpListItem[]; total: number }> {
     const client = await this.configStore.buildClient()
-    if (!client) return []
-    const items = await client.listTeamMcpServers()
-    return items
+    if (!client) return { items: [], total: 0 }
+    const page = await client.listTeamMcpServers({
+      ...(opts.page !== undefined ? { page: opts.page } : {}),
+      ...(opts.pageSize !== undefined ? { pageSize: opts.pageSize } : {}),
+      search: opts.query?.trim() !== '' && opts.query != null ? opts.query.trim() : 'blur',
+    })
+    const items = page.items
       .map((item) => {
         // 真机字段：列表条目用 name（非 mcpName）；已发布最高版本在
         // latestPublishedVersion（草稿态为 null），version 是当前编辑版本
@@ -358,6 +364,7 @@ export class TeamMcpService {
         }
       })
       .filter((x): x is TeamMcpListItem => x != null)
+    return { items, total: page.total }
   }
 
   /**
@@ -518,7 +525,7 @@ export class TeamMcpService {
   async listTeamUpdates(): Promise<TeamMcpUpdateInfo[]> {
     const client = await this.configStore.buildClient()
     if (!client) return []
-    const remoteItems = await client.listTeamMcpServers()
+    const remoteItems = (await client.listTeamMcpServers()).items
     const remoteByName = new Map<string, { version: string; name: string }>()
     for (const item of remoteItems) {
       const slug = pickStr(item, ['name', 'mcpName', 'serverName'])

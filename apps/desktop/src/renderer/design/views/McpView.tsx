@@ -31,6 +31,7 @@ import { McpFilterPopover, SCOPES, type StatusFilter } from './McpFilterPopover'
 import { McpTeamPublishModal } from './McpTeamMarket'
 import { PluginMarketplaceView } from './PluginMarketplaceView'
 import { CustomToolsSection } from './CustomToolsSection'
+import { TeamStoreView } from './TeamStoreView'
 import {
   hasPendingCustomToolTrace,
   OPEN_CUSTOM_TOOL_TRACE_EVENT,
@@ -251,12 +252,13 @@ function draftFromItem(item: McpServerItem | null): DraftBase {
   }
 }
 
-type McpTab = 'mcp' | 'custom-tools' | 'plugins'
+type McpTab = 'mcp' | 'custom-tools' | 'plugins' | 'team-store'
 
 const MCP_TAB_ITEMS: Array<{ key: McpTab; label: string }> = [
   { key: 'mcp', label: 'MCP' },
   { key: 'custom-tools', label: '自定义工具' },
   { key: 'plugins', label: '连接器' },
+  { key: 'team-store', label: '团队商店' },
 ]
 
 export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
@@ -558,6 +560,8 @@ export function McpView({ initialTab = 'mcp' }: { initialTab?: McpTab } = {}) {
 
         {activeTab === 'plugins' ? (
           <PluginMarketplaceView embedded />
+        ) : activeTab === 'team-store' ? (
+          <TeamStoreView embedded />
         ) : activeTab === 'custom-tools' ? (
           <CustomToolsSection />
         ) : (

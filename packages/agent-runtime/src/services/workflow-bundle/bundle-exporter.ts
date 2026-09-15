@@ -10,12 +10,20 @@ import {
   type WorkflowBundleManifest,
   type WorkflowBundleSkillEntry,
   type WorkflowBundleMcpEntry,
+  type WorkflowBundleAgentEntry,
+  type WorkflowBundleAgentFile,
   type WorkflowBundleUnresolvedDependency,
   type WorkflowBundleVerificationCheck,
   type WorkflowBundleVerificationStatus,
 } from '@spark/protocol'
 import type { WorkflowGraph } from '@spark/protocol'
-import type { SkillRepository, WorkflowRepository, McpServerRepository } from '@spark/storage'
+import type {
+  AgentItem,
+  AgentRepository,
+  McpServerRepository,
+  SkillRepository,
+  WorkflowRepository,
+} from '@spark/storage'
 import { collectGraphDependencies } from './graph-deps.js'
 import { redactMcpConfig } from './secret-redact.js'
 import {
@@ -68,6 +76,7 @@ export class WorkflowBundleExporter {
     private readonly workflowRepo: WorkflowRepository,
     private readonly skillRepo: SkillRepository,
     private readonly mcpRepo: McpServerRepository,
+    private readonly agentRepo: AgentRepository,
   ) {}
 
   async exportBundle(params: ExportBundleParams): Promise<ExportBundleResult> {
@@ -91,6 +100,7 @@ export class WorkflowBundleExporter {
     const unresolved: WorkflowBundleUnresolvedDependency[] = []
     const skillEntries: WorkflowBundleSkillEntry[] = []
     const mcpEntries: WorkflowBundleMcpEntry[] = []
+    const agentEntries: WorkflowBundleAgentEntry[] = []
     const zip: Record<string, Uint8Array> = {}
     const takenSkillSlugs = new Set<string>()
     const takenMcpRefIds = new Set<string>()
@@ -101,7 +111,10 @@ export class WorkflowBundleExporter {
     const aggregatedAgentIds = new Set<string>()
     const aggregatedRuleIds = new Set<string>()
     const aggregatedToolIds = new Set<string>()
-
+    const aggregatedModelRefs: Array<{
+      providerProfileId: string | null
+      modelId: string | null
+    }> = []
     targets.forEach((workflow, index) => {
       const graph = workflow.graph as unknown as WorkflowGraph
       if (graph == null || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
@@ -113,6 +126,7 @@ export class WorkflowBundleExporter {
       for (const id of deps.agentIds) aggregatedAgentIds.add(id)
       for (const id of deps.ruleIds) aggregatedRuleIds.add(id)
       for (const id of deps.toolIds) aggregatedToolIds.add(id)
+      for (const ref of deps.modelRefs) aggregatedModelRefs.push(ref)
 
       const file = `workflows/${index}.json`
       zip[file] = new TextEncoder().encode(
@@ -130,6 +144,30 @@ export class WorkflowBundleExporter {
       )
       checks.push({ id: `graph:${workflow.id}`, ok: true, level: 'info', message: workflow.name })
     })
+
+    // —— Agent 级联(v2 起随包携带):先收集 Agent 自身的技能/MCP 依赖,再统一打包 ——
+    const agentRows = new Map<string, AgentItem>()
+    for (const agentId of aggregatedAgentIds) {
+      const row = this.agentRepo.get(agentId)
+      if (row == null) {
+        unresolved.push({
+          type: 'agent',
+          name: agentId,
+          hint: 'Agent 在当前环境未找到,导入后需手动创建或重新绑定',
+        })
+        continue
+      }
+      for (const id of row.skillIds) aggregatedSkillIds.add(id)
+      for (const id of row.disabledSkillIds) aggregatedSkillIds.add(id)
+      for (const id of row.mcpServerIds) aggregatedMcpIds.add(id)
+      agentRows.set(agentId, row)
+      if (row.modelId != null || row.providerProfileId != null) {
+        aggregatedModelRefs.push({
+          providerProfileId: row.providerProfileId ?? null,
+          modelId: row.modelId ?? null,
+        })
+      }
+    }
 
     // —— 技能打包:builtin 不打包(目标环境必有);其余按 root_path 目录打包 ——
     for (const skillId of aggregatedSkillIds) {
@@ -246,12 +284,40 @@ export class WorkflowBundleExporter {
       })
     }
 
+    // —— Agent 打包(v2):可移植字段写入 agents/<n>.json,导入端创建并改写引用 ——
+    let agentIndex = 0
+    for (const [agentId, row] of agentRows) {
+      const agentFile: WorkflowBundleAgentFile = {
+        name: row.name,
+        description: row.description,
+        prompt: row.prompt,
+        agentAdapter: row.agentAdapter,
+        permissionMode: row.permissionMode,
+        reasoningEffort: row.reasoningEffort,
+        ...(row.modelId != null ? { modelId: row.modelId } : {}),
+        ...(row.providerProfileId != null ? { providerProfileId: row.providerProfileId } : {}),
+        skillIds: [...row.skillIds],
+        disabledSkillIds: [...row.disabledSkillIds],
+        mcpServerIds: [...row.mcpServerIds],
+        hookConfig: row.hookConfig,
+        metadata: row.metadata,
+      }
+      const file = `agents/${agentIndex}.json`
+      zip[file] = new TextEncoder().encode(JSON.stringify(agentFile, null, 2))
+      agentEntries.push({ file, name: row.name, originAgentId: agentId })
+      agentIndex += 1
+    }
+
     // —— 跨环境不可移植项显式声明 ——
-    for (const agentId of aggregatedAgentIds) {
+    const seenModelRefs = new Set<string>()
+    for (const ref of aggregatedModelRefs) {
+      const key = `${ref.providerProfileId ?? ''}|${ref.modelId ?? ''}`
+      if (seenModelRefs.has(key)) continue
+      seenModelRefs.add(key)
       unresolved.push({
-        type: 'agent',
-        name: agentId,
-        hint: '执行 Agent 绑定不随包迁移,导入后需重新绑定',
+        type: 'provider',
+        name: ref.modelId ?? ref.providerProfileId ?? '模型绑定',
+        hint: '节点/Agent 的模型绑定不随包迁移(供应商配置与密钥保留在本机),导入后请重新选择模型',
       })
     }
     for (const ruleId of aggregatedRuleIds) {
@@ -277,6 +343,7 @@ export class WorkflowBundleExporter {
       })),
       skills: skillEntries,
       mcpServers: mcpEntries,
+      agents: agentEntries,
       unresolved,
       verification: {
         status: resolveExportStatus(checks, unresolved),

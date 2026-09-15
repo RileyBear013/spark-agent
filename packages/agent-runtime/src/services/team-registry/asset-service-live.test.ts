@@ -171,7 +171,7 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
 
       // ── 浏览列表可见 ──
       const list = await service.listTeamAssets('workflow')
-      expect(list.map((i) => i.slug)).toContain(wfPub.slug)
+      expect(list.items.map((i) => i.slug)).toContain(wfPub.slug)
 
       // ── 版本语义：指定版本不生效（服务端自分配 0.0.N 递增），发布自动 +1 ──
       const explicit = await service.publishToTeam('workflow', 'w1', { version: '0.9.0' })
@@ -228,12 +228,12 @@ describe.skipIf(!LIVE)('TeamAssetService 真机探针（TEAM_REGISTRY_LIVE=1）'
       expect(updatesRestored.find((u) => u.slug === wfPub.slug)?.state).toBe('up-to-date')
 
       // ── 三类都在远端可见 ──
-      expect((await service.listTeamAssets('agent')).map((i) => i.slug)).toContain(agentPub.slug)
-      expect((await service.listTeamAssets('app')).map((i) => i.slug)).toContain(appPub.slug)
+      expect((await service.listTeamAssets('agent')).items.map((i) => i.slug)).toContain(agentPub.slug)
+      expect((await service.listTeamAssets('app')).items.map((i) => i.slug)).toContain(appPub.slug)
     } finally {
       await cleanup()
       // 注册中心还原为空校验（原生 AgentSpec 维度）
-      const items = await client.listTeamAgentSpecs()
+      const items = (await client.listTeamAgentSpecs()).items
       const ours = probeSlugs.map(([type, slug]) => agentSpecNameFor(type, slug))
       expect(items.filter((i) => ours.includes(String(i.name))).map((i) => i.name)).toEqual([])
     }

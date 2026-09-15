@@ -136,6 +136,8 @@ export class SubAppBackend {
   ) {
     this.repository = new SubAppRepository(database)
     this.fileStore = new SubAppFileStore(fileStoreRootDir)
+    this.packages = new SubAppPackageService(database)
+    this.platform = new SubAppPlatformRepository(database)
     this.share = new SubAppShareService({
       repository: this.repository,
       fileStore: this.fileStore,
@@ -143,9 +145,8 @@ export class SubAppBackend {
       backupsDir:
         options.backupsDir ?? path.join(path.dirname(fileStoreRootDir), 'sub-app-backups'),
       platformVersion: options.platformVersion ?? '0.0.0',
+      packages: this.packages,
     })
-    this.packages = new SubAppPackageService(database)
-    this.platform = new SubAppPlatformRepository(database)
     this.network = new SubAppNetworkGateway(database)
     this.services = new SubAppServiceManager(database, options.onServiceEvent)
     this.jobs = new SubAppJobManager(database, this.services, options.onJobChanged)

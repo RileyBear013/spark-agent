@@ -40,7 +40,7 @@ function makeAgentSpecServer() {
 
   const client = {
     async listTeamAgentSpecs() {
-      return [...specs.entries()].map(([name, spec]) => {
+      const items = [...specs.entries()].map(([name, spec]) => {
         const online = [...spec.versions.keys()].filter(
           (v) => spec.versions.get(v)!.status === 'online',
         )
@@ -53,6 +53,7 @@ function makeAgentSpecServer() {
           onlineCnt: online.length,
         }
       })
+      return { items, total: items.length }
     },
     async getTeamAgentSpec(name: string): Promise<TeamAgentSpecDetail | null> {
       const spec = specs.get(name)
@@ -422,7 +423,7 @@ describe('TeamAssetService.listTeamAssets', () => {
 
     const { service } = makeService(server, makeWorkflowPort().port)
     const list = await service.listTeamAssets('workflow')
-    expect(list.map((i) => i.slug)).toEqual(['flow-a'])
+    expect(list.items.map((i) => i.slug)).toEqual(['flow-a'])
   })
 })
 
@@ -463,7 +464,7 @@ describe('TeamAssetService.listTeamUpdates', () => {
       makePinsRepo(),
     )
     expect(await bare.listTeamUpdates('workflow')).toEqual([])
-    expect(await bare.listTeamAssets('workflow')).toEqual([])
+    expect(await bare.listTeamAssets('workflow')).toEqual({ items: [], total: 0 })
   })
 })
 

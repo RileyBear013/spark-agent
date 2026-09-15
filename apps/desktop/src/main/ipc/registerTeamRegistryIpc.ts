@@ -123,9 +123,13 @@ export function registerTeamRegistryIpc(deps: TeamRegistryIpcDeps): void {
     return { versions: listInstallableTeamVersions(toVersionInfos(detail?.versions ?? [])).map((v) => ({ ...v, author: null })) }
   }))
 
-  typedIpcHandle('team-registry:list-mcp', async () => runTeamRegistryTask(async () => {
-    const servers = await deps.getTeamMcpService().listTeamServers()
-    return { servers }
+  typedIpcHandle('team-registry:list-mcp', async (req) => runTeamRegistryTask(async () => {
+    const { items, total } = await deps.getTeamMcpService().listTeamServers({
+      ...(req.page !== undefined ? { page: req.page } : {}),
+      ...(req.pageSize !== undefined ? { pageSize: req.pageSize } : {}),
+      ...(req.query !== undefined ? { query: req.query } : {}),
+    })
+    return { servers: items, total }
   }))
 
   typedIpcHandle('team-registry:publish-mcp', async (req) => runTeamRegistryTask(async () => {

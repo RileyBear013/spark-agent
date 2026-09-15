@@ -8,9 +8,14 @@
  * 纯 UI 层——全部消费既有 IPC 通道（team-registry:* 与 skill-registry:search），
  * 六态徽标语义与各管理页团队区块一致；发布动作仍保留在各管理页（创作者上下文），
  * 本页专注消费侧。侧栏角标由 useTeamStoreUpdatableCount 提供。
+ *
+ * 分页模型（2026-09）：列表按类分片做服务端分页（PAGE_SIZE/页），进入分类页签
+ * 或翻页时按需加载；「全部」视图只聚合各类第一页。updates 通道（体积 = 本地
+ * 安装相关条目，天然有界）保持全量拉取，用于六态富化与全局计数。
+ * 可通过 embedded 模式嵌进扩展中心（McpView）页签，隐藏页面级标题栏。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Drawer } from 'antd'
+import { Drawer, Pagination } from 'antd'
 import { Button, Empty, Input, Tag } from '@lobehub/ui'
 import type {
   TeamRegistryAssetListItemDto,
@@ -19,6 +24,7 @@ import type {
   TeamRegistryMcpUpdateItemDto,
   TeamRegistryUpdateItemDto,
   TeamRegistryVersionItemDto,
+  RemoteSkillItem,
 } from '@spark/protocol'
 import { Icons } from '../Icons'
 import { useIpcInvoke } from '../hooks/useIpc'
@@ -45,6 +51,8 @@ const KIND_META: Record<StoreKind, { label: string; tagColor: string }> = {
   mcp: { label: 'MCP', tagColor: 'cyan' },
 }
 
+/** 每类每页拉取条数：卡片网格 4 列 × 6 行，服务端与传输都有界 */
+const PAGE_SIZE = 24
 
 interface StoreCard {
   kind: StoreKind
@@ -63,6 +71,25 @@ interface StoreCard {
   protocol: string
   /** 技能专属：团队下载量 */
   downloadCount: number
+}
+
+/** 单类资产的分片状态：当前页卡片 + 服务端总数 + 拉取状态 */
+interface KindPage {
+  cards: StoreCard[]
+  total: number
+  loading: boolean
+  failed: boolean
+}
+
+type PagesState = Record<StoreKind, KindPage>
+
+/** 五类资产的 updates 映射（六态富化数据源；全量、有界） */
+interface UpdateMaps {
+  app: Record<string, TeamRegistryAssetUpdateItemDto>
+  workflow: Record<string, TeamRegistryAssetUpdateItemDto>
+  agent: Record<string, TeamRegistryAssetUpdateItemDto>
+  skill: Record<string, TeamRegistryUpdateItemDto>
+  mcp: Record<string, TeamRegistryMcpUpdateItemDto>
 }
 
 /** 需要用户注意的异常态（正常态为 not-installed / up-to-date / remote-newer） */
@@ -120,9 +147,121 @@ function matchStatus(card: StoreCard, filter: StatusFilter): boolean {
   }
 }
 
+function emptyPages(): PagesState {
+  const blank = (): KindPage => ({ cards: [], total: 0, loading: false, failed: false })
+  return { app: blank(), workflow: blank(), agent: blank(), skill: blank(), mcp: blank() }
+}
+
+function emptyUpdMaps(): UpdateMaps {
+  return { app: {}, workflow: {}, agent: {}, skill: {}, mcp: {} }
+}
+
+/** 列表条目 → 卡片（不带六态；六态在展示前用 updates 映射富化） */
+function envelopeCard(kind: StoreKind, it: TeamRegistryAssetListItemDto): StoreCard {
+  return {
+    kind,
+    slug: it.slug,
+    name: it.name,
+    description: it.description ?? '',
+    version: it.version,
+    author: it.author ?? '',
+    updatedAt: it.updatedAt ?? '',
+    state: 'not-installed',
+    localId: null,
+    localVersion: null,
+    protocol: '',
+    downloadCount: 0,
+  }
+}
+
+function mcpCard(m: TeamRegistryMcpListItemDto): StoreCard {
+  return {
+    kind: 'mcp',
+    slug: m.slug,
+    name: m.name,
+    description: m.description ?? '',
+    version: m.version,
+    author: '',
+    updatedAt: '',
+    state: 'not-installed',
+    localId: null,
+    localVersion: null,
+    protocol: m.protocol ?? '',
+    downloadCount: 0,
+  }
+}
+
+function skillCard(s: RemoteSkillItem): StoreCard {
+  const slug = s.id.startsWith('team:') ? s.id.slice('team:'.length) : s.id
+  return {
+    kind: 'skill',
+    slug,
+    name: s.name,
+    description: s.description ?? '',
+    version: s.version ?? '',
+    author: s.author ?? '',
+    updatedAt: '',
+    state: s.localId != null ? 'up-to-date' : 'not-installed',
+    localId: s.localId ?? null,
+    localVersion: null,
+    protocol: '',
+    downloadCount: s.downloadCount ?? 0,
+  }
+}
+
+/** 用 updates 映射富化卡片六态（按 kind 定位对应映射，字段名各不相同） */
+function enrichCard(card: StoreCard, maps: UpdateMaps): StoreCard {
+  switch (card.kind) {
+    case 'mcp': {
+      const u = maps.mcp[card.slug]
+      return u == null
+        ? card
+        : {
+            ...card,
+            state: u.state ?? 'not-installed',
+            localId: u.localServerId ?? null,
+            localVersion: u.localVersion ?? null,
+          }
+    }
+    case 'skill': {
+      const u = maps.skill[card.slug]
+      return u == null
+        ? card
+        : {
+            ...card,
+            state: u.state ?? card.state,
+            localId: u.localSkillId ?? card.localId,
+            localVersion: u.localVersion ?? null,
+            updatedAt: u.remoteUpdatedAt ?? card.updatedAt,
+          }
+    }
+    default: {
+      const u = maps[card.kind][card.slug]
+      return u == null
+        ? card
+        : {
+            ...card,
+            state: u.state ?? 'not-installed',
+            localId: u.localId ?? null,
+            localVersion: u.localVersion ?? null,
+          }
+    }
+  }
+}
+
+function toUpdMap<T extends { slug: string }>(
+  r: PromiseSettledResult<{ updates: T[] }>,
+): Record<string, T> {
+  const map: Record<string, T> = {}
+  if (r.status === 'fulfilled') {
+    for (const u of r.value.updates) map[u.slug] = u
+  }
+  return map
+}
+
 // ─── 页面组件 ──────────────────────────────────────────────────────────
 
-export function TeamStoreView() {
+export function TeamStoreView({ embedded = false }: { embedded?: boolean } = {}) {
   const { invoke: getConfig } = useIpcInvoke('team-registry:config-get')
   const { invoke: listAssets } = useIpcInvoke('team-registry:list-assets')
   const { invoke: listAssetUpdates } = useIpcInvoke('team-registry:list-asset-updates')
@@ -140,10 +279,17 @@ export function TeamStoreView() {
   const { toast } = useToast()
 
   const [configured, setConfigured] = useState<boolean | null>(null)
-  const [cards, setCards] = useState<StoreCard[]>([])
+  const [pages, setPages] = useState<PagesState>(emptyPages)
+  const [pageByKind, setPageByKind] = useState<Record<StoreKind, number>>({
+    app: 1,
+    workflow: 1,
+    agent: 1,
+    skill: 1,
+    mcp: 1,
+  })
+  const [updMaps, setUpdMaps] = useState<UpdateMaps>(emptyUpdMaps)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [partialError, setPartialError] = useState('')
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const [category, setCategory] = useState<Category>('all')
@@ -155,45 +301,66 @@ export function TeamStoreView() {
   const [versionsOpen, setVersionsOpen] = useState(false)
   const [publishOpen, setPublishOpen] = useState(false)
   const reloadToken = useRef(0)
+  const queryRef = useRef('')
+  const loadedMarker = useRef<Partial<Record<StoreKind, { page: number; query: string }>>>({})
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250)
     return () => window.clearTimeout(timer)
   }, [query])
 
-  // reload 期间在闭包间传递各 updates 映射（避免一长串 state）
-  const skillUpdatesRef = useRef<Record<string, TeamRegistryUpdateItemDto>>({})
-
-  const toUpdMap = useCallback(
-    <T extends { slug: string }>(r: PromiseSettledResult<{ updates: T[] }>): Record<string, T> => {
-      const map: Record<string, T> = {}
-      if (r.status === 'fulfilled') {
-        for (const u of r.value.updates) map[u.slug] = u
+  /** 单类拉取：返回该类一页结果（失败以 failed 标记，不抛出） */
+  const fetchKindPage = useCallback(
+    async (kind: StoreKind, page: number, q: string): Promise<KindPage> => {
+      try {
+        if (kind === 'skill') {
+          const res = await searchSkills({
+            query: q,
+            registryId: 'team',
+            limit: PAGE_SIZE,
+            offset: (page - 1) * PAGE_SIZE,
+          })
+          const cards = res.skills
+            .filter((s) => s.id.startsWith('team:'))
+            .map((s): StoreCard => skillCard(s))
+          return { cards, total: res.total ?? cards.length, loading: false, failed: false }
+        }
+        if (kind === 'mcp') {
+          const res = await listMcp({
+            page,
+            pageSize: PAGE_SIZE,
+            ...(q !== '' ? { query: q } : {}),
+          })
+          return {
+            cards: res.servers.map((m): StoreCard => mcpCard(m)),
+            total: res.total ?? res.servers.length,
+            loading: false,
+            failed: false,
+          }
+        }
+        const res = await listAssets({
+          assetType: kind,
+          page,
+          pageSize: PAGE_SIZE,
+          ...(q !== '' ? { query: q } : {}),
+        })
+        return {
+          cards: res.items.map((it): StoreCard => envelopeCard(kind, it)),
+          total: res.total ?? res.items.length,
+          loading: false,
+          failed: false,
+        }
+      } catch {
+        return { cards: [], total: 0, loading: false, failed: true }
       }
-      return map
     },
-    [],
+    [listAssets, listMcp, searchSkills],
   )
 
-  const reload = useCallback(async () => {
-    const token = ++reloadToken.current
-    setLoading(true)
-    setError('')
-    setPartialError('')
-    try {
-      const configRes = await getConfig({})
-      if (token !== reloadToken.current) return
-      setConfigured(configRes.snapshot.configured)
-      if (!configRes.snapshot.configured) {
-        setCards([])
-        return
-      }
+  /** updates 通道刷新（体积 = 本地安装相关条目，全量有界） */
+  const reloadUpdates = useCallback(
+    async (token: number) => {
       const results = await Promise.allSettled([
-        listAssets({ assetType: 'workflow' }),
-        listAssets({ assetType: 'agent' }),
-        listAssets({ assetType: 'app' }),
-        searchSkills({ query: '', registryId: 'team', limit: 100 }),
-        listMcp({}),
         listAssetUpdates({ assetType: 'workflow' }),
         listAssetUpdates({ assetType: 'agent' }),
         listAssetUpdates({ assetType: 'app' }),
@@ -201,119 +368,90 @@ export function TeamStoreView() {
         listMcpUpdates({}),
       ])
       if (token !== reloadToken.current) return
-      const [wfR, agR, apR, skR, mcR, uwfR, uagR, uapR, uskR, umcR] = results
+      const [uwf, uag, uap, usk, umc] = results
+      setUpdMaps({
+        workflow: toUpdMap(uwf),
+        agent: toUpdMap(uag),
+        app: toUpdMap(uap),
+        skill: toUpdMap(usk),
+        mcp: toUpdMap(umc),
+      })
+    },
+    [listAssetUpdates, listMcpUpdates, listSkillUpdates],
+  )
 
-      const wfUpd = toUpdMap(uwfR)
-      const agUpd = toUpdMap(uagR)
-      const apUpd = toUpdMap(uapR)
-      const skUpd = toUpdMap(uskR)
-      const mcUpd = toUpdMap(umcR)
-      skillUpdatesRef.current = skUpd
-
-      const envelopeCards = (
-        kind: StoreKind,
-        r: PromiseSettledResult<{ items: TeamRegistryAssetListItemDto[] }>,
-        upd: Record<string, TeamRegistryAssetUpdateItemDto>,
-      ): StoreCard[] =>
-        r.status === 'fulfilled'
-          ? r.value.items.map((it): StoreCard => {
-              const u = upd[it.slug]
-              return {
-                kind,
-                slug: it.slug,
-                name: it.name,
-                description: it.description ?? '',
-                version: it.version,
-                author: it.author ?? '',
-                updatedAt: it.updatedAt ?? '',
-                state: u?.state ?? 'not-installed',
-                localId: u?.localId ?? null,
-                localVersion: u?.localVersion ?? null,
-                protocol: '',
-                downloadCount: 0,
-              }
-            })
-          : []
-
-      const mcpCards: StoreCard[] =
-        mcR.status === 'fulfilled'
-          ? mcR.value.servers.map((m): StoreCard => {
-              const u = mcUpd[m.slug]
-              return {
-                kind: 'mcp',
-                slug: m.slug,
-                name: m.name,
-                description: m.description ?? '',
-                version: m.version,
-                author: '',
-                updatedAt: '',
-                state: u?.state ?? 'not-installed',
-                localId: u?.localServerId ?? null,
-                localVersion: u?.localVersion ?? null,
-                protocol: m.protocol ?? '',
-                downloadCount: 0,
-              }
-            })
-          : []
-
-      const skillCards: StoreCard[] =
-        skR.status === 'fulfilled'
-          ? skR.value.skills
-              .filter((s) => s.id.startsWith('team:'))
-              .map((s): StoreCard => {
-                const slug = s.id.slice('team:'.length)
-                const u = skUpd[slug]
-                const localId = s.localId ?? u?.localSkillId ?? null
-                return {
-                  kind: 'skill',
-                  slug,
-                  name: s.name,
-                  description: s.description ?? '',
-                  version: s.version ?? '',
-                  author: s.author ?? '',
-                  updatedAt: u?.remoteUpdatedAt ?? '',
-                  state: u?.state ?? (localId != null ? 'up-to-date' : 'not-installed'),
-                  localId,
-                  localVersion: u?.localVersion ?? null,
-                  protocol: '',
-                  downloadCount: s.downloadCount ?? 0,
-                }
-              })
-          : []
-
-      const failedLabels: string[] = []
-      if (apR.status === 'rejected') failedLabels.push(KIND_META.app.label)
-      if (wfR.status === 'rejected') failedLabels.push(KIND_META.workflow.label)
-      if (agR.status === 'rejected') failedLabels.push(KIND_META.agent.label)
-      if (skR.status === 'rejected') failedLabels.push(KIND_META.skill.label)
-      if (mcR.status === 'rejected') failedLabels.push(KIND_META.mcp.label)
-
-      if (failedLabels.length === 5) {
-        setError('团队注册中心连接失败，请检查网络与配置')
-        setCards([])
+  /** 全量刷新：配置 → updates → 五类第 1 页（搜索词变化/刷新按钮/发布后走这里） */
+  const reloadAll = useCallback(async () => {
+    const token = ++reloadToken.current
+    setLoading(true)
+    setError('')
+    try {
+      const configRes = await getConfig({})
+      if (token !== reloadToken.current) return
+      setConfigured(configRes.snapshot.configured)
+      if (!configRes.snapshot.configured) {
+        setPages(emptyPages())
         return
       }
-      setCards([
-        ...envelopeCards('app', apR, apUpd),
-        ...envelopeCards('workflow', wfR, wfUpd),
-        ...envelopeCards('agent', agR, agUpd),
-        ...skillCards,
-        ...mcpCards,
-      ])
-      setPartialError(
-        failedLabels.length > 0 ? `以下分类加载失败，其余分类正常：${failedLabels.join('、')}` : '',
-      )
+      await reloadUpdates(token)
+      if (token !== reloadToken.current) return
+      const q = queryRef.current
+      const kinds: StoreKind[] = ['app', 'workflow', 'agent', 'skill', 'mcp']
+      const results = await Promise.all(kinds.map((k) => fetchKindPage(k, 1, q)))
+      if (token !== reloadToken.current) return
+      const next = emptyPages()
+      kinds.forEach((k, i) => {
+        const result = results[i]
+        if (result) next[k] = result
+      })
+      setPages(next)
+      loadedMarker.current = Object.fromEntries(kinds.map((k) => [k, { page: 1, query: q }]))
     } catch (err) {
       if (token !== reloadToken.current) return
       setError(describeError(err))
     } finally {
       if (token === reloadToken.current) setLoading(false)
     }
-  }, [getConfig, listAssets, listAssetUpdates, listMcp, listMcpUpdates, listSkillUpdates, searchSkills, toUpdMap])
+  }, [fetchKindPage, getConfig, reloadUpdates])
 
   useEffect(() => {
-    void reload()
-  }, [reload])
+    void reloadAll()
+  }, [reloadAll])
+
+  // 搜索词落定：全部类目回第 1 页重新检索（reloadAll 依赖 debouncedQuery 触发）
+  useEffect(() => {
+    queryRef.current = debouncedQuery
+    setPageByKind({ app: 1, workflow: 1, agent: 1, skill: 1, mcp: 1 })
+    loadedMarker.current = {}
+  }, [debouncedQuery])
+
+  /** 单类翻页加载：进入分类页签且目标页不在手时触发 */
+  const loadKind = useCallback(
+    async (kind: StoreKind, page: number) => {
+      const token = ++reloadToken.current
+      setPages((prev) => ({ ...prev, [kind]: { ...prev[kind], loading: true, failed: false } }))
+      const result = await fetchKindPage(kind, page, queryRef.current)
+      if (token !== reloadToken.current) return
+      setPages((prev) => ({ ...prev, [kind]: result }))
+      loadedMarker.current[kind] = { page, query: queryRef.current }
+    },
+    [fetchKindPage],
+  )
+
+  useEffect(() => {
+    if (category === 'all' || configured !== true) return
+    const want = { page: pageByKind[category], query: debouncedQuery }
+    const marker = loadedMarker.current[category]
+    if (marker != null && marker.page === want.page && marker.query === want.query) return
+    loadedMarker.current[category] = want
+    void loadKind(category, want.page)
+  }, [category, pageByKind, debouncedQuery, configured, loadKind])
+
+  /** 刷新：分页复位到第 1 页并整表重拉 */
+  const handleRefresh = () => {
+    setPageByKind({ app: 1, workflow: 1, agent: 1, skill: 1, mcp: 1 })
+    void reloadAll()
+  }
 
   // ── 安装核心（不含 toast，供单项与批量共用） ──
   const doInstall = useCallback(
@@ -338,7 +476,8 @@ export function TeamStoreView() {
     try {
       await doInstall(card, version)
       toast.success(`已安装：${card.name}${version != null && version !== '' ? ` v${version}` : ''}`)
-      await reload()
+      // 安装只改变本地状态：刷新 updates 即可，列表无需重拉
+      await reloadUpdates(++reloadToken.current)
     } catch (err) {
       toast.error(`安装失败：${describeError(err)}`)
     } finally {
@@ -350,10 +489,32 @@ export function TeamStoreView() {
     }
   }
 
-  const updatableCards = useMemo(
-    () => cards.filter((c) => c.state === 'remote-newer'),
-    [cards],
-  )
+  /** 跨页可更新目标：从 updates 映射构造（不依赖当前页数据） */
+  const updatableCards = useMemo(() => {
+    const targets: StoreCard[] = []
+    for (const kind of GROUP_ORDER) {
+      for (const slug of Object.keys(updMaps[kind])) {
+        const u = updMaps[kind][slug]
+        if (u?.state === 'remote-newer') {
+          targets.push({
+            kind,
+            slug,
+            name: u.name ?? slug,
+            description: '',
+            version: u.remoteVersion ?? '',
+            author: '',
+            updatedAt: '',
+            state: 'remote-newer',
+            localId: null,
+            localVersion: null,
+            protocol: '',
+            downloadCount: 0,
+          })
+        }
+      }
+    }
+    return targets
+  }, [updMaps])
 
   const handleUpdateAll = async () => {
     if (updatableCards.length === 0 || bulkBusy) return
@@ -374,45 +535,78 @@ export function TeamStoreView() {
       } else {
         toast.warning(`更新完成：${ok} 个成功，${fail} 个失败`)
       }
-      await reload()
+      await reloadUpdates(++reloadToken.current)
     } finally {
       setBulkBusy(false)
     }
   }
 
   // ── 派生视图 ──
-  const kindCounts = useMemo(() => {
-    const counts: Record<Category, number> = { all: cards.length, app: 0, workflow: 0, agent: 0, skill: 0, mcp: 0 }
-    for (const c of cards) counts[c.kind] += 1
-    return counts
-  }, [cards])
+  /** 各类富化后的展示卡片 */
+  const enriched = useMemo(() => {
+    const out = {} as Record<StoreKind, StoreCard[]>
+    for (const k of GROUP_ORDER) out[k] = pages[k].cards.map((c) => enrichCard(c, updMaps))
+    return out
+  }, [pages, updMaps])
 
-  const statusCounts = useMemo(
-    () => ({
-      updatable: cards.filter((c) => c.state === 'remote-newer').length,
-      notInstalled: cards.filter((c) => c.localId == null).length,
-      attention: cards.filter((c) => ATTENTION_STATES.has(c.state)).length,
-    }),
-    [cards],
+  const kindTotals = useMemo(() => {
+    const totals: Record<Category, number> = { all: 0, app: 0, workflow: 0, agent: 0, skill: 0, mcp: 0 }
+    for (const k of GROUP_ORDER) {
+      totals[k] = pages[k].total
+      totals.all += pages[k].total
+    }
+    return totals
+  }, [pages])
+
+  /** 全局六态计数（跨页；来自全量 updates + 服务端 total） */
+  const statusCounts = useMemo(() => {
+    const localIdOf = (kind: StoreKind, slug: string): string | null => {
+      switch (kind) {
+        case 'skill':
+          return updMaps.skill[slug]?.localSkillId ?? null
+        case 'mcp':
+          return updMaps.mcp[slug]?.localServerId ?? null
+        default:
+          return updMaps[kind][slug]?.localId ?? null
+      }
+    }
+    let updatable = 0
+    let attention = 0
+    let installed = 0
+    for (const k of GROUP_ORDER) {
+      for (const slug of Object.keys(updMaps[k])) {
+        const u = updMaps[k][slug]
+        if (u == null) continue
+        if (u.state === 'remote-newer') updatable += 1
+        if (ATTENTION_STATES.has(u.state)) attention += 1
+        if (localIdOf(k, slug) != null) installed += 1
+      }
+    }
+    const total = kindTotals.all
+    return { updatable, attention, installed, notInstalled: Math.max(0, total - installed) }
+  }, [updMaps, kindTotals])
+
+  /** 当前页内过滤 + 排序（服务端已按搜索词 blur 过滤，这里做状态筛选与排序） */
+  const visibleFor = useCallback(
+    (kind: StoreKind): StoreCard[] => {
+      const q = debouncedQuery.toLowerCase()
+      let rows = enriched[kind]
+      if (statusFilter !== 'all') rows = rows.filter((c) => matchStatus(c, statusFilter))
+      if (q !== '') {
+        rows = rows.filter((c) => `${c.name} ${c.description} ${c.author}`.toLowerCase().includes(q))
+      }
+      const byRecent = (a: StoreCard, b: StoreCard): number => {
+        const ta = a.updatedAt === '' ? 0 : Date.parse(a.updatedAt)
+        const tb = b.updatedAt === '' ? 0 : Date.parse(b.updatedAt)
+        if (ta !== tb) return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta)
+        return a.name.localeCompare(b.name, 'zh-Hans-CN')
+      }
+      const byName = (a: StoreCard, b: StoreCard): number =>
+        a.name.localeCompare(b.name, 'zh-Hans-CN')
+      return [...rows].sort(sort === 'recent' ? byRecent : byName)
+    },
+    [enriched, statusFilter, debouncedQuery, sort],
   )
-
-  const filtered = useMemo(() => {
-    const q = debouncedQuery.toLowerCase()
-    let rows = cards
-    if (category !== 'all') rows = rows.filter((c) => c.kind === category)
-    if (statusFilter !== 'all') rows = rows.filter((c) => matchStatus(c, statusFilter))
-    if (q !== '') {
-      rows = rows.filter((c) => `${c.name} ${c.description} ${c.author}`.toLowerCase().includes(q))
-    }
-    const byRecent = (a: StoreCard, b: StoreCard): number => {
-      const ta = a.updatedAt === '' ? 0 : Date.parse(a.updatedAt)
-      const tb = b.updatedAt === '' ? 0 : Date.parse(b.updatedAt)
-      if (ta !== tb) return (Number.isNaN(tb) ? 0 : tb) - (Number.isNaN(ta) ? 0 : ta)
-      return a.name.localeCompare(b.name, 'zh-Hans-CN')
-    }
-    const byName = (a: StoreCard, b: StoreCard): number => a.name.localeCompare(b.name, 'zh-Hans-CN')
-    return [...rows].sort(sort === 'recent' ? byRecent : byName)
-  }, [cards, category, statusFilter, debouncedQuery, sort])
 
   const fetchVersions = useCallback(
     async (card: StoreCard): Promise<TeamRegistryVersionItemDto[]> => {
@@ -441,28 +635,39 @@ export function TeamStoreView() {
     />
   )
 
+  const totalCards = kindTotals.all
+  const failedKinds = GROUP_ORDER.filter((k) => pages[k].failed)
+
+  const headerActions = (
+    <div className="team-store-header-actions">
+      {configured === true && (
+        <Button size="small" type="primary" onClick={() => setPublishOpen(true)}>
+          <Icons.Upload size={13} />
+          上传共享
+        </Button>
+      )}
+      <Button size="small" onClick={handleRefresh} loading={loading}>
+        刷新
+      </Button>
+    </div>
+  )
+
   return (
     <div className="team-store-page">
-      <header className="team-store-header">
-        <div className="team-store-header-text">
-          <h2>
-            <Icons.Package size={18} />
-            团队商店
-          </h2>
-          <p>团队共享的应用、工作流、助手、技能与 MCP —— 一键安装、版本可选、开箱即运行。</p>
-        </div>
-        <div className="team-store-header-actions">
-          {configured === true && (
-            <Button size="small" type="primary" onClick={() => setPublishOpen(true)}>
-              <Icons.Upload size={13} />
-              上传共享
-            </Button>
-          )}
-          <Button size="small" onClick={() => void reload()} loading={loading}>
-            刷新
-          </Button>
-        </div>
-      </header>
+      {embedded ? (
+        <div className="team-store-header team-store-header--embedded">{headerActions}</div>
+      ) : (
+        <header className="team-store-header">
+          <div className="team-store-header-text">
+            <h2>
+              <Icons.Package size={18} />
+              团队商店
+            </h2>
+            <p>团队共享的应用、工作流、助手、技能与 MCP —— 一键安装、版本可选、开箱即运行。</p>
+          </div>
+          {headerActions}
+        </header>
+      )}
 
       {configured === false ? (
         <div className="team-store-unconfigured">
@@ -485,7 +690,11 @@ export function TeamStoreView() {
               </Button>
             </div>
           )}
-          {partialError !== '' && <div className="team-store-warn-line">{partialError}</div>}
+          {failedKinds.length > 0 && (
+            <div className="team-store-warn-line">
+              {`以下分类加载失败，其余分类正常：${failedKinds.map((k) => KIND_META[k].label).join('、')}`}
+            </div>
+          )}
 
           <div className="team-store-toolbar">
             <Input
@@ -524,7 +733,7 @@ export function TeamStoreView() {
                 onClick={() => setCategory(k)}
               >
                 {k === 'all' ? '全部' : KIND_META[k].label}
-                <span className="team-store-cat-count">{kindCounts[k]}</span>
+                <span className="team-store-cat-count">{kindTotals[k]}</span>
               </button>
             ))}
           </div>
@@ -535,7 +744,7 @@ export function TeamStoreView() {
                 ['all', '全部状态', null],
                 ['updatable', '可更新', statusCounts.updatable],
                 ['not-installed', '未安装', statusCounts.notInstalled],
-                ['installed', '已安装', null],
+                ['installed', '已安装', statusCounts.installed],
                 ['attention', '需注意', statusCounts.attention],
               ] as const
             ).map(([key, label, count]) => (
@@ -554,31 +763,32 @@ export function TeamStoreView() {
           {error !== '' ? (
             <div className="team-store-error">
               {error}
-              <Button size="small" onClick={() => void reload()}>
+              <Button size="small" onClick={handleRefresh}>
                 重试
               </Button>
             </div>
-          ) : loading && cards.length === 0 ? (
+          ) : loading && totalCards === 0 ? (
             <div className="team-store-loading">
               <Icons.Spinner size={16} />
               正在加载团队资产…
             </div>
-          ) : filtered.length === 0 ? (
+          ) : totalCards === 0 ? (
             <div className="team-store-unconfigured">
               <Empty
                 description={
-                  cards.length === 0
-                    ? '团队注册中心还没有共享资产——点右上角「上传共享」，把本地的应用 / 工作流 / 助手分享给团队'
-                    : '没有符合当前筛选条件的资产'
+                  debouncedQuery !== ''
+                    ? '没有符合搜索条件的资产'
+                    : '团队注册中心还没有共享资产——点右上角「上传共享」，把本地的应用 / 工作流 / 助手分享给团队'
                 }
               />
             </div>
           ) : category === 'all' ? (
-            // 「全部」视图按类分节排版：应用 / 工作流 / 助手 / 技能 / MCP 各自成组，
-            // 空分类不渲染，避免五类混排难以扫读。
-            GROUP_ORDER.filter((k) => filtered.some((c) => c.kind === k)).map((k) => {
+            // 「全部」视图按类分节排版（各类第一页）：应用 / 工作流 / 助手 / 技能 / MCP，
+            // 空分类不渲染；分节头带服务端总数，超出一页提供「查看全部」跳转。
+            GROUP_ORDER.filter((k) => visibleFor(k).length > 0).map((k) => {
               const SectionIcon = KIND_ICONS[k]
-              const sectionCards = filtered.filter((c) => c.kind === k)
+              const sectionCards = visibleFor(k)
+              const total = pages[k].total
               return (
                 <section key={k} className="team-store-section" aria-label={KIND_META[k].label}>
                   <div className="team-store-section-head">
@@ -586,16 +796,35 @@ export function TeamStoreView() {
                       <SectionIcon size={13} />
                     </span>
                     <h3>{KIND_META[k].label}</h3>
-                    <span className="team-store-section-count">{sectionCards.length}</span>
+                    <span className="team-store-section-count">{total}</span>
+                    {total > sectionCards.length && (
+                      <button
+                        type="button"
+                        className="team-store-section-more"
+                        onClick={() => setCategory(k)}
+                      >
+                        查看全部
+                      </button>
+                    )}
                   </div>
-                  <div className="team-store-grid">
-                    {sectionCards.map(renderCard)}
-                  </div>
+                  <div className="team-store-grid">{sectionCards.map(renderCard)}</div>
                 </section>
               )
             })
           ) : (
-            <div className="team-store-grid">{filtered.map(renderCard)}</div>
+            <>
+              <div className="team-store-grid">{visibleFor(category).map(renderCard)}</div>
+              <div className="team-store-pager">
+                <Pagination
+                  size="small"
+                  current={pageByKind[category]}
+                  pageSize={PAGE_SIZE}
+                  total={pages[category].total}
+                  showSizeChanger={false}
+                  onChange={(p) => setPageByKind((prev) => ({ ...prev, [category]: p }))}
+                />
+              </div>
+            </>
           )}
         </>
       )}
@@ -698,18 +927,16 @@ export function TeamStoreView() {
           if (detail != null) await handleInstall(detail, v)
         }}
         onClose={() => setVersionsOpen(false)}
-        onInstalled={() => void reload()}
+        onInstalled={() => void reloadUpdates(++reloadToken.current)}
       />
 
       <TeamStorePublish
         open={publishOpen}
-        remoteCards={cards.flatMap((c) =>
-          c.kind === 'workflow' || c.kind === 'app' || c.kind === 'agent'
-            ? [{ kind: c.kind, name: c.name, version: c.version }]
-            : [],
+        remoteCards={(['workflow', 'app', 'agent'] as const).flatMap((k) =>
+          visibleFor(k).map((c) => ({ kind: k, name: c.name, version: c.version })),
         )}
         onClose={() => setPublishOpen(false)}
-        onPublished={() => void reload()}
+        onPublished={handleRefresh}
       />
     </div>
   )

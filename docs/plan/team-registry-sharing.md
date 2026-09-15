@@ -1,6 +1,55 @@
 # 团队注册中心与资产共享方案（Team Registry Sharing）
 
-> 状态: 实施中 | 最后核对: 2026-09-13
+> 状态: 实施中 | 最后核对: 2026-09-14
+
+## v2.6 V2 多文件子应用支持发布到团队商店（2026-09-14）
+
+- **发布**：V2 应用的信封载荷新增 `v2.draftFiles` 段（草稿项目文件，base64 保真、
+  可含二进制资源；MCP 引用仍按名称扫描项目文本随包）。`files` 留空——V1 入口
+  文件内容对 V2 应用不适用，旧版接收端在安装时显式失败而非装出半成品。发布
+  版本/制品与连接槽绑定不随团队分享（制品属发布方本地历史，绑定指向本机
+  连接/Provider 跨机器无意义，同工作流 bundle 密钥脱敏边界），发布 warning
+  显式提示接收方自行发布与绑定。
+- **安装**：「新建」= `importApp` 建草稿行 → `importV2State` 从 revision 1 重建
+  项目，失败清理半成品（DB 行 + 项目/制品目录）；「更新」= 新增
+  `SubAppPackageService.replaceDraftProject`（CAS 替换草稿项目并同步行元数据，
+  发布版本/制品/绑定/运行状态全保留，与 V1 updateDraft 只覆盖内容字段对齐）。
+  V1↔V2 格式互斥更新均显式报错（V1 本地应用先迁移为 V2 再更新，不自动迁移）。
+- **UI**：商店上传面板与 SubAppsView 的「V2 暂不支持发布」拦截与文案移除，
+  改为提示新草稿安装与绑定不迁移的边界。
+- **边界**：app 端口（registerTeamAssetIpc）与 workflow/agent 端口一致无单测，
+  V2 原语由 storage 层聚焦测试覆盖（replaceDraftProject 替换语义 / CAS 冲突
+  无孤儿目录 / V1 拒绝）；旧版接收端收到 V2 载荷会因缺少入口文件报错，属
+  显式版本差。
+
+## v2.5 商店迁入拓展中心、服务端分页与分享包完备化（2026-09-14）
+
+- **商店入口迁入拓展中心**：团队商店从侧栏独立入口移入 McpView（拓展中心）新页签，
+  App.tsx 路由深链同步，侧栏入口移除、角标迁至拓展中心项——商店与 MCP/自定义工具/
+  连接器同属资源类聚合，侧栏收敛。
+- **服务端分页**：Nacos 列资产接口带 page/pageSize/search，nacos-client 三个 list
+  方法（资产/agentspecs/MCP）改分页返回 `{items, total}`（total 探测不到时以当页
+  条数兜底）；agentspecs 按 `spark-<type>-` 命名前缀 blur 过滤；asset-service/
+  skill-registry/IPC 协议与 Handler 透传分页参数。商店 UI 按类目独立分页（每页 24），
+  「全部」视图聚合五类第一页——替代此前进店即 10 个 IPC 并发全量拉取，防大店爆内存。
+- **工作流分享包 v2**：manifest 增 agents 分区（确定性 ID + agentIdMap 引用改写），
+  导入端物化 Agent、失败回滚、卸载联动清理；collectGraphDependencies 补收直连
+  MCP 节点引用（此前既不随包也不进 unresolved 的缺口）；模型/Provider 绑定转
+  unresolved 提示（密钥不可导出，至少可见）；schemaVersion 同时接受 v1/v2 旧包；
+  导入预览 UI 增 Agent 区块、provider 文案与创建计数 toast。全新 Spark 导入
+  .sparkflow 即具备随包 Agent/MCP/技能能力。
+- **应用分享包 V2 完整化**：`.sparkapp` 包增 v2 段——V2 多文件项目文件（草稿与
+  发布制品内容寻址文件）、发布版本关联、连接槽绑定与 V2 身份字段；导入端按
+  draft/published 分路还原并清理孤儿关联；导出 capabilities 扫描纳入 V2 文本，
+  修正 V2 场景误导性「空草稿」警告。修复此前 V2 应用导出 source 全空的缺口，
+  分享包即完整当前应用。
+- **验证**：四包 typecheck 0 错误；workflow-bundle + team-registry 定向 30/30、
+  storage sub-app 24/24、SubAppShareService 11/11（含 V2 round-trip）、storage
+  全量 426 用例（1 个 session-collaboration 用例并行跑超时，单独重跑 14/14 通过，
+  判定为资源竞争偶发）；四包 lint 0 错误，改动文件无非空断言/未用告警残留，
+  TeamStoreView 的 effect 内 setState 告警沿用 master 旧版同款惯用写法；
+  McpView.test 的 @lobehub/ui fluent-emoji 目录解析失败为 worktree 环境性预存
+  问题（master 同样失败），与本次改动无关。
 
 ## v2.4 团队商店上传入口与分类分节排版（2026-09-13，`59d7226c`）
 

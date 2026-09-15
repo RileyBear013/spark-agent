@@ -605,6 +605,14 @@ export class SubAppRepository extends BaseRepository {
       const now = new Date().toISOString()
       // 覆盖语义：先清空同 id 应用的全部关联行；releases/data 有 FK 指向
       // sub_apps，必须先删子表再删主表（显式删除兜底旧库 pragma 缺失）。
+      // release_artifacts（V2 制品关联）与连接槽绑定一并清空，避免残留孤儿行。
+      this.raw
+        .prepare(
+          `DELETE FROM sub_app_release_artifacts WHERE release_id IN
+             (SELECT id FROM sub_app_releases WHERE app_id = ?)`,
+        )
+        .run(params.id)
+      this.raw.prepare('DELETE FROM sub_app_connection_bindings WHERE app_id = ?').run(params.id)
       this.raw.prepare('DELETE FROM sub_app_releases WHERE app_id = ?').run(params.id)
       this.raw.prepare('DELETE FROM sub_app_data WHERE app_id = ?').run(params.id)
       this.raw.prepare('DELETE FROM sub_apps WHERE id = ?').run(params.id)

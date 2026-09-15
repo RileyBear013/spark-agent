@@ -3,12 +3,14 @@
  *
  * 导出:renderer 先经 dialog:save-file 取目标路径,再调 workflow-bundle:export 打包落盘。
  * 导入:preview-import 只读校验并返回依赖预览;import 落地到隔离空间
- *      (bundle: 前缀技能 + workflows/mcp_servers.bundle_id 标记 + MCP 默认禁用)。
+ *      (bundle: 前缀技能 + workflows/mcp_servers.bundle_id 标记 + MCP 默认禁用
+ *      + 随包子 Agent 按 wfb-agent- 前缀确定性 ID 创建,卸载时一并清理)。
  */
 
 import { createLogger } from '@spark/shared'
 import type { McpService } from '@spark/agent-runtime'
 import {
+  AgentRepository,
   McpServerRepository,
   SkillRepository,
   WorkflowBundleRepository,
@@ -29,6 +31,7 @@ function getWorkflowBundleService(getMcpService: () => McpService): WorkflowBund
       new WorkflowRepository(db),
       new SkillRepository(db),
       new McpServerRepository(db),
+      new AgentRepository(db),
       new WorkflowBundleRepository(db),
       getAppSkillsManager().userDir,
       getMcpService(),

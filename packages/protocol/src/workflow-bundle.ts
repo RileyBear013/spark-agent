@@ -8,6 +8,7 @@ import { z } from 'zod'
  *   workflows/<n>.json 主工作流图(WorkflowBundleWorkflowFile)
  *   skills/<slug>/…    技能目录原样打包
  *   mcp/<refId>.json   MCP 配置(密钥已替换为 {{secret:<path>}} 占位符)
+ *   agents/<n>.json    子 Agent 可移植配置(v2;密钥不入包,模型绑定仅作提示)
  *   checksums.json     除自身外全部文件的 sha256
  *
  * 隔离约定:
@@ -16,12 +17,20 @@ import { z } from 'zod'
  *   - bundle MCP 导入后 enabled=0 且挂 bundle_id,激活是显式动作。
  */
 
-export const WORKFLOW_BUNDLE_SCHEMA_VERSION = 1
+/**
+ * 包 schema 版本:
+ *  - v1(初始):工作流 + 技能 + MCP,Agent 只进 unresolved 提示;
+ *  - v2(当前):新增 agents/ 分区,子 Agent 定义随包携带,导入端创建并改写引用。
+ * 导入端同时接受 v1/v2;旧版本应用导入 v2 包会在 manifest 校验处显式报错。
+ */
+export const WORKFLOW_BUNDLE_SCHEMA_VERSION = 2
 export const WORKFLOW_BUNDLE_FILE_EXTENSION = 'sparkflow'
 /** bundle 技能在导入方数据库中的 ID 前缀,同时是运行时防污染回落的关键标记。 */
 export const BUNDLE_SKILL_ID_PREFIX = 'bundle:'
 /** 技能落盘目录:{userData}/skills/_bundles/<bundleId>/<slug>/ */
 export const BUNDLE_SKILLS_DIR_NAME = '_bundles'
+/** bundle 子 Agent 在导入方数据库中的 ID 前缀:wfb-agent-<bundleId>-<hash8>,卸载时按前缀零残留清理。 */
+export const BUNDLE_AGENT_ID_PREFIX = 'wfb-agent-'
 
 // ---------------------------------------------------------------------------
 // 密钥占位符约定
@@ -120,12 +129,44 @@ export const WorkflowBundleMcpEntrySchema = z.object({
 })
 export type WorkflowBundleMcpEntry = z.infer<typeof WorkflowBundleMcpEntrySchema>
 
+export const WorkflowBundleAgentEntrySchema = z.object({
+  /** 容器内配置文件路径,如 "agents/0.json" */
+  file: BundleRelativePathSchema,
+  name: z.string().trim().min(1).max(160),
+  /** 导出方环境中的原 agents 行 ID;导入时用于改写流程图节点 agentId 与 Agent 自身引用 */
+  originAgentId: z.string().trim().min(1).max(400).optional(),
+})
+export type WorkflowBundleAgentEntry = z.infer<typeof WorkflowBundleAgentEntrySchema>
+
+/**
+ * agents/<n>.json 内容。只携带可移植字段:提示词、适配器、权限模式、自身技能/MCP 引用等;
+ * ruleIds 等环境专属引用不随包;modelId/providerProfileId 仅作提示,不保证目标环境可用。
+ */
+export const WorkflowBundleAgentFileSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(2000).default(''),
+  prompt: z.string().max(200000).default(''),
+  agentAdapter: z.string().trim().min(1).max(60).default('claude-sdk'),
+  permissionMode: z.string().trim().min(1).max(60).default('default'),
+  reasoningEffort: z.string().trim().min(1).max(30).default('medium'),
+  modelId: z.string().trim().max(200).nullable().optional(),
+  providerProfileId: z.string().trim().max(200).nullable().optional(),
+  /** Agent 自身的技能/MCP 引用(导出方 ID);导入时按包内映射改写为新 ID */
+  skillIds: z.array(z.string().trim().min(1).max(400)).max(200).default([]),
+  disabledSkillIds: z.array(z.string().trim().min(1).max(400)).max(200).default([]),
+  mcpServerIds: z.array(z.string().trim().min(1).max(400)).max(50).default([]),
+  hookConfig: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+})
+export type WorkflowBundleAgentFile = z.infer<typeof WorkflowBundleAgentFileSchema>
+
 export const WorkflowBundleUnresolvedTypeSchema = z.enum([
   'agent',
   'rule',
   'tool',
   'skill',
   'mcp',
+  'provider',
   'other',
 ])
 export type WorkflowBundleUnresolvedType = z.infer<typeof WorkflowBundleUnresolvedTypeSchema>
@@ -171,7 +212,8 @@ export type WorkflowBundleVerification = z.infer<typeof WorkflowBundleVerificati
 // ---------------------------------------------------------------------------
 
 export const WorkflowBundleManifestSchema = z.object({
-  schemaVersion: z.literal(WORKFLOW_BUNDLE_SCHEMA_VERSION),
+  // 同时接受 v1/v2:旧版应用导出的 v1 包(无 agents 分区)仍可导入,agents 缺省为 []
+  schemaVersion: z.union([z.literal(1), z.literal(WORKFLOW_BUNDLE_SCHEMA_VERSION)]),
   name: z.string().trim().min(1).max(160),
   version: z.string().trim().min(1).max(60).default('1.0.0'),
   author: z.string().trim().max(160).optional(),
@@ -182,6 +224,8 @@ export const WorkflowBundleManifestSchema = z.object({
   workflows: z.array(WorkflowBundleWorkflowEntrySchema).min(1).max(100),
   skills: z.array(WorkflowBundleSkillEntrySchema).max(200).default([]),
   mcpServers: z.array(WorkflowBundleMcpEntrySchema).max(50).default([]),
+  /** v2:随包子 Agent 定义;导入端创建新 Agent 行并改写流程图 agentId 引用 */
+  agents: z.array(WorkflowBundleAgentEntrySchema).max(100).default([]),
   unresolved: z.array(WorkflowBundleUnresolvedDependencySchema).max(200).default([]),
   verification: WorkflowBundleVerificationSchema.default({ status: 'unverified', checks: [] }),
 })
@@ -241,12 +285,23 @@ export const WorkflowBundleImportPreviewMcpSchema = z.object({
 })
 export type WorkflowBundleImportPreviewMcp = z.infer<typeof WorkflowBundleImportPreviewMcpSchema>
 
+export const WorkflowBundleImportPreviewAgentSchema = z.object({
+  file: BundleRelativePathSchema,
+  name: z.string().trim().min(1).max(160),
+  /** 目标环境是否已有同名 Agent(同名不阻断导入,仅提示) */
+  nameConflict: z.boolean(),
+})
+export type WorkflowBundleImportPreviewAgent = z.infer<
+  typeof WorkflowBundleImportPreviewAgentSchema
+>
+
 export const WorkflowBundleImportPreviewSchema = z.object({
   bundleId: z.string().trim().min(1).max(200),
   manifest: WorkflowBundleManifestSchema,
   workflows: z.array(WorkflowBundleWorkflowEntrySchema),
   skills: z.array(WorkflowBundleImportPreviewSkillSchema),
   mcpServers: z.array(WorkflowBundleImportPreviewMcpSchema),
+  agents: z.array(WorkflowBundleImportPreviewAgentSchema).default([]),
   unresolved: z.array(WorkflowBundleUnresolvedDependencySchema),
   /** 校验和/schema 硬校验结果;false 时拒绝导入 */
   integrityOk: z.boolean(),
@@ -261,6 +316,8 @@ export const WorkflowBundleImportOptionsSchema = z.object({
   installSkills: z.boolean().default(true),
   /** 是否导入 MCP 配置(默认 true;导入后保持 enabled=0 待激活) */
   importMcpServers: z.boolean().default(true),
+  /** 是否随包创建子 Agent(默认 true;按 wfb-agent- 前缀确定性 ID 创建,随包可用) */
+  importAgents: z.boolean().default(true),
   /** 同 bundleId 重复导入时的策略:重装(整包替换) */
   reinstall: z.boolean().default(false),
 })
@@ -271,6 +328,7 @@ export const WorkflowBundleImportResultSchema = z.object({
   workflowIds: z.array(z.string().trim().min(1)).max(100),
   installedSkillIds: z.array(z.string().trim().min(1)).max(200),
   importedMcpServerIds: z.array(z.string().trim().min(1)).max(50),
+  createdAgentIds: z.array(z.string().trim().min(1)).max(100).default([]),
   unresolved: z.array(WorkflowBundleUnresolvedDependencySchema),
 })
 export type WorkflowBundleImportResult = z.infer<typeof WorkflowBundleImportResultSchema>

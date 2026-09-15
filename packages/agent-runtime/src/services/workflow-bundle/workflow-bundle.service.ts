@@ -8,6 +8,7 @@
 import type { WorkflowBundleRecord, WorkflowBundleVerificationStatus } from '@spark/protocol'
 import type { WorkflowBundleImportOptions } from '@spark/protocol'
 import type {
+  AgentRepository,
   McpServerRepository,
   SkillRepository,
   WorkflowBundleRepository,
@@ -37,15 +38,17 @@ export class WorkflowBundleService {
     private readonly workflowRepo: WorkflowRepository,
     private readonly skillRepo: SkillRepository,
     private readonly mcpRepo: McpServerRepository,
+    private readonly agentRepo: AgentRepository,
     private readonly bundleRepo: WorkflowBundleRepository,
     private readonly userSkillsDir: string,
     private readonly mcpService: McpService | null = null,
   ) {
-    this.exporter = new WorkflowBundleExporter(workflowRepo, skillRepo, mcpRepo)
+    this.exporter = new WorkflowBundleExporter(workflowRepo, skillRepo, mcpRepo, agentRepo)
     this.importer = new WorkflowBundleImporter(
       workflowRepo,
       skillRepo,
       mcpRepo,
+      agentRepo,
       bundleRepo,
       userSkillsDir,
     )

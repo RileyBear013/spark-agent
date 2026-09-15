@@ -149,6 +149,12 @@ const DEFAULT_TOKEN_TTL_MS = 4 * 60 * 60 * 1000
 /** 提前 60s 过期，避免临界请求失败 */
 const TOKEN_EXPIRY_MARGIN_MS = 60 * 1000
 
+/** Nacos 控制台 AI list 端点的分页响应（条目 + 总数；total 探测不到时以已拉取数近似）。 */
+export interface NacosPage {
+  items: Array<Record<string, unknown>>
+  total: number
+}
+
 export class NacosClientError extends Error {
   constructor(
     message: string,
@@ -337,13 +343,18 @@ export class NacosClient {
 
   // ─── AI Skill 原生 API（技能推拉权威路径） ──────────────────────────
 
-  /** 团队技能列表（原生发现数据源） */
-  async listTeamSkills(): Promise<Array<Record<string, unknown>>> {
-    const query = new URLSearchParams({ namespaceId: this.namespace, pageNo: '1', pageSize: '200' })
+  /** 团队技能列表（原生发现数据源；服务端分页） */
+  async listTeamSkills(
+    args: { page?: number; pageSize?: number; search?: string } = {},
+  ): Promise<NacosPage> {
+    const query = new URLSearchParams({
+      namespaceId: this.namespace,
+      pageNo: String(Math.max(1, args.page ?? 1)),
+      pageSize: String(Math.max(1, args.pageSize ?? 200)),
+    })
+    if (args.search != null && args.search.trim() !== '') query.set('search', args.search.trim())
     const res = await this.apiRequest('GET', '/v3/console/ai/skills/list', { query })
-    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
-      (item) => item != null && typeof item === 'object',
-    ) as Array<Record<string, unknown>>
+    return pickPage(res)
   }
 
   /** 技能详情（含 versions/scope）；不存在返回 null */
@@ -447,20 +458,20 @@ export class NacosClient {
   // ─── AI MCP 原生 API（MCP 推拉） ────────────────────────────────────
 
   /**
-   * 团队 MCP 列表。注意：list 必须带 search 参数（缺失会触发服务端版本 join
-   * 异常，整个接口 404——真机复现过的坑）。
+   * 团队 MCP 列表（服务端分页）。注意：list 必须带 search 参数（缺失会触发
+   * 服务端版本 join 异常，整个接口 404——真机复现过的坑），缺省仍传 'blur'。
    */
-  async listTeamMcpServers(search = 'blur'): Promise<Array<Record<string, unknown>>> {
+  async listTeamMcpServers(
+    args: { page?: number; pageSize?: number; search?: string } = {},
+  ): Promise<NacosPage> {
     const query = new URLSearchParams({
       namespaceId: this.namespace,
-      search,
-      pageNo: '1',
-      pageSize: '200',
+      search: args.search != null && args.search.trim() !== '' ? args.search.trim() : 'blur',
+      pageNo: String(Math.max(1, args.page ?? 1)),
+      pageSize: String(Math.max(1, args.pageSize ?? 200)),
     })
     const res = await this.apiRequest('GET', '/v3/console/ai/mcp/list', { query })
-    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
-      (item) => item != null && typeof item === 'object',
-    ) as Array<Record<string, unknown>>
+    return pickPage(res)
   }
 
   /** MCP 详情（含 versions/serverSpecification）；不存在返回 null */
@@ -532,13 +543,18 @@ export class NacosClient {
 
   // ─── AI AgentSpec 原生 API（工作流 / 平台 Agent / 子应用承载） ──────
 
-/** 团队 AgentSpec 列表（控制台原生管理页同一数据源） */
-  async listTeamAgentSpecs(): Promise<Array<Record<string, unknown>>> {
-    const query = new URLSearchParams({ namespaceId: this.namespace, pageNo: '1', pageSize: '200' })
+/** 团队 AgentSpec 列表（控制台原生管理页同一数据源；服务端分页） */
+  async listTeamAgentSpecs(
+    args: { page?: number; pageSize?: number; search?: string } = {},
+  ): Promise<NacosPage> {
+    const query = new URLSearchParams({
+      namespaceId: this.namespace,
+      pageNo: String(Math.max(1, args.page ?? 1)),
+      pageSize: String(Math.max(1, args.pageSize ?? 200)),
+    })
+    if (args.search != null && args.search.trim() !== '') query.set('search', args.search.trim())
     const res = await this.apiRequest('GET', '/v3/console/ai/agentspecs/list', { query })
-    return pickArray(res, ['data.pageItems', 'pageItems', 'data']).filter(
-      (item) => item != null && typeof item === 'object',
-    ) as Array<Record<string, unknown>>
+    return pickPage(res)
   }
 
   /** AgentSpec 详情（含 versions[] 生命周期）；不存在返回 null */
@@ -874,6 +890,16 @@ function pickNumber(source: unknown, paths: string[]): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) return value
   }
   return null
+}
+
+/** 解析分页响应：条目取 pageItems 家族字段，total 多路径探测，兜底已拉取数。 */
+function pickPage(source: unknown): NacosPage {
+  const items = pickArray(source, ['data.pageItems', 'pageItems', 'data']).filter(
+    (item) => item != null && typeof item === 'object',
+  ) as Array<Record<string, unknown>>
+  const total =
+    pickNumber(source, ['data.total', 'data.totalCount', 'total', 'totalCount']) ?? items.length
+  return { items, total: Math.max(total, items.length) }
 }
 
 function pickBoolean(source: unknown, paths: string[]): boolean | null {

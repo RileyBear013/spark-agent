@@ -13,9 +13,15 @@ import type {
   SubAppShareImportCheck,
   SubAppSharePackage,
   SubAppSharePackageBody,
+  SubAppShareV2State,
 } from '@spark/protocol'
 import { SparkError } from '@spark/shared'
-import { SubAppNotFoundError, SubAppRepository, SubAppStateError } from '@spark/storage'
+import {
+  SubAppNotFoundError,
+  SubAppPackageService,
+  SubAppRepository,
+  SubAppStateError,
+} from '@spark/storage'
 import type { SubAppFileStore } from './SubAppFileStore.js'
 
 /**
@@ -49,13 +55,15 @@ export interface SubAppShareServiceOptions {
   backupsDir: string
   /** 当前平台版本（app.getVersion()），用于导入时的降级警告。 */
   platformVersion: string
+  /** V2 受管项目的导出/恢复（项目 revision 文件 + 发布制品 + 连接槽绑定）。 */
+  packages: SubAppPackageService
 }
 
 export interface SubAppShareExportResult {
   body: SubAppSharePackageBody
   /** 完整分享包 JSON 文本（含 integrity），直接写盘即可。 */
   text: string
-  counts: { releases: number; dataEntries: number; files: number }
+  counts: { releases: number; dataEntries: number; files: number; v2Files?: number }
   capabilities: SubAppShareCapabilityReport
   secretWarnings: string[]
 }
@@ -87,6 +95,7 @@ export class SubAppShareService {
   private readonly fileStoreRoot: string
   private readonly backupsDir: string
   private readonly platformVersion: string
+  private readonly packages: SubAppPackageService
 
   constructor(options: SubAppShareServiceOptions) {
     this.repository = options.repository
@@ -94,6 +103,7 @@ export class SubAppShareService {
     this.fileStoreRoot = options.fileStoreRoot
     this.backupsDir = options.backupsDir
     this.platformVersion = options.platformVersion
+    this.packages = options.packages
   }
 
   // ─── 导出侧 ───────────────────────────────────────────────────────────────
@@ -142,9 +152,12 @@ export class SubAppShareService {
       files = await this.collectAppFiles(appId)
     }
 
+    // V2 受管项目：项目文件/发布制品/连接槽绑定一并打包；能力扫描覆盖 V2 源文本。
+    const v2 = await this.packages.exportV2State(appId)
     const sourceInputs = [
       { label: '草稿', source: details.draft.source },
       ...releases.map((release) => ({ label: `v${release.version}`, source: release.source })),
+      ...(v2 != null ? collectV2ScanSources(v2) : []),
     ]
     const capabilities = scanCapabilities(sourceInputs, data)
 
@@ -166,13 +179,21 @@ export class SubAppShareService {
       data,
       files,
       capabilities,
+      ...(v2 != null ? { v2 } : {}),
     }
     const { text } = serializePackage(body)
 
     return {
       body,
       text,
-      counts: { releases: releases.length, dataEntries: data.length, files: files.length },
+      counts: {
+        releases: releases.length,
+        dataEntries: data.length,
+        files: files.length,
+        ...(v2 != null
+          ? { v2Files: v2.draftFiles.length + v2.releases.reduce((t, r) => t + r.files.length, 0) }
+          : {}),
+      },
       capabilities,
       secretWarnings: describeSecretHints(capabilities.secretHints),
     }
@@ -264,6 +285,16 @@ export class SubAppShareService {
       !Array.isArray(parsed.capabilities?.secretHints)
     ) {
       throw new SparkError('VALIDATION_FAILED', '不是有效的分享包：缺少必要的包结构。')
+    }
+    if (
+      parsed.v2 != null &&
+      (!Array.isArray(parsed.v2.draftFiles) ||
+        !Array.isArray(parsed.v2.releases) ||
+        !Array.isArray(parsed.v2.bindings) ||
+        parsed.v2.draftManifest == null ||
+        typeof parsed.v2.draftManifest !== 'object')
+    ) {
+      throw new SparkError('VALIDATION_FAILED', '不是有效的分享包：v2 段结构不完整。')
     }
 
     const { integrityOk, body } = verifyPackageIntegrity(parsed)
@@ -420,6 +451,24 @@ export class SubAppShareService {
     // DB 已提交：清除目录交换留下的旧文件空间（.old-*）。
     await this.removeOldDirs(targetId).catch(() => {})
 
+    // V2 受管项目：恢复草稿项目文件、发布制品与连接槽绑定（appId 按目标补齐）。
+    if (body.v2 != null) {
+      try {
+        await this.packages.importV2State(targetId, body.v2)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!overwriteExisting) {
+          // 新建模式：清掉半成品应用（DB 行 + 文件空间），不留空壳。
+          this.repository.delete(targetId)
+          await this.packages
+            .cleanupDeletedApp(targetId)
+            .catch(() => {})
+          await fs.rm(path.resolve(this.fileStoreRoot, targetId), { recursive: true, force: true })
+        }
+        throw new SparkError('VALIDATION_FAILED', `V2 项目状态恢复失败，导入未完成：${message}`)
+      }
+    }
+
     return {
       appId: imported.id,
       name: imported.name,
@@ -523,6 +572,23 @@ export class SubAppShareService {
 }
 
 // ─── 纯函数：能力扫描 / 完整性 / 检查 ─────────────────────────────────────────
+
+/** V2 项目/制品文本也纳入能力扫描（base64 → utf8 尽力解码，二进制内容跳过）。 */
+function collectV2ScanSources(
+  state: SubAppShareV2State,
+): Array<{ label: string; source: string }> {
+  const sources: Array<{ label: string; source: string }> = []
+  const decode = (label: string, entries: Array<{ path: string; content: string }>): void => {
+    for (const entry of entries) {
+      const text = Buffer.from(entry.content, 'base64').toString('utf8')
+      // 二进制内容 utf8 解码会产生大量 U+FFFD 替换符，视为不可扫描文本。
+      if (!text.includes('�')) sources.push({ label: `${label}/${entry.path}`, source: text })
+    }
+  }
+  decode('V2草稿', state.draftFiles)
+  for (const release of state.releases) decode(`V2v${release.version}`, release.files)
+  return sources
+}
 
 /** 静态扫描源码与 data 值，产出能力依赖清单（只含名称/位置，绝不含密钥内容）。 */
 export function scanCapabilities(
@@ -783,13 +849,21 @@ export function buildImportChecks(
     })
   }
 
+  if (body.v2 != null) {
+    checks.push({
+      level: 'ok',
+      code: 'V2_BUNDLE',
+      message: `包含 V2 受管项目：草稿 ${body.v2.draftFiles.length} 个项目文件、${body.v2.releases.length} 个发布制品、${body.v2.bindings.length} 条连接槽绑定，导入时一并恢复。`,
+    })
+  }
+
   if (body.draft.source.trim().length === 0 && body.releases.length === 0) {
     checks.push({
       level: 'error',
       code: 'DRAFT_EMPTY',
       message: '分享包内没有草稿源码也没有发布版本，是空包，无法导入。',
     })
-  } else if (body.draft.source.trim().length === 0) {
+  } else if (body.draft.source.trim().length === 0 && body.v2 == null) {
     checks.push({
       level: 'warning',
       code: 'DRAFT_EMPTY',

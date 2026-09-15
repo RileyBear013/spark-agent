@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from 'os'
 import {
   SparkDatabase,
+  AgentRepository,
   McpServerRepository,
   SessionRepository,
   SessionWorkflowBindingRepository,
@@ -25,6 +26,7 @@ let db: SparkDatabase
 let workflowRepo: WorkflowRepository
 let skillRepo: SkillRepository
 let mcpRepo: McpServerRepository
+let agentRepo: AgentRepository
 let bundleRepo: WorkflowBundleRepository
 let service: WorkflowBundleService
 let userSkillsDir: string
@@ -42,15 +44,18 @@ beforeAll(() => {
   writeFileSync(join(userSkillsDir, 'web-search', 'guide.md'), '# Guide')
 
   db = new SparkDatabase(join(testDir, 'test.db'))
-  db.runMigrations(join(process.cwd(), '..', 'storage', 'migrations'))
+  // 缺省 migrations 目录由 @spark/storage 按模块自身位置解析，cwd 无关
+  db.runMigrations()
   workflowRepo = new WorkflowRepository(db)
   skillRepo = new SkillRepository(db)
   mcpRepo = new McpServerRepository(db)
+  agentRepo = new AgentRepository(db)
   bundleRepo = new WorkflowBundleRepository(db)
   service = new WorkflowBundleService(
     workflowRepo,
     skillRepo,
     mcpRepo,
+    agentRepo,
     bundleRepo,
     userSkillsDir,
     null,
@@ -353,5 +358,72 @@ describe('WorkflowBundleService end-to-end', () => {
     // 导出方的原始环境不受影响
     expect(workflowRepo.get('wf-1')).not.toBeNull()
     expect(mcpRepo.get('mcp-1')?.config_json).toContain('sk-secret-123')
+  })
+
+  it('v2 随包 Agent:导出物化、导入确定性创建、引用改写、卸载零残留', async () => {
+    // 源环境:Agent 引用技能+MCP,工作流节点引用该 Agent
+    agentRepo.create({
+      id: 'agent-1',
+      name: '舆情助手',
+      description: '随包测试 Agent',
+      enabled: true,
+      agentAdapter: 'claude-sdk',
+      permissionMode: 'default',
+      reasoningEffort: 'medium',
+      prompt: '你是舆情分析助手',
+      ruleIds: [],
+      skillIds: ['skill:skillhub:web-search'],
+      disabledSkillIds: [],
+      mcpServerIds: ['mcp-1'],
+      hookConfig: {},
+      metadata: {},
+    })
+    workflowRepo.create({
+      id: 'wf-agent-flow',
+      name: 'Agent 流程',
+      description: 'demo',
+      graph: {
+        nodes: [
+          { id: 'n1', kind: 'agent', title: '助手', x: 0, y: 0, config: { agentId: 'agent-1' } },
+        ],
+        edges: [],
+      },
+    })
+
+    const { manifest } = await service.exportBundle({
+      workflowIds: ['wf-agent-flow'],
+      outputPath: join(testDir, 'out', 'agent-bundle.sparkflow'),
+      name: 'Agent 包',
+    })
+    expect(manifest.agents).toHaveLength(1)
+    expect(manifest.agents[0]?.originAgentId).toBe('agent-1')
+    expect(manifest.agents[0]?.name).toBe('舆情助手')
+
+    const preview = await service.previewImport(join(testDir, 'out', 'agent-bundle.sparkflow'))
+    expect(preview.agents).toHaveLength(1)
+    expect(preview.agents[0]?.name).toBe('舆情助手')
+
+    const result = await service.importBundle(join(testDir, 'out', 'agent-bundle.sparkflow'), {})
+    expect(result.createdAgentIds).toHaveLength(1)
+    const createdId = result.createdAgentIds[0]!
+    expect(createdId).toMatch(new RegExp(`^wfb-agent-${result.bundleId}-`))
+
+    const created = agentRepo.get(createdId)!
+    expect(created.name).toBe('舆情助手')
+    expect(created.prompt).toBe('你是舆情分析助手')
+    // Agent 自身技能/MCP 引用按包内映射改写(平台管理技能是仓库层强制附加的 builtin,不在断言内)
+    expect(created.skillIds).toContain(result.installedSkillIds[0]!)
+    expect(created.mcpServerIds).toEqual(result.importedMcpServerIds)
+
+    // 工作流节点 agentId 已改写为随包新 Agent
+    const importedWf = workflowRepo.get(result.workflowIds[0]!)!
+    const nodeConfig = (importedWf.graph as { nodes: Array<{ config: Record<string, unknown> }> })
+      .nodes[0]!.config
+    expect(nodeConfig.agentId).toBe(createdId)
+
+    // 卸载零残留:随包 Agent 一并清除,源 Agent 不受影响
+    expect(await service.uninstallBundle(result.bundleId)).toBe(true)
+    expect(agentRepo.get(createdId)).toBeNull()
+    expect(agentRepo.get('agent-1')).not.toBeNull()
   })
 })

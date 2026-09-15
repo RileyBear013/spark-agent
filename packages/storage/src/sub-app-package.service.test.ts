@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -159,5 +159,52 @@ describe('SubAppPackageService', () => {
         mode: 'published',
       }),
     ).rejects.toThrow('完整性校验失败')
+  })
+
+  it('replaces the V2 draft project in place while preserving releases', async () => {
+    const created = await service.scaffold({ name: '团队更新' })
+    await service.publish(created.appId, created.draftRevision)
+    const platform = new SubAppPlatformRepository(db!)
+    const before = platform.getPublishedPackage(created.appId)
+    const state = await service.exportV2State(created.appId)
+    expect(state).not.toBeNull()
+    // 模拟团队更新：入口文件内容整体替换（base64 传输，与分享包同构）
+    const files = state!.draftFiles.map((f) =>
+      f.path === 'frontend/index.html'
+        ? {
+            ...f,
+            content: Buffer.from('<html><body>team-v2</body></html>', 'utf8').toString('base64'),
+          }
+        : f,
+    )
+    const replaced = await service.replaceDraftProject(created.appId, files, created.draftRevision)
+    expect(replaced.projectRevision).toBe(state!.projectRevision + 1)
+    expect(replaced.draftRevision).toBe(created.draftRevision + 1)
+    // 发布版本与制品原样保留（更新只覆盖内容字段）
+    expect(platform.getPublishedPackage(created.appId)?.digest).toBe(before?.digest)
+    expect((await service.readFile(created.appId, 'frontend/index.html')).content).toContain(
+      'team-v2',
+    )
+    // 行元数据以包内 spark-app.json 校验结果同步
+    expect(new SubAppRepository(db!).get(created.appId)?.name).toBe('团队更新')
+  })
+
+  it('rejects replaceDraftProject on stale revision and on V1 apps without orphan revisions', async () => {
+    const created = await service.scaffold({ name: 'CAS' })
+    const state = await service.exportV2State(created.appId)
+    expect(state).not.toBeNull()
+    const projectsDir = join(root, 'platform', 'projects', created.appId)
+    const revisionsBefore = readdirSync(projectsDir).length
+    await expect(
+      service.replaceDraftProject(created.appId, state!.draftFiles, created.draftRevision + 99),
+    ).rejects.toThrow()
+    // CAS 失败不遗留孤儿 revision 目录
+    expect(readdirSync(projectsDir).length).toBe(revisionsBefore)
+
+    const apps = new SubAppRepository(db!)
+    const legacy = apps.create({ name: 'Legacy V1', source: '<main>ok</main>' })
+    await expect(
+      service.replaceDraftProject(legacy.id, state!.draftFiles, legacy.draftRevision),
+    ).rejects.toThrow('V2')
   })
 })

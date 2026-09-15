@@ -844,7 +844,7 @@ export function SubAppsView(): React.ReactElement {
         assetType="app"
         localId={teamPublishFor?.id ?? null}
         localName={teamPublishFor?.name ?? ''}
-        hint={teamPublishFor?.format === 'v2' ? '注意：V2 多文件应用暂不支持发布到团队。' : undefined}
+        hint={teamPublishFor?.format === 'v2' ? '注意：V2 应用发布到团队以「新草稿」安装，连接槽绑定与发布版本不随包迁移。' : undefined}
         onClose={() => setTeamPublishFor(null)}
         onPublished={() => {
           notifySubAppDirectoryChanged()

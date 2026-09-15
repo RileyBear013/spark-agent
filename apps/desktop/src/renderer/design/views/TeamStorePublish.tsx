@@ -3,8 +3,8 @@
  *
  * 商店侧统一的上传入口：从本页把本地工作流 / 应用 / 助手发布到团队 Nacos，
  * 不必再绕道各管理页的卡片菜单。单列本地资产（workflow:list / agent:list /
- * sub-app:list），按「同名同类」标注已在团队的内容；V2 多文件应用与已归档
- * 应用禁发并说明原因。发布动作复用 team-registry:publish-asset 通道，
+ * sub-app:list），按「同名同类」标注已在团队的内容；已归档应用禁发并说明
+ * 原因。发布动作复用 team-registry:publish-asset 通道，
  * 成功后行内展示新版本号与非阻断 warning（捆绑说明等），并联动商店刷新。
  *
  * 纯 UI 层，不新增 IPC；消费语义与各管理页 TeamAssetPublishModal 一致。
@@ -42,7 +42,7 @@ interface LocalAssetRow {
   name: string
   description: string
   updatedAt: string
-  /** 非空 = 该行不可发布，值为原因（V2 多文件 / 已归档） */
+  /** 非空 = 该行不可发布，值为原因（已归档） */
   disabledReason: string
 }
 
@@ -132,11 +132,7 @@ export function TeamStorePublish({
           description: app.description ?? '',
           updatedAt: app.updatedAt ?? '',
           disabledReason:
-            app.format === 'v2'
-              ? 'V2 多文件应用暂不支持发布到团队'
-              : app.publicationStatus === 'archived'
-                ? '已归档应用不支持发布'
-                : '',
+            app.publicationStatus === 'archived' ? '已归档应用不支持发布' : '',
         }))
       }
       setRows(next)

@@ -8,18 +8,23 @@ import { randomUUID } from 'crypto'
 import {
   BUNDLE_SKILL_ID_PREFIX,
   BUNDLE_SKILLS_DIR_NAME,
+  BUNDLE_AGENT_ID_PREFIX,
   WorkflowBundleChecksumsSchema,
   WorkflowBundleManifestSchema,
   WorkflowBundleWorkflowFileSchema,
+  WorkflowBundleAgentFileSchema,
   type WorkflowBundleChecksums,
   type WorkflowBundleImportOptions,
   type WorkflowBundleImportPreview,
   type WorkflowBundleImportResult,
   type WorkflowBundleManifest,
+  type WorkflowBundleAgentEntry,
+  type WorkflowBundleAgentFile,
   type WorkflowBundleWorkflowFile,
 } from '@spark/protocol'
 import type { WorkflowGraph } from '@spark/protocol'
 import type {
+  AgentRepository,
   McpServerRepository,
   SkillRepository,
   WorkflowBundleRepository,
@@ -38,6 +43,7 @@ import {
 const DEFAULT_IMPORT_OPTIONS: WorkflowBundleImportOptions = {
   installSkills: true,
   importMcpServers: true,
+  importAgents: true,
   reinstall: false,
   scope: undefined,
 }
@@ -66,10 +72,16 @@ interface PreparedWorkflow {
   file: WorkflowBundleWorkflowFile
 }
 
+interface PreparedAgent {
+  entry: WorkflowBundleAgentEntry
+  file: WorkflowBundleAgentFile
+}
+
 interface PreparedBundleContents {
   workflows: PreparedWorkflow[]
   skills: PreparedSkill[]
   mcpServers: PreparedMcpServer[]
+  agents: PreparedAgent[]
 }
 
 export class WorkflowBundleImporter {
@@ -77,6 +89,7 @@ export class WorkflowBundleImporter {
     private readonly workflowRepo: WorkflowRepository,
     private readonly skillRepo: SkillRepository,
     private readonly mcpRepo: McpServerRepository,
+    private readonly agentRepo: AgentRepository,
     private readonly bundleRepo: WorkflowBundleRepository,
     private readonly userSkillsDir: string,
   ) {}
@@ -149,6 +162,9 @@ export class WorkflowBundleImporter {
     const bundleId = newBundleId()
     const existingSkillNames = new Set(this.skillRepo.list().map((row) => row.name))
     const existingMcpNames = new Set(this.mcpRepo.listAll().map((row) => row.name))
+    const existingAgentNames = new Set(
+      this.agentRepo.list({ includeDisabled: true }).map((row) => row.name),
+    )
     const integrityErrors = [...bundle.integrityErrors, ...contentErrors].slice(0, 100)
     return {
       bundleId,
@@ -165,6 +181,11 @@ export class WorkflowBundleImporter {
         transport: entry.transport,
         requiredSecrets: entry.requiredSecrets,
         nameConflict: existingMcpNames.has(entry.name),
+      })),
+      agents: bundle.manifest.agents.map((entry) => ({
+        file: entry.file,
+        name: entry.name,
+        nameConflict: existingAgentNames.has(entry.name),
       })),
       unresolved: bundle.manifest.unresolved,
       integrityOk: bundle.integrityOk && integrityErrors.length === 0,
@@ -186,8 +207,10 @@ export class WorkflowBundleImporter {
     const bundleId = newBundleId()
     const skillIdMap = new Map<string, string>()
     const mcpServerIdMap = new Map<string, string>()
+    const agentIdMap = new Map<string, string>()
     const installedSkillIds: string[] = []
     const importedMcpServerIds: string[] = []
+    const createdAgentIds: string[] = []
     const workflowIds: string[] = []
 
     try {
@@ -235,11 +258,39 @@ export class WorkflowBundleImporter {
         }
       }
 
-      // —— 工作流:图引用改写(bundle 技能/MCP 新 ID)后落库 ——
+      // —— Agent:按确定性 ID 创建随包子 Agent,登记 originAgentId→新 ID 映射 ——
+      if (opts.importAgents) {
+        for (const { entry, file: agentFile } of prepared.agents) {
+          const originKey = entry.originAgentId ?? agentFile.name
+          const created = this.agentRepo.create({
+            id: bundleAgentId(bundleId, originKey),
+            name: agentFile.name || entry.name,
+            description: agentFile.description,
+            enabled: true,
+            agentAdapter: agentFile.agentAdapter,
+            permissionMode: agentFile.permissionMode,
+            reasoningEffort: agentFile.reasoningEffort,
+            prompt: agentFile.prompt,
+            modelId: agentFile.modelId ?? null,
+            providerProfileId: agentFile.providerProfileId ?? null,
+            ruleIds: [],
+            skillIds: agentFile.skillIds.map((id) => skillIdMap.get(id) ?? id),
+            disabledSkillIds: agentFile.disabledSkillIds.map((id) => skillIdMap.get(id) ?? id),
+            mcpServerIds: agentFile.mcpServerIds.map((id) => mcpServerIdMap.get(id) ?? id),
+            hookConfig: agentFile.hookConfig,
+            metadata: agentFile.metadata,
+          })
+          createdAgentIds.push(created.id)
+          if (entry.originAgentId != null) agentIdMap.set(entry.originAgentId, created.id)
+        }
+      }
+
+      // —— 工作流:图引用改写(bundle 技能/MCP/Agent 新 ID)后落库 ——
       for (const { entry, file: workflowFile } of prepared.workflows) {
         const graph = rewriteGraphReferences(workflowFile.graph as unknown as WorkflowGraph, {
           skillIdMap,
           mcpServerIdMap,
+          agentIdMap,
         } satisfies RewriteMapping)
         const created = this.workflowRepo.create({
           name: workflowFile.name || entry.name,
@@ -270,12 +321,14 @@ export class WorkflowBundleImporter {
         workflowIds,
         installedSkillIds,
         importedMcpServerIds,
+        createdAgentIds,
         unresolved: bundle.manifest.unresolved,
       }
     } catch (err) {
       // 导入失败回滚：对象尚未对外可见，internalRollback 仅断言零绑定零运行。
       for (const id of workflowIds) this.workflowRepo.delete(id, { policy: 'internalRollback' })
       for (const id of importedMcpServerIds) this.mcpRepo.deleteById(id)
+      for (const id of createdAgentIds) this.agentRepo.delete(id)
       for (const id of installedSkillIds) this.skillRepo.deleteById(id)
       await rm(join(this.userSkillsDir, BUNDLE_SKILLS_DIR_NAME, bundleId), {
         recursive: true,
@@ -303,6 +356,10 @@ export class WorkflowBundleImporter {
     const bundledServers = this.mcpRepo.findByBundleId(bundleId)
     const prefix = `${BUNDLE_SKILL_ID_PREFIX}${bundleId}:`
     const bundledSkills = this.skillRepo.list().filter((skill) => skill.id.startsWith(prefix))
+    const agentPrefix = `${BUNDLE_AGENT_ID_PREFIX}${bundleId}-`
+    const bundledAgents = this.agentRepo
+      .list({ includeDisabled: true })
+      .filter((agent) => agent.id.startsWith(agentPrefix))
 
     this.bundleRepo.transaction(() => {
       for (const workflow of bundledWorkflows) {
@@ -314,6 +371,9 @@ export class WorkflowBundleImporter {
       }
       for (const skill of bundledSkills) {
         this.skillRepo.deleteById(skill.id)
+      }
+      for (const agent of bundledAgents) {
+        this.agentRepo.delete(agent.id)
       }
       this.bundleRepo.delete(bundleId)
     })
@@ -356,6 +416,10 @@ export class WorkflowBundleImporter {
     assertUnique(
       manifest.mcpServers.map((entry) => entry.refId),
       'MCP refId',
+    )
+    assertUnique(
+      manifest.agents.map((entry) => entry.file),
+      'Agent 配置文件路径',
     )
     assertUnique(
       manifest.mcpServers.map((entry) => entry.file),
@@ -414,8 +478,20 @@ export class WorkflowBundleImporter {
       if (!isJsonObject(configValue)) throw new Error(`MCP 配置必须是 JSON 对象: ${entry.file}`)
       return { entry, configJson: JSON.stringify(configValue) }
     })
+    const agents = manifest.agents.map((entry) => {
+      requirePathPrefix(entry.file, 'agents/', `Agent 配置文件 ${entry.file}`)
+      const parsed = WorkflowBundleAgentFileSchema.safeParse(
+        parseJson(requireFile(files, entry.file), entry.file),
+      )
+      if (!parsed.success) {
+        throw new Error(
+          `Agent 配置文件结构无效(${entry.file}): ${parsed.error.issues[0]?.message ?? '未知错误'}`,
+        )
+      }
+      return { entry, file: parsed.data }
+    })
 
-    return { workflows, skills, mcpServers }
+    return { workflows, skills, mcpServers, agents }
   }
 }
 
@@ -425,6 +501,12 @@ function newBundleId(): string {
 
 function bundleSkillId(bundleId: string, slug: string): string {
   return `${BUNDLE_SKILL_ID_PREFIX}${bundleId}:${slug}`
+}
+
+/** bundle 子 Agent 确定性 ID:同包内唯一,卸载时按前缀零残留清理。 */
+function bundleAgentId(bundleId: string, originKey: string): string {
+  const hash = sha256Hex(new TextEncoder().encode(originKey)).slice(0, 8)
+  return `${BUNDLE_AGENT_ID_PREFIX}${bundleId}-${hash}`
 }
 
 /** 从 slug 还原可读名(导入落库用;slug 是导出时从原 name 安全化来的)。 */

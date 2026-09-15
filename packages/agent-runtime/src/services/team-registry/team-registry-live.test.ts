@@ -109,7 +109,7 @@ describe.skipIf(!LIVE)('team-registry 真机探针（TEAM_REGISTRY_LIVE=1）', (
       expect(localConfig).not.toBeNull()
       expect(JSON.parse(localConfig!)).toMatchObject({ transport: 'stdio', command: 'npx' })
 
-      const list = await client.listTeamMcpServers()
+      const list = (await client.listTeamMcpServers()).items
       expect(list.some((s) => (s.mcpName ?? s.name) === MCP_SLUG)).toBe(true)
     } finally {
       await cleanup()

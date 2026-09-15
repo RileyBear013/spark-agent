@@ -7,7 +7,7 @@ import type { WorkflowBundleImportPreview, WorkflowGraph } from '@spark/protocol
 
 /**
  * 工作流导入入口:下拉二选一 ——
- *  1. 工作流包 .sparkflow(含技能/MCP,先预览再落地到隔离空间)
+ *  1. 工作流包 .sparkflow(含技能/MCP/子 Agent,先预览再落地到隔离空间)
  *  2. 纯流程图 JSON(兼容旧版,行为与旧导入一致)
  */
 
@@ -108,7 +108,7 @@ export function WorkflowBundleImportButton({ onImported }: { onImported: () => v
       const { result } = await importBundle({ filePath: previewPath })
       toast.success(
         `已导入工作流包:${result.workflowIds.length} 个工作流、${result.installedSkillIds.length} 个技能、` +
-          `${result.importedMcpServerIds.length} 个 MCP(未激活)`,
+          `${result.importedMcpServerIds.length} 个 MCP(未激活)、${result.createdAgentIds.length} 个子 Agent`,
       )
       closePreview()
       onImported()
@@ -200,6 +200,15 @@ export function WorkflowBundleImportButton({ onImported }: { onImported: () => v
                   </span>
                 ))}
               </li>
+              <li>
+                随包子 Agent <b>{preview.agents.length}</b> 个(导入后自动创建,随包可用)
+                {preview.agents.map((a) => (
+                  <span key={a.file} className="wf-bundle-preview-sub">
+                    {a.name}
+                    {a.nameConflict && '(注意:已有同名 Agent)'}
+                  </span>
+                ))}
+              </li>
               {preview.unresolved.length > 0 && (
                 <li>
                   <Alert
@@ -210,7 +219,7 @@ export function WorkflowBundleImportButton({ onImported }: { onImported: () => v
                       .slice(0, 8)
                       .map(
                         (u) =>
-                          `${u.type === 'agent' ? 'Agent' : u.type === 'rule' ? '规则' : u.type === 'tool' ? '工具' : u.type === 'skill' ? '技能' : u.type === 'mcp' ? 'MCP' : '依赖'}:${u.name}${u.hint ? `(${u.hint})` : ''}`,
+                          `${u.type === 'agent' ? 'Agent' : u.type === 'rule' ? '规则' : u.type === 'tool' ? '工具' : u.type === 'skill' ? '技能' : u.type === 'mcp' ? 'MCP' : u.type === 'provider' ? '模型绑定' : '依赖'}:${u.name}${u.hint ? `(${u.hint})` : ''}`,
                       )
                       .join(';')}
                   />
