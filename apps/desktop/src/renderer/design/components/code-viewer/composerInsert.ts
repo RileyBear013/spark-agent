@@ -8,6 +8,9 @@
  *
  * 走 window CustomEvent 解耦：CodeViewerEditor 无需知道当前 sessionId / composer 实例，
  * 由唯一活跃的 ComposerV2 监听并消化。targetSessionId 传 null 表示不限制会话（默认）。
+ *
+ * 引用类产物共三种：CodeReference（代码位置）、CommitReference（Git 提交）、附件（真实文件路径）。
+ * 三者的 chip 渲染、按草稿桶隔离、发送时序列化规则各自独立，互不串扰。
  */
 import { useEffect, type SetStateAction } from 'react'
 import type { MessageAttachment, ComposerAttachment } from '../../views/chat/ChatComposerTypes'
@@ -33,6 +36,21 @@ export interface CodeReference {
   endLine: number
 }
 
+/**
+ * Git 提交引用：只存「哪条提交」，不存 diff / 提交内容。
+ * 输入框里渲染为双行 chip（上行短 hash，下行提交标题），
+ * 发送时转为 `[Git 提交] 短hash 标题` 文本行，由模型按需 `git show` 回查改动——
+ * 避免把整段 diff 灌进会话正文。
+ */
+export interface CommitReference {
+  /** 提交完整 hash（去重键） */
+  hash: string
+  /** 短 hash（chip 主展示） */
+  shortHash: string
+  /** 提交标题（首行；正文不进入会话） */
+  subject: string
+}
+
 export interface ComposerInsertPayload {
   /** 追加到草稿末尾的文本（已有内容时以两个换行分隔） */
   text?: string
@@ -40,6 +58,8 @@ export interface ComposerInsertPayload {
   attachments?: MessageAttachment[]
   /** 代码位置引用：去重累加进输入框（按 path + 行号区间去重） */
   codeReferences?: CodeReference[]
+  /** Git 提交引用：去重累加进输入框（按提交 hash 去重） */
+  commitReferences?: CommitReference[]
 }
 
 interface ComposerInsertRequest extends ComposerInsertPayload {
@@ -72,6 +92,14 @@ export function insertToComposer(
   })
 }
 
+/**
+ * 把 CommitReference 格式化为发送文本行：`[Git 提交] 短hash 标题`。
+ * 前缀与浏览器元素引用（`[浏览器元素引用]`）同构，便于模型识别这是可回查的定位信息。
+ */
+export function formatCommitReferenceLine(ref: CommitReference): string {
+  return `[Git 提交] ${ref.shortHash} ${ref.subject}`
+}
+
 /** 把 CodeReference 格式化为「路径:行号」文本（单行 :N，多行 :S-E）。 */
 export function formatCodeReferenceLine(ref: CodeReference): string {
   const range =
@@ -90,9 +118,18 @@ export function useInsertToComposer(input: {
   appendAttachments(attachments: ComposerAttachment[]): number
   /** 代码位置引用去重累加（按 path + 行号区间去重） */
   appendCodeReferences(refs: CodeReference[]): number
+  /** Git 提交引用去重累加（按提交 hash 去重） */
+  appendCommitReferences(refs: CommitReference[]): number
   focus(): void
 }): void {
-  const { sessionId, setValue, appendAttachments, appendCodeReferences, focus } = input
+  const {
+    sessionId,
+    setValue,
+    appendAttachments,
+    appendCodeReferences,
+    appendCommitReferences,
+    focus,
+  } = input
   useEffect(() => {
     const handler = (event: Event): void => {
       const detail = (event as CustomEvent<ComposerInsertRequest>).detail
@@ -123,10 +160,14 @@ export function useInsertToComposer(input: {
         appendCodeReferences(detail.codeReferences)
       }
 
+      if (detail.commitReferences != null && detail.commitReferences.length > 0) {
+        appendCommitReferences(detail.commitReferences)
+      }
+
       detail.resolve(true)
       focus()
     }
     window.addEventListener(INSERT_EVENT, handler)
     return () => window.removeEventListener(INSERT_EVENT, handler)
-  }, [sessionId, setValue, appendAttachments, appendCodeReferences, focus])
+  }, [sessionId, setValue, appendAttachments, appendCodeReferences, appendCommitReferences, focus])
 }

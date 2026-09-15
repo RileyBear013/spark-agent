@@ -5,6 +5,9 @@
  * 行悬浮 250ms 弹出 GitCommitDetailPopover 展示提交详情（短 hash / refs / 完整提交
  * 信息 / 作者邮箱 / 绝对时间）；指针移入浮层可保持（复制 hash 等），离开行或浮层后关闭；
  * 列表滚动、提交数据刷新时浮层自动收起。
+ *
+ * 行右键弹 GitCommitContextMenu（复制提交 ID / 复制提交信息 / 添加到会话）；右键时先收起
+ * 悬浮详情，避免两个浮层同时挂在同一行上。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -12,6 +15,8 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import type { WorkspaceGitCommitEntry } from '@spark/protocol'
 import { Icons } from '../../../Icons'
 import { GitCommitDetailPopover } from './GitCommitDetailPopover'
+import { GitCommitContextMenu } from './GitCommitContextMenu'
+import { useGitCommitContextMenu } from './useGitCommitContextMenu'
 import { GitCommitFiles } from './GitCommitFiles'
 import { formatGitRelativeTime } from './gitPanelViewUtils'
 
@@ -53,6 +58,7 @@ export function GitCommitHistory({
   const unpushedCount = commits.filter((c) => c.unpushed).length
   const [hovered, setHovered] = useState<HoveredCommit | null>(null)
   const [expandedCommitHash, setExpandedCommitHash] = useState<string | null>(null)
+  const { menuTarget, openCommitMenu, closeCommitMenu } = useGitCommitContextMenu()
   const openTimerRef = useRef<number | null>(null)
   const closeTimerRef = useRef<number | null>(null)
 
@@ -96,6 +102,14 @@ export function GitCommitHistory({
   useEffect(() => {
     closePopover()
   }, [commits, closePopover])
+
+  const handleCommitContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>, commit: WorkspaceGitCommitEntry): void => {
+      closePopover()
+      openCommitMenu(event, commit)
+    },
+    [closePopover, openCommitMenu],
+  )
 
   const handleCommitClick = useCallback(
     (commit: WorkspaceGitCommitEntry): void => {
@@ -182,6 +196,7 @@ export function GitCommitHistory({
                 className={`gp-commit-row${commit.unpushed ? ' unpushed' : ''}`}
                 onMouseEnter={(e) => handleRowEnter(e, commit)}
                 onMouseLeave={handleRowLeave}
+                onContextMenu={(e) => handleCommitContextMenu(e, commit)}
                 onClick={() => handleCommitClick(commit)}
                 aria-expanded={expandedCommitHash === commit.hash}
                 aria-controls={`gp-commit-files-${commit.hash}`}
@@ -212,6 +227,9 @@ export function GitCommitHistory({
               )}
             </div>
           ))}
+          {menuTarget != null && (
+            <GitCommitContextMenu target={menuTarget} onClose={closeCommitMenu} />
+          )}
           {hovered != null && (
             <GitCommitDetailPopover
               commit={hovered.commit}

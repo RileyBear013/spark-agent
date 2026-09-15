@@ -1,14 +1,18 @@
 /**
  * GitCommitFiles —— 一条提交展开后的文件清单，以及单文件的提交历史。
  *
- * 文件历史也按需加载：点击文件后才查询，点击历史提交可在代码查看器中打开该提交的 diff。
+ * 文件历史也按需加载：点击文件后才查询，点击历史提交可在代码查看器中打开该提交的 diff；
+ * 历史提交行右键同样提供 GitCommitContextMenu（复制提交 ID / 复制提交信息 / 添加到会话）。
  */
 
 import { useState } from 'react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
 import type { WorkspaceGitCommitFile } from '@spark/protocol'
 import { Icons } from '../../../Icons'
 import { VscodeFileIcon } from '../VscodeFileIcon'
 import { formatGitRelativeTime, buildGitPanelFileLabels } from './gitPanelViewUtils'
+import { GitCommitContextMenu } from './GitCommitContextMenu'
+import { useGitCommitContextMenu } from './useGitCommitContextMenu'
 import { useGitCommitFiles } from './useGitCommitFiles'
 import { useGitFileHistory } from './useGitFileHistory'
 
@@ -60,6 +64,8 @@ function GitCommitFileRow({
 }: GitCommitFileRowProps) {
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const history = useGitFileHistory(workspaceId, historyExpanded ? file.path : null)
+  // 历史提交行的右键菜单（每行都可复制提交 ID / 信息或加入会话）
+  const { menuTarget, openCommitMenu, closeCommitMenu } = useGitCommitContextMenu()
   const statusClass = getFileStatusClass(file.status)
   const changeType = getHistoricalChangeType(file.status)
 
@@ -111,6 +117,9 @@ function GitCommitFileRow({
                   onClick={() =>
                     onOpenHistoricalFile?.(historyCommit.path, historyCommit.hash, changeType)
                   }
+                  onContextMenu={(event: ReactMouseEvent<HTMLButtonElement>) =>
+                    openCommitMenu(event, historyCommit)
+                  }
                   title="在代码查看器中打开此提交的 diff"
                 >
                   <span className="gp-commit-history-hash">{historyCommit.shortHash}</span>
@@ -121,6 +130,9 @@ function GitCommitFileRow({
                   {onOpenHistoricalFile != null && <Icons.Code size={12} />}
                 </button>
               ))}
+              {menuTarget != null && (
+                <GitCommitContextMenu target={menuTarget} onClose={closeCommitMenu} />
+              )}
             </div>
           )}
         </div>

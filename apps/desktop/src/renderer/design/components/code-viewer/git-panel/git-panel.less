@@ -946,3 +946,9 @@
   color: var(--primary, #6366f1);
   font-weight: 600;
 }
+
+/* 提交行右键菜单：复用全局 .action-menu / .action-menu-item 外观，
+   仅收敛条目高度（提交行较多、菜单项少，紧凑一些更贴合面板节奏）。 */
+.gp-commit-menu .action-menu-item {
+  padding: 7px 9px;
+}

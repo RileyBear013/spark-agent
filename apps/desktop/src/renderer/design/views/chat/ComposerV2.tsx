@@ -171,8 +171,17 @@ import { useSessionReferenceAddControl } from './session-reference-control'
 import {
   useInsertToComposer,
   formatCodeReferenceLine,
+  formatCommitReferenceLine,
   type CodeReference,
+  type CommitReference,
 } from '../../components/code-viewer/composerInsert'
+import {
+  commitRefKey,
+  mergeCommitReferences,
+  useComposerCommitReferences,
+} from './composer-commit-references'
+import { ComposerCommitReferenceStrip } from './ComposerCommitReferenceStrip'
+import { appendComposerReferenceBlock, EMPTY_TEXT_FALLBACK } from './composer-reference-blocks'
 import { QuickReplySuggestions } from './QuickReplySuggestions'
 import { CODEX_PERMISSION_MODE_OPTIONS as SHARED_CODEX_PERMISSION_MODE_OPTIONS } from '../../utils/permission-options'
 import { SPARK_PERMISSION_MODE_OPTIONS as SHARED_SPARK_PERMISSION_MODE_OPTIONS } from '../../utils/permission-options'
@@ -1202,6 +1211,28 @@ export function ComposerV2({
     },
     [setCodeReferences],
   )
+  // Git 提交引用（Git 面板提交行右键「添加到会话」产生）：与前两类引用同构——纯渲染层
+  // state、按草稿桶隔离，发送时序列化为 `[Git 提交] 短hash 标题` 文本行。
+  const { commitReferences, setCommitReferences, clearCommitReferenceBuckets } =
+    useComposerCommitReferences(draftBucketKey)
+  const appendCommitReferences = useCallback(
+    (incoming: CommitReference[]): number => {
+      let added = 0
+      setCommitReferences((current) => {
+        const merged = mergeCommitReferences(current, incoming)
+        added = merged.added
+        return merged.next
+      })
+      return added
+    },
+    [setCommitReferences],
+  )
+  const handleRemoveCommitReference = useCallback(
+    (key: string) => {
+      setCommitReferences((current) => current.filter((ref) => commitRefKey(ref) !== key))
+    },
+    [setCommitReferences],
+  )
   const pendingQuickReplies = useMemo(() => resolvePendingQuickReplies(messages), [messages])
   const [dismissedQuickReplyKey, setDismissedQuickReplyKey] = useState<string | null>(null)
   useEffect(() => setDismissedQuickReplyKey(null), [session?.id])
@@ -1232,6 +1263,7 @@ export function ComposerV2({
     (value.trim().length > 0 ||
       attachments.length > 0 ||
       codeReferences.length > 0 ||
+      commitReferences.length > 0 ||
       browserReferences.length > 0 ||
       sessionReferences.length > 0) &&
     selectedProvider != null &&
@@ -1319,13 +1351,16 @@ export function ComposerV2({
     const liveIds = new Set(sessions.map((item) => item.id))
     setDrafts((current) => {
       const { kept, removed } = gcComposerDraftBuckets(liveIds)
-      if (removed.length > 0) clearCodeReferenceBuckets(removed)
+      if (removed.length > 0) {
+        clearCodeReferenceBuckets(removed)
+        clearCommitReferenceBuckets(removed)
+      }
       if (Object.keys(kept).length === Object.keys(current).length) return current
       return kept
     })
     // sessionIdsKey 而非 sessions：后者每次 refresh 都是新引用，会让 GC 空转
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clearCodeReferenceBuckets, sessionIdsKey])
+  }, [clearCodeReferenceBuckets, clearCommitReferenceBuckets, sessionIdsKey])
 
   const setValue = useCallback(
     (next: React.SetStateAction<string>) => {
@@ -1532,9 +1567,10 @@ export function ComposerV2({
       const uniqueKeys = clearComposerDraftBuckets(keys, draftWriterRef.current)
       if (uniqueKeys.length === 0) return
       clearCodeReferenceBuckets(uniqueKeys)
+      clearCommitReferenceBuckets(uniqueKeys)
       setDrafts((current) => clearComposerDraftMapBuckets(current, uniqueKeys))
     },
-    [clearCodeReferenceBuckets],
+    [clearCodeReferenceBuckets, clearCommitReferenceBuckets],
   )
 
   const persistRuntimePatch = useCallback(
@@ -2252,6 +2288,7 @@ export function ComposerV2({
     setValue,
     appendAttachments,
     appendCodeReferences,
+    appendCommitReferences,
     focus: focusComposer,
   })
 
@@ -2587,15 +2624,16 @@ export function ComposerV2({
     if (!canSubmit || voiceInputActiveRef.current) return
     if (!submitGateRef.current.tryEnter()) return
     setTextEditMenu(null)
+    // 兜底占位文本与引用拼接规则共用同一常量（composer-reference-blocks），避免两处字面量漂移
     const rawText =
       value.trim() ||
       (attachments.length > 0
-        ? '请查看附件。'
+        ? EMPTY_TEXT_FALLBACK
         : browserReferences.length > 0
           ? '请操作引用的浏览器元素。'
           : sessionReferences.length > 0
             ? '请结合已添加的会话参考。'
-            : '请查看附件。')
+            : EMPTY_TEXT_FALLBACK)
     const turnAttachments = attachments
     // Prepend reply context if quoting a message
     let text = rawText
@@ -2605,25 +2643,33 @@ export function ComposerV2({
       const who = replySnapshot.role === 'assistant' ? (replySnapshot.agentName ?? 'Agent') : 'You'
       text = `[回复 ${who}: ${quotedLine}]\n${rawText}`
     }
-    // 代码位置引用：拼到正文末尾（每行一个 路径:行号）。用户未输入正文时用引用替换
-    // fallback 占位「请查看附件。」（含 reply 包裹的场景也一并替换）。
+    // 引用类内容统一按 appendComposerReferenceBlock 的规则拼进正文：用户没写正文时替换
+    // fallback 占位（含 reply 包裹的场景），写了正文则追加到末尾。
+    // 代码位置引用：每行一个「路径:行号」。
+    const userTyped = value.trim().length > 0
     if (codeReferences.length > 0) {
-      const refText = codeReferences.map(formatCodeReferenceLine).join('\n')
-      if (value.trim().length === 0) {
-        text = text.replace('请查看附件。', refText)
-      } else {
-        text = `${text}\n${refText}`
-      }
+      text = appendComposerReferenceBlock({
+        text,
+        block: codeReferences.map(formatCodeReferenceLine).join('\n'),
+        userTyped,
+      })
     }
-    // 浏览器元素引用：同一机制——序列化为「元素摘要 + 选择器 + 页面 URL」的
-    // 定位文本块交给模型，配合 spark_browser 工具可直接回查页面元素。
+    // 浏览器元素引用：序列化为「元素摘要 + 选择器 + 页面 URL」的定位文本块交给模型，
+    // 配合 spark_browser 工具可直接回查页面元素。
     if (browserReferences.length > 0) {
-      const refText = browserReferences.map(formatBrowserReferenceLine).join('\n')
-      if (value.trim().length === 0) {
-        text = text.replace('请查看附件。', refText)
-      } else {
-        text = `${text}\n${refText}`
-      }
+      text = appendComposerReferenceBlock({
+        text,
+        block: browserReferences.map(formatBrowserReferenceLine).join('\n'),
+        userTyped,
+      })
+    }
+    // Git 提交引用：序列化为「[Git 提交] 短hash 标题」，模型可用 git 工具回查该提交改动。
+    if (commitReferences.length > 0) {
+      text = appendComposerReferenceBlock({
+        text,
+        block: commitReferences.map(formatCommitReferenceLine).join('\n'),
+        userTyped,
+      })
     }
     // Record to input history (deduplicate consecutive identical entries)
     const history = sentHistoryRef.current
@@ -2634,6 +2680,7 @@ export function ComposerV2({
     historyDraftRef.current = ''
     clearDraftBuckets([draftBucketKey])
     setBrowserReferences([])
+    setCommitReferences([])
     // 发送后清除 pending mention（避免下一条消息误带）；dispatchMessage 内已通过 text 计算用过
     setPendingMention(null)
     if (replySnapshot != null) onClearReply?.()
@@ -2748,6 +2795,7 @@ export function ComposerV2({
     setAttachments(message.attachments)
     setSessionReferences(message.sessionReferences)
     setCodeReferences([])
+    setCommitReferences([])
     const res = await cancelQueuedTurn({ sessionId: session.id, turnId: message.turnId })
     setQueuedMessages(mapQueuedTurns(res.queuedTurns))
     if (res.queuedTurns.length === 0) setQueuePause(null)
@@ -3899,6 +3947,7 @@ export function ComposerV2({
       setAttachments(draft.attachments)
       setSessionReferences(draft.sessionReferences)
       setCodeReferences([])
+      setCommitReferences([])
       textareaRef.current?.focus()
     },
     toast,
@@ -3935,6 +3984,7 @@ export function ComposerV2({
     setValue(payload.text)
     setSessionReferences(payload.sessionReferences ?? [])
     setCodeReferences([])
+    setCommitReferences([])
 
     const stamp = Date.now()
     const placeholders: ComposerAttachment[] = payload.attachments.map((att, index) => ({
@@ -4239,6 +4289,7 @@ export function ComposerV2({
           )}
 
           {(codeReferences.length > 0 ||
+            commitReferences.length > 0 ||
             imageAttachments.length > 0 ||
             fileAttachments.length > 0 ||
             directoryAttachments.length > 0 ||
@@ -4344,6 +4395,10 @@ export function ComposerV2({
                   })}
                 </div>
               )}
+              <ComposerCommitReferenceStrip
+                references={commitReferences}
+                onRemove={handleRemoveCommitReference}
+              />
               {imageAttachments.length > 0 && (
                 <div className="composer-attachment-gallery">
                   {imageAttachments.map((attachment) => (

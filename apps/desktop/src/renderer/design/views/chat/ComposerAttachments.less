@@ -89,6 +89,41 @@
   text-overflow: ellipsis;
 }
 
+/* Git 提交引用 chip：与代码位置引用同构的双行形态（上行短 hash、下行提交标题）。
+   基础布局（inline-flex / align-items:center / gap）继承自 views.css 的 .composer-attachment-chip。 */
+.composer-v2 .composer-commit-ref-strip {
+  flex-wrap: wrap;
+}
+
+.composer-v2 .composer-commit-ref-chip {
+  height: auto;
+  max-width: 360px;
+  padding: 4px 7px 4px 10px;
+}
+
+.composer-v2 .composer-commit-ref-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.composer-v2 .composer-commit-ref-hash {
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: nowrap;
+}
+
+.composer-v2 .composer-commit-ref-subject {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text) 60%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .composer-v2 .composer-session-ref-strip {
   flex-wrap: wrap;
 }

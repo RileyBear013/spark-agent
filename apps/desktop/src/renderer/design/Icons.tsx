@@ -938,6 +938,14 @@ export const Icons = {
       <path d="M18 8.5a8 8 0 0 1-8 8" />
     </IconBase>
   ),
+  /** 提交 — 一条提交的水平形态（圆点 + 两侧连线），Git 提交引用 chip / 菜单使用 */
+  GitCommit: (p: IconProps) => (
+    <IconBase {...p}>
+      <circle cx="12" cy="12" r="3" />
+      <line x1="3" y1="12" x2="9" y2="12" />
+      <line x1="15" y1="12" x2="21" y2="12" />
+    </IconBase>
+  ),
   Tag: (p: IconProps) => (
     <IconBase {...p}>
       <path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" />

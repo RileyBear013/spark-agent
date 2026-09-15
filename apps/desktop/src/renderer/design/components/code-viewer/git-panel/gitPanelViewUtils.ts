@@ -64,7 +64,9 @@ export function buildGitPanelFileLabels(paths: readonly string[]): Map<string, G
     const maxDepth = Math.max(...dirSegmentsList.map((segs) => segs.length))
     let depth = 1
     for (; depth <= maxDepth; depth++) {
-      const labels = new Set(dirSegmentsList.map((segs) => segs.slice(-depth).join('/') || '\u0000'))
+      const labels = new Set(
+        dirSegmentsList.map((segs) => segs.slice(-depth).join('/') || '\u0000'),
+      )
       if (labels.size === groupPaths.length) break
     }
     const effectiveDepth = Math.min(depth, maxDepth)
@@ -173,6 +175,18 @@ export function formatGitCommitAbsoluteTime(iso: string | null | undefined): str
   const d = new Date(timestamp)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * 提交信息副本（右键菜单「复制提交信息」）：标题 + 正文，正文缺失时只给标题。
+ * 与 git log 的完整提交信息一致（正文与标题之间空一行）。
+ */
+export function formatGitCommitMessageText(commit: {
+  subject: string
+  body?: string | undefined
+}): string {
+  const body = commit.body?.trim()
+  return body != null && body.length > 0 ? `${commit.subject}\n\n${body}` : commit.subject
 }
 
 /* ---------- 提交详情浮层定位 ---------- */

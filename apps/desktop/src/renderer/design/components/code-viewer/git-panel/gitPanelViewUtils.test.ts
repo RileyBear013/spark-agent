@@ -6,6 +6,7 @@ import {
   buildGitPanelLogRefreshKey,
   computeGitCommitPopoverPosition,
   formatGitCommitAbsoluteTime,
+  formatGitCommitMessageText,
   formatGitRelativeTime,
   splitPendingGitChanges,
 } from './gitPanelViewUtils'
@@ -250,11 +251,7 @@ describe('computeGitCommitPopoverPosition', () => {
   })
 
   it('顶部越界时贴上边缘', () => {
-    const pos = computeGitCommitPopoverPosition(
-      { left: 0, right: 240, top: 2 },
-      POPOVER,
-      VIEWPORT,
-    )
+    const pos = computeGitCommitPopoverPosition({ left: 0, right: 240, top: 2 }, POPOVER, VIEWPORT)
     expect(pos.top).toBe(8)
   })
 
@@ -280,5 +277,23 @@ describe('formatGitCommitAbsoluteTime', () => {
     expect(formatGitCommitAbsoluteTime(null)).toBe('')
     expect(formatGitCommitAbsoluteTime('')).toBe('')
     expect(formatGitCommitAbsoluteTime('not-a-date')).toBe('not-a-date')
+  })
+})
+
+describe('formatGitCommitMessageText', () => {
+  it('只有标题时返回标题', () => {
+    expect(formatGitCommitMessageText({ subject: 'fix: 修正登录失败' })).toBe('fix: 修正登录失败')
+  })
+
+  it('有正文时标题与正文之间空一行', () => {
+    expect(
+      formatGitCommitMessageText({ subject: 'feat: 新增提交引用', body: '第一行\n第二行' }),
+    ).toBe('feat: 新增提交引用\n\n第一行\n第二行')
+  })
+
+  it('正文为纯空白时只返回标题', () => {
+    expect(formatGitCommitMessageText({ subject: 'chore: 清理', body: '   \n  ' })).toBe(
+      'chore: 清理',
+    )
   })
 })
