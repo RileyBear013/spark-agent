@@ -529,12 +529,15 @@ export { normalizeWorkflowGraph } from './services/workflow-executor.js'
 export {
   detectWorkflowConditionReferenceErrors,
   detectWorkflowGraphCycles,
+  detectWorkflowUnsupportedNodeKinds,
   formatWorkflowConditionReferenceError,
   formatWorkflowCycleError,
+  formatWorkflowUnsupportedNodeKindError,
 } from './services/workflow-executor.js'
 export type {
   WorkflowConditionReferenceReport,
   WorkflowGraphCycleReport,
+  WorkflowUnsupportedNodeKindReport,
 } from './services/workflow-executor.js'
 export type {
   WorkflowAgentExecutionRecord,

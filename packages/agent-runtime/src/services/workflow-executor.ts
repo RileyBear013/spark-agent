@@ -332,6 +332,68 @@ export function formatWorkflowCycleError(reports: WorkflowGraphCycleReport[]): s
   return `工作流不允许出现循环依赖（${parts.join('；')}）。请调整连线后再保存。`
 }
 
+/** 未知节点类型报告：定位到具体子图、节点与图里实际写的 kind。 */
+export type WorkflowUnsupportedNodeKindReport = {
+  scope: string
+  nodeId: string
+  title: string
+  kind: string
+}
+
+/**
+ * 保存前静态识别图里未声明的节点类型（含 loop 体子图）。
+ *
+ * normalizeWorkflowGraph 会把未知 kind 静默降级为 `agent`，因此只把原始图交给运行时
+ * 校验是不够的：一张写着 `kind: "output"` 的图能静默入库，直到会话挂载预检才以
+ * unsupported_node_kind 暴露，或者更糟——被当成 agent 节点真的派发一轮。
+ * 这里在写入持久化之前把偏差显式拦下来。
+ */
+export function detectWorkflowUnsupportedNodeKinds(
+  graph: WorkflowGraph | Record<string, unknown>,
+): WorkflowUnsupportedNodeKindReport[] {
+  const reports: WorkflowUnsupportedNodeKindReport[] = []
+  const visit = (candidate: unknown, scope: string): void => {
+    if (candidate == null || typeof candidate !== 'object') return
+    const raw = candidate as Record<string, unknown>
+    if (!Array.isArray(raw.nodes)) return
+    for (const entry of raw.nodes) {
+      if (entry == null || typeof entry !== 'object') continue
+      const node = entry as Record<string, unknown>
+      const nodeId = typeof node.id === 'string' ? node.id.trim() : ''
+      const rawTitle = typeof node.title === 'string' ? node.title.trim() : ''
+      const title = rawTitle.length > 0 ? rawTitle : nodeId
+      const rawKind = typeof node.kind === 'string' ? node.kind.trim() : ''
+      if (!WORKFLOW_NODE_KINDS.has(rawKind as WorkflowNodeKind)) {
+        reports.push({
+          scope,
+          nodeId,
+          title: title.length > 0 ? title : '未命名节点',
+          kind: rawKind.length > 0 ? rawKind : 'unknown',
+        })
+      }
+      if (rawKind !== 'loop') continue
+      const config =
+        node.config != null && typeof node.config === 'object'
+          ? (node.config as Record<string, unknown>)
+          : {}
+      visit(config.body, `${scope} › ${title.length > 0 ? title : 'loop'} 循环体`)
+    }
+  }
+  visit(graph, '主图')
+  return reports
+}
+
+/** 把未知节点类型报告格式化为面向用户的一条错误消息（带节点标题与支持列表）。 */
+export function formatWorkflowUnsupportedNodeKindError(
+  reports: WorkflowUnsupportedNodeKindReport[],
+): string {
+  const parts = reports.map(
+    (report) => `${report.scope}的节点「${report.title}」使用了不支持的节点类型「${report.kind}」`,
+  )
+  const supported = [...WORKFLOW_NODE_KINDS].map((kind) => `「${kind}」`).join('、')
+  return `工作流包含不支持的节点类型（${parts.join('；')}）。支持的类型：${supported}。请改用受支持的节点类型后再保存。`
+}
+
 export function orderWorkflowNodes(
   nodes: NormalizedWorkflowNode[],
   edges: NormalizedWorkflowEdge[],

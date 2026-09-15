@@ -3,7 +3,9 @@ import {
   buildWorkflowNodeInputs,
   detectWorkflowConditionReferenceErrors,
   detectWorkflowGraphCycles,
+  detectWorkflowUnsupportedNodeKinds,
   formatWorkflowConditionReferenceError,
+  formatWorkflowUnsupportedNodeKindError,
   executeWorkflowAgentPlan,
   getWorkflowAgentWorkerIds,
   interpolateWorkflowNodeConfig,
@@ -11,6 +13,50 @@ import {
   normalizeWorkflowGraph,
   orderWorkflowNodes,
 } from './workflow-executor.js'
+
+describe('detectWorkflowUnsupportedNodeKinds', () => {
+  it('reports unknown node kinds with scope and title instead of letting them degrade to agent', () => {
+    // `output` 这类未声明类型过去会被 normalizeWorkflowGraph 静默降级成 agent 节点，
+    // 只有在会话挂载预检时才以 unsupported_node_kind 暴露；保存前必须直接拦下来。
+    const graph = {
+      nodes: [
+        { id: 'post-push-check', kind: 'verify', title: '推送后复核', config: {} },
+        { id: 'release-output', kind: 'output', title: '发布结果', config: {} },
+      ],
+      edges: [{ id: 'e1', from: 'post-push-check', to: 'release-output' }],
+    }
+
+    expect(normalizeWorkflowGraph(graph).nodes[1]?.kind).toBe('agent')
+    expect(detectWorkflowUnsupportedNodeKinds(graph)).toEqual([
+      { scope: '主图', nodeId: 'release-output', title: '发布结果', kind: 'output' },
+    ])
+    const message = formatWorkflowUnsupportedNodeKindError(detectWorkflowUnsupportedNodeKinds(graph))
+    expect(message).toContain('节点「发布结果」使用了不支持的节点类型「output」')
+    expect(message).toContain('「artifact」')
+  })
+
+  it('walks loop bodies and tolerates malformed nodes', () => {
+    const graph = {
+      nodes: [
+        {
+          id: 'loop-1',
+          kind: 'loop',
+          title: '迭代',
+          config: { body: { nodes: [{ id: 'bad', kind: 'output' }], edges: [] } },
+        },
+        { id: 'no-kind', title: '缺类型' },
+        null,
+      ],
+      edges: [],
+    }
+
+    // 遍历顺序与预检 inspectRawGraph 一致：按节点顺序深度优先，进入 loop 体即报其子图问题。
+    expect(detectWorkflowUnsupportedNodeKinds(graph)).toEqual([
+      { scope: '主图 › 迭代 循环体', nodeId: 'bad', title: 'bad', kind: 'output' },
+      { scope: '主图', nodeId: 'no-kind', title: '缺类型', kind: 'unknown' },
+    ])
+  })
+})
 
 describe('workflow-executor graph helpers', () => {
   it('normalizes valid nodes and drops malformed nodes and edges', () => {
