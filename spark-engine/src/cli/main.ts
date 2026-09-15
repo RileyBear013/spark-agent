@@ -22,6 +22,7 @@ import type { SettingsScope } from '../config/settings.js'
 import { executeConfigCommand } from './config-command.js'
 import { executeMcpCommand, type McpAddInput } from './mcp-command.js'
 import { executeMemoryCommand } from './memory-command.js'
+import { executeTodoCommand } from './todo-command.js'
 import { JsonlSessionStore, shortSessionId } from '../events/ledger.js'
 import type { AgentEvent } from '../events/schema.js'
 import type { LlmDelta, ReasoningEffort } from '../llm/types.js'
@@ -82,6 +83,13 @@ interface CliOptions {
   readonly memoryType?: string
   readonly memoryConfidence?: string
   readonly memoryAgentId?: string
+  /** `spark todo` command flags. */
+  readonly todoTitle?: string
+  readonly todoStatus?: string
+  readonly todoPriority?: string
+  readonly todoNotes?: string
+  readonly todoLimit?: string
+  readonly todoAll: boolean
   readonly positionals: readonly string[]
 }
 
@@ -207,6 +215,30 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       ...(options.memoryType === undefined ? {} : { type: options.memoryType }),
       ...(options.memoryConfidence === undefined ? {} : { confidence: options.memoryConfidence }),
       ...(options.memoryAgentId === undefined ? {} : { agentId: options.memoryAgentId }),
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
+  if (maintenance === 'todo') {
+    if (options.prompt) {
+      process.stderr.write('spark todo does not accept a task prompt.\n')
+      return 2
+    }
+    return executeTodoCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      cwd: process.cwd(),
+      ...(options.todoTitle === undefined ? {} : { title: options.todoTitle }),
+      ...(options.todoStatus === undefined ? {} : { status: options.todoStatus }),
+      ...(options.todoPriority === undefined ? {} : { priority: options.todoPriority }),
+      ...(options.todoNotes === undefined ? {} : { notes: options.todoNotes }),
+      ...(options.todoLimit === undefined ? {} : { limit: options.todoLimit }),
+      all: options.todoAll,
       stdout: (text) => {
         process.stdout.write(text)
       },
@@ -537,6 +569,11 @@ function parseCli(argv: readonly string[]): CliOptions {
       type: { type: 'string' },
       confidence: { type: 'string' },
       agent: { type: 'string' },
+      title: { type: 'string' },
+      status: { type: 'string' },
+      priority: { type: 'string' },
+      notes: { type: 'string' },
+      all: { type: 'boolean', default: false },
     },
   })
   const requestedOutputFormat = parsed.values['output-format']
@@ -631,6 +668,12 @@ function parseCli(argv: readonly string[]): CliOptions {
       ? {}
       : { memoryConfidence: parsed.values.confidence }),
     ...(parsed.values.agent === undefined ? {} : { memoryAgentId: parsed.values.agent }),
+    ...(parsed.values.title === undefined ? {} : { todoTitle: parsed.values.title }),
+    ...(parsed.values.status === undefined ? {} : { todoStatus: parsed.values.status }),
+    ...(parsed.values.priority === undefined ? {} : { todoPriority: parsed.values.priority }),
+    ...(parsed.values.notes === undefined ? {} : { todoNotes: parsed.values.notes }),
+    ...(parsed.values.limit === undefined ? {} : { todoLimit: parsed.values.limit }),
+    todoAll: parsed.values.all ?? false,
     positionals: parsed.positionals,
   }
 }
@@ -1046,6 +1089,11 @@ Usage:
   spark memory search <q>   Search memory summaries
   spark memory recall <id>  Read one complete memory entry
   spark memory save ...     Save a durable memory as Markdown
+  spark todo list            List current project tasks
+  spark todo add <title>     Add a pending task
+  spark todo update <id>     Update task fields
+  spark todo remove <id>     Remove one task
+  spark todo clear [--all]   Clear completed tasks, or everything with --all
   spark install [--bin dir] Link the spark launcher onto PATH
   spark uninstall [--bin dir]
                             Remove the spark launcher only
@@ -1098,6 +1146,12 @@ Options:
       --type <type>         With 'spark memory save': user | feedback | project | reference
       --confidence <0..1>   With 'spark memory save': confidence score
       --agent <id>          With 'spark memory': agent scope profile id
+      --limit <n>           With 'spark memory search' or 'spark todo list': max results
+      --title <text>        With 'spark todo add|update': task title
+      --status <status>     With 'spark todo': pending | in_progress | completed | cancelled
+      --priority <level>    With 'spark todo': low | normal | high
+      --notes <text>        With 'spark todo add|update': task notes
+      --all                 With 'spark todo clear': remove pending tasks too
   -h, --help                Show help
   -V, --version             Show version
 `

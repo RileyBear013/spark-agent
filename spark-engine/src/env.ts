@@ -27,6 +27,8 @@ import { FakeToolExecutor, fakeToolDefinitions } from './tools/fake/tools.js'
 import { VirtualFileSystem } from './tools/fake/virtual-fs.js'
 import { OrderedToolRegistry } from './tools/registry.js'
 import { taskToolDefinition } from './tools/task/definition.js'
+import { todoToolDefinitions, TodoToolExecutor } from './tools/todo/tools.js'
+import { TodoStore } from './tools/todo/store.js'
 import { workspaceToolDefinitions } from './tools/workspace/definitions.js'
 import { WorkspaceToolExecutor } from './tools/workspace/executor.js'
 import { withCustomEnvironment } from './tools/workspace/process.js'
@@ -162,6 +164,7 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
       [
         ...workspaceToolDefinitions,
         ...(memoryEnabled ? memoryToolDefinitions : []),
+        ...todoToolDefinitions,
         ...(mcp?.listDefinitions() ?? []),
         taskToolDefinition,
       ],
@@ -172,7 +175,8 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
   // call that predates the filter, and it must not bypass the configuration.
   const disallowedTools = [...(options.disallowedTools ?? []), ...(options.hiddenTools ?? [])]
   const workspaceExecutor = new WorkspaceToolExecutor(options.cwd, options.customEnv)
-  const executor = new CompositeToolExecutor(workspaceExecutor, mcp, memoryExecutor)
+  const todoExecutor = new TodoToolExecutor(new TodoStore({ cwd: options.cwd, logger }))
+  const executor = new CompositeToolExecutor(workspaceExecutor, mcp, memoryExecutor, todoExecutor)
   const hooks = loadHookRunner({
     cwd: options.cwd,
     userSettingsDir: dataRoot,

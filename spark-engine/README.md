@@ -177,6 +177,26 @@ fails to start never blocks the session: `spark` reports the failure on stderr a
 built-in tools. `spark mcp status` is the diagnostic that starts the processes deliberately (15s per
 server) and exits non-zero if any server fails.
 
+### Project task list
+
+The standalone CLI includes a small project-local task list at `.spark/todos.json`. It is intended for
+durable execution state that the model and a human can share; it is not a replacement for the
+SparkWork board or cross-device synchronization.
+
+```bash
+spark todo add "Implement the next slice" --priority high --notes "Run the smoke test"
+spark todo list --limit 20
+spark todo update <todo_id> --status in_progress
+spark todo update <todo_id> --status completed
+spark todo remove <todo_id>
+spark todo clear                 # completed/cancelled only
+spark todo clear --all           # explicitly remove every task
+```
+
+The model receives `todo_list` (read-only) and `todo_update` (add/update/complete/remove). Writes use
+the normal permission policy and are serialized; the JSON file is schema-validated and atomically
+replaced, so malformed data or an interrupted write does not silently become a new task state.
+
 ## Model configuration
 
 Spark reads `~/.spark/config.toml` and then project `.spark/config.toml`. Provider credentials are referenced by environment-variable name and are never stored in the config or session snapshot.

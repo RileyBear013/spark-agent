@@ -537,4 +537,8 @@ max_retries = 2
 # [mcp.servers.remote]
 # url = "https://example.com/mcp"
 # headers = { Authorization = "Bearer \${REMOTE_MCP_TOKEN}" }
+
+# ─── Project task list ────────────────────────────────────────────────────────
+# \`spark todo\` stores human/model task state in <cwd>/.spark/todos.json.
+# It is local to this project and is separate from the SparkWork board.
 `
