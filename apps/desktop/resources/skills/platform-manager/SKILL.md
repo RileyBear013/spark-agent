@@ -132,7 +132,7 @@ tags:
 - **workflows_update**（id, 上述任意字段, enabled?）— 更新 Workflow
 - **workflows_delete**（id）— 删除 Workflow ⚠️ 破坏性操作
 
-Workflow 图支持的节点类型包括 `input`、`agent`、`subagent`、`tool`、`mcp`、`plan`、`review`、`verify`、`approval`、`artifact`、`output`、`loop`。`loop` 节点的 `config.body` 是独立子图，默认最多 5 轮、运行时硬上限 50 轮；v1 不支持嵌套 `loop`，循环体节点 id 不能和外层图冲突。
+Workflow 图支持的节点类型只有 `input`、`plan`、`route`、`agent`、`subagent`、`skill`、`tool`、`mcp`、`approval`、`verify`、`review`、`artifact`、`loop` 这 13 种：节点用 `config.outputKey` 声明输出状态键，图的终点就是「没有出边的那个节点」，终点想要交付制品就写 `artifact`，**没有** `output`、`end`、`finish` 之类的节点类型，也**不要**写 `config.sourceKey` 这类不存在的字段——保存时会校验节点类型，写入未知类型会被直接拒绝。`loop` 节点的 `config.body` 是独立子图，默认最多 5 轮、运行时硬上限 50 轮；v1 不支持嵌套 `loop`，循环体节点 id 不能和外层图冲突。
 
 ### 5. Agent 管理（5）
 
@@ -386,17 +386,20 @@ Agent 可通过这些工具查看和修改当前会话的运行时参数，实�
           }
         },
         {
-          "id": "output-1",
-          "kind": "output",
+          "id": "artifact-1",
+          "kind": "artifact",
           "title": "最终输出",
           "x": 640,
           "y": 160,
-          "config": { "sourceKey": "draft" }
+          "config": {
+            "outputKey": "final_output",
+            "prompt": "把 {{draft}} 整理成最终交付内容，只输出正文。"
+          }
         }
       ],
       "edges": [
         { "id": "e-input-loop", "from": "input-1", "to": "loop-1" },
-        { "id": "e-loop-output", "from": "loop-1", "to": "output-1" }
+        { "id": "e-loop-output", "from": "loop-1", "to": "artifact-1" }
       ]
     }
   }
