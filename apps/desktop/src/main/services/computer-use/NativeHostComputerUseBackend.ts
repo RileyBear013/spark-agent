@@ -10,7 +10,11 @@ import type {
   NativeHostResponse,
   NativeWindowDescriptor,
 } from '@spark/protocol'
-import { ComputerObservationSchema, computerExecutionLaneForAction } from '@spark/protocol'
+import {
+  ComputerObservationSchema,
+  computerExecutionLaneForAction,
+  describeComputerActionForLog,
+} from '@spark/protocol'
 import { createLogger } from '@spark/shared'
 import type {
   ComputerExecutorBackend,
@@ -44,6 +48,62 @@ const IDEMPOTENT_RETRY_BASE_DELAY_MS = 50
 function delayForIdempotentRetry(attempt: number): Promise<void> {
   const delayMs = IDEMPOTENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1)
   return new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+
+// A bound app can transiently report ZERO live windows right after an action replaces
+// its window (Electron meta+n churn) or while the AX window inventory is mid-enumeration.
+// Re-listing a couple of times with a short settle absorbs that jitter so the operator
+// loop never sees it; an app that really quit keeps failing every attempt and still
+// surfaces as focus_mismatch with the full inventory dump.
+const WINDOW_CHURN_RETRY_MAX_ATTEMPTS = 3
+const WINDOW_CHURN_RETRY_DELAY_MS = 250
+
+function delayWindowChurnRetry(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, WINDOW_CHURN_RETRY_DELAY_MS))
+}
+
+async function selectTargetWithChurnRetry(
+  connection: NativeHostConnection,
+  options: {
+    previous?: { appId: string; windowId: string }
+    requireExactTarget: boolean
+    signal: AbortSignal
+  },
+): Promise<NativeWindowDescriptor> {
+  for (let attempt = 1; ; attempt += 1) {
+    if (options.signal.aborted) throw sessionCanceled()
+    const windows = await connection.listWindows(options.signal)
+    try {
+      const target = selectControllableWindow(windows, options.previous, options.requireExactTarget)
+      if (attempt > 1) {
+        log.info('Computer window binding recovered after window-churn retry', {
+          attempt,
+          appId: target.app.id,
+          windowId: target.window.id,
+        })
+      }
+      return target
+    } catch (error) {
+      // Only the bound-app-vanished branch (previous != null) is a jitter candidate; an
+      // unbound session with an empty desktop usually reflects a genuinely minimalized
+      // desktop, and retrying that would just delay an honest failure.
+      const transientJitter =
+        options.previous != null &&
+        error instanceof ComputerUseBrokerError &&
+        error.code === 'focus_mismatch'
+      if (!transientJitter || attempt >= WINDOW_CHURN_RETRY_MAX_ATTEMPTS) throw error
+      log.warn(
+        'Computer window inventory transiently missing the bound app; re-listing after a short settle',
+        {
+          attempt,
+          boundAppId: options.previous.appId,
+          boundWindowId: options.previous.windowId,
+          liveWindows: summarizeWindowInventory(windows),
+        },
+      )
+      await delayWindowChurnRetry()
+    }
+  }
 }
 
 export interface NativeHostConnection {
@@ -340,13 +400,14 @@ export class NativeHostComputerUseBackend
         async (connection) => {
           const previous = this.observationSessions.get(input.computerSessionId)
           const targetBinding = this.targetBindings.get(input.computerSessionId)
-          const target = selectControllableWindow(
-            await connection.listWindows(input.signal),
-            previous == null
-              ? targetBinding
-              : { appId: previous.appId, windowId: previous.windowId },
-            targetBinding != null,
-          )
+          const target = await selectTargetWithChurnRetry(connection, {
+            previous:
+              previous == null
+                ? targetBinding
+                : { appId: previous.appId, windowId: previous.windowId },
+            requireExactTarget: targetBinding != null,
+            signal: input.signal,
+          })
           return this.captureObservation({
             connection,
             computerSessionId: input.computerSessionId,
@@ -381,12 +442,25 @@ export class NativeHostComputerUseBackend
       state.appId !== input.envelope.targetAppId ||
       state.windowId !== input.envelope.targetWindowId
     ) {
+      // The identity diff below is the whole diagnosis for "界面已变化" loops: it tells
+      // apart a genuine window switch from a mere frame/treeVersion heartbeat mismatch.
+      log.warn('Computer native action rejected as stale_frame', {
+        computerSessionId: input.envelope.computerSessionId,
+        action: describeComputerActionForLog(input.envelope.action),
+        envelopeFrameId: input.envelope.observedFrameId,
+        envelopeTreeVersion: input.envelope.observedTreeVersion,
+        envelopeWindow: `${input.envelope.targetAppId}/${input.envelope.targetWindowId}`,
+        sessionFrameId: state?.frameId ?? null,
+        sessionTreeVersion: state?.treeVersion ?? null,
+        sessionWindow: state == null ? null : `${state.appId}/${state.windowId}`,
+      })
       throw new ComputerUseBrokerError(
         'stale_frame',
         'Native Host action does not match the latest persisted observation',
       )
     }
-    return this.measure('action_ms', () =>
+    const executeStartedAt = Date.now()
+    const result = await this.measure('action_ms', () =>
       this.runControlOperation('execution', input.envelope.action, async (connection) => {
         // Skyshot (protocol v2): ask the Host to attach the settled post-action
         // observation (fresh tree + screenshot) to the action response so the
@@ -490,6 +564,14 @@ export class NativeHostComputerUseBackend
         }
       }),
     )
+    log.info('Computer native action executed', {
+      computerSessionId: input.envelope.computerSessionId,
+      action: describeComputerActionForLog(input.envelope.action),
+      durationMs: Date.now() - executeStartedAt,
+      noop: result.noop,
+      ...(result.executionChannel == null ? {} : { channel: result.executionChannel }),
+    })
+    return result
   }
 
   async cancelSession(computerSessionId: string): Promise<void> {
@@ -900,6 +982,15 @@ function selectControllableWindow(
     const focusedAppWindow = appWindows.find((window) => window.focused)
     if (focusedAppWindow != null) return focusedAppWindow
     if (appWindows.length > 0) return largestWindow(appWindows)
+    // The bound app reported ZERO live windows at this instant — usually window churn
+    // (the action just opened/replaced a window) or an AX enumeration race, not a real
+    // focus change. The inventory dump is what makes this diagnosable from main.log.
+    log.warn('Computer window binding lost (focus_mismatch); bound app has no live windows', {
+      boundAppId: previous.appId,
+      boundWindowId: previous.windowId,
+      requireExactTarget,
+      liveWindows: summarizeWindowInventory(windows),
+    })
     throw new ComputerUseBrokerError(
       'focus_mismatch',
       'The application being controlled is no longer available',
@@ -910,7 +1001,31 @@ function selectControllableWindow(
     if (focused.length > 0) return largestWindow(focused)
   }
   if (controllable.length > 0) return largestWindow(controllable)
+  log.warn('Computer window target lost (focus_mismatch); desktop has no controllable windows', {
+    requireExactTarget,
+    liveWindows: summarizeWindowInventory(windows),
+  })
   throw new ComputerUseBrokerError('focus_mismatch', 'No controllable window was found')
+}
+
+/**
+ * Compact window inventory for focus_mismatch diagnostics. Bounded so a busy desktop
+ * cannot flood main.log; order preserves the Host's z-order (frontmost first).
+ */
+function summarizeWindowInventory(windows: NativeWindowDescriptor[]): Array<{
+  app: string
+  title: string
+  focused: boolean
+  minimized: boolean
+  bounds: string
+}> {
+  return windows.slice(0, 12).map((window) => ({
+    app: window.app.name,
+    title: window.window.title.slice(0, 60),
+    focused: window.focused,
+    minimized: window.minimized,
+    bounds: `${window.window.bounds.width}x${window.window.bounds.height}`,
+  }))
 }
 
 function largestWindow(windows: NativeWindowDescriptor[]): NativeWindowDescriptor {

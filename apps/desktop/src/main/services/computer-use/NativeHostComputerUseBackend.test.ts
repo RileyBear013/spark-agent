@@ -487,6 +487,73 @@ describe('NativeHostComputerUseBackend', () => {
     )
   })
 
+  it('re-lists the window inventory when the bound app transiently reports no windows', async () => {
+    // Window-churn regression: right after an action replaces the app's window, one
+    // inventory read can legitimately miss the bound app entirely. That instant must
+    // not surface as focus_mismatch — a short settle and a re-list recovers silently
+    // instead of bouncing the step into the operator's failure/replan loop.
+    const otherApp = {
+      ...FOCUSED_WINDOW,
+      app: { ...FOCUSED_WINDOW.app, id: 'other-app', name: 'OtherApp' },
+      window: { ...FOCUSED_WINDOW.window, id: 'other-window', title: 'Other window' },
+    }
+    const churnedObservation = {
+      ...OBSERVATION,
+      frameId: 'frame-churn',
+      treeVersion: 'tree-churn',
+      screenshot: { ...OBSERVATION.screenshot, snapshotId: 'snapshot-2' },
+    }
+    const connection = createControlConnection([OBSERVATION, churnedObservation])
+    vi.mocked(connection.listWindows)
+      .mockResolvedValueOnce([FOCUSED_WINDOW]) // establishes the sticky binding
+      .mockResolvedValueOnce([otherApp]) // the jitter: bound app momentarily absent
+      .mockResolvedValueOnce([FOCUSED_WINDOW]) // re-list recovers it
+    const ids = ['snapshot-1', 'snapshot-2']
+    const backend = new NativeHostComputerUseBackend({
+      platform: 'macos',
+      connect: async () => connection,
+      evidenceSink: { persist: vi.fn(async () => undefined) },
+      createId: () => ids.shift() ?? 'unexpected',
+    })
+    const signal = new AbortController().signal
+
+    await backend.observe({ computerSessionId: 'computer-1', fullTree: true, signal })
+    await expect(
+      backend.observe({ computerSessionId: 'computer-1', fullTree: false, signal }),
+    ).resolves.toEqual(churnedObservation)
+
+    expect(connection.listWindows).toHaveBeenCalledTimes(3)
+    expect(connection.observe).toHaveBeenLastCalledWith(
+      expect.objectContaining({ appId: 'app-1', windowId: 'window-1' }),
+    )
+  })
+
+  it('still reports focus_mismatch when the bound app stays absent across churn retries', async () => {
+    const otherApp = {
+      ...FOCUSED_WINDOW,
+      app: { ...FOCUSED_WINDOW.app, id: 'other-app', name: 'OtherApp' },
+      window: { ...FOCUSED_WINDOW.window, id: 'other-window', title: 'Other window' },
+    }
+    const connection = createControlConnection([OBSERVATION])
+    vi.mocked(connection.listWindows)
+      .mockResolvedValueOnce([FOCUSED_WINDOW]) // establishes the sticky binding
+      .mockResolvedValue([otherApp]) // the app genuinely quit: every retry misses it
+    const backend = new NativeHostComputerUseBackend({
+      platform: 'macos',
+      connect: async () => connection,
+      evidenceSink: { persist: vi.fn(async () => undefined) },
+      createId: () => 'snapshot-1',
+    })
+    const signal = new AbortController().signal
+
+    await backend.observe({ computerSessionId: 'computer-1', fullTree: true, signal })
+    await expect(
+      backend.observe({ computerSessionId: 'computer-1', fullTree: false, signal }),
+    ).rejects.toMatchObject({ code: 'focus_mismatch' })
+
+    expect(connection.listWindows).toHaveBeenCalledTimes(4)
+  })
+
   it('executes through the native host and captures a post-action diff observation', async () => {
     const after = {
       ...OBSERVATION,
