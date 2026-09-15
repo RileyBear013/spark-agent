@@ -494,6 +494,7 @@ function agentErrorAggregationKey(error: {
 }
 
 const CANCELLATION_ERROR_CODES = new Set(['ABORTED', 'CODEX_CLI_CANCELLED', 'CODEX_SDK_CANCELLED'])
+const TRANSIENT_RECOVERY_SIGNALS = new Set(['api_retry', 'stream_reconnect'])
 
 function isCancellationErrorCode(code: string): boolean {
   return CANCELLATION_ERROR_CODES.has(code.trim().toUpperCase())
@@ -762,6 +763,10 @@ export class MessageBuilder {
           this.applyAgentSnapshot(msg, event)
         }
 
+        if (event.content.length > 0) {
+          this.clearTransientRecoverySignals(msg, { kind: 'host' })
+        }
+
         if (event.mode === 'complete') {
           if (event.isFinal) {
             // 最终 result 文本只做去重收尾；整轮终态仍需等 agent_status，避免后续事件被提前折叠。
@@ -806,6 +811,9 @@ export class MessageBuilder {
           home ?? this.getOrCreateAssistant(event.id, event.timestamp, { turnId: event.turnId })
         if (home != null && !home.eventIds.includes(event.id)) home.eventIds.push(event.id)
         this.applyAgentSnapshot(msg, event)
+        if (event.content.length > 0 && event.teamMemberContext == null) {
+          this.clearTransientRecoverySignals(msg, { kind: 'host' })
+        }
         if (event.mode === 'complete') {
           this.applySegmentComplete(msg.blocks, 'thinking', event.content, event.segmentId)
         } else {
@@ -833,6 +841,9 @@ export class MessageBuilder {
         const msg =
           home ?? this.getOrCreateAssistant(event.id, event.timestamp, { turnId: event.turnId })
         if (home != null && !home.eventIds.includes(event.id)) home.eventIds.push(event.id)
+        if (event.teamMemberContext == null) {
+          this.clearTransientRecoverySignals(msg, { kind: 'host' })
+        }
         // AskUserQuestion gets its own dedicated inline block
         const isAskQuestion =
           event.toolName.replace(/[-_]/g, '').toLowerCase() === 'askuserquestion'
@@ -1412,6 +1423,12 @@ export class MessageBuilder {
 
       case 'subagent_message': {
         const { message, block } = this.getOrCreateSubagentBlock(event)
+        if (event.content.length > 0) {
+          this.clearTransientRecoverySignals(message, {
+            kind: 'subagent',
+            toolCallId: event.toolCallId,
+          })
+        }
         const transcript = (block.transcript ??= [])
         const existing = transcript.find(
           (entry) => entry.kind === event.contentKind && entry.segmentId === event.segmentId,
@@ -1715,6 +1732,11 @@ export class MessageBuilder {
           home ?? this.getOrCreateAssistant(event.id, event.timestamp, { turnId: event.turnId })
         if (!msg.eventIds.includes(event.id)) {
           msg.eventIds.push(event.id)
+        }
+        if (event.content.length > 0) {
+          // team_member_message does not carry RuntimeEventOrigin; only clear
+          // host-level recovery notices and preserve explicitly attributed ones.
+          this.clearTransientRecoverySignals(msg, { kind: 'host' })
         }
         const memberBlocks = msg.blocks.filter(
           (b): b is Extract<UIBlock, { kind: 'team_member_message' }> =>
@@ -2083,6 +2105,36 @@ export class MessageBuilder {
     delete current.details
     delete current.origin
     Object.assign(current, next)
+  }
+
+  /**
+   * Remove self-recovery notices once the corresponding output stream resumes.
+   * Runtime signals remain persisted in eventIds for audit/history deletion, while
+   * their transient UI blocks are removed from the live message projection.
+   */
+  private clearTransientRecoverySignals(
+    message: UIMessage,
+    source: { kind: 'host' } | { kind: 'subagent'; toolCallId: string },
+  ): void {
+    const nextBlocks = message.blocks.filter((block) => {
+      if (block.kind !== 'runtime_signal' || !TRANSIENT_RECOVERY_SIGNALS.has(block.signal)) {
+        return true
+      }
+
+      if (source.kind === 'host') {
+        // A host assistant/thinking event has no origin field. Keep signals that
+        // are explicitly attributed to a subagent in the same host message.
+        return block.origin?.kind === 'subagent'
+      }
+
+      return !(block.origin?.kind === 'subagent' && block.origin.toolCallId === source.toolCallId)
+    })
+
+    if (nextBlocks.length !== message.blocks.length) {
+      // Replace the array reference so React projections that memoize blocks can
+      // observe the removal immediately.
+      message.blocks = nextBlocks
+    }
   }
 
   private getOrCreateSubagentBlock(event: {

@@ -233,6 +233,223 @@ describe('MessageBuilder', () => {
     ])
   })
 
+  it('removes host recovery notices when assistant output resumes but keeps real quota notices', () => {
+    const builder = new MessageBuilder()
+
+    builder.processEvent({
+      ...baseEvent('runtime_signal'),
+      id: 'retry-host',
+      type: 'runtime_signal',
+      signal: 'api_retry',
+      level: 'warning',
+      title: 'Claude API 正在重试',
+      message: '当前请求超过了 Claude 的额度或速率限制。',
+      code: 'CLAUDE_API_RETRY_RATE_LIMIT',
+      retryable: false,
+      origin: { kind: 'runtime', name: 'Claude SDK' },
+    })
+    builder.processEvent({
+      ...baseEvent('runtime_signal'),
+      id: 'quota-host',
+      type: 'runtime_signal',
+      signal: 'rate_limit',
+      level: 'warning',
+      title: '额度即将用尽',
+      message: '当前五小时窗口已使用 92%。',
+      code: 'CLAUDE_RATE_LIMIT_WARNING',
+      retryable: false,
+    })
+    builder.processEvent({
+      ...baseEvent('assistant_message'),
+      id: 'host-output',
+      type: 'assistant_message',
+      mode: 'delta',
+      content: '恢复后的输出',
+      isFinal: false,
+      provider: 'claude',
+    })
+
+    expect(builder.getAllMessages()[0]?.blocks).toEqual([
+      expect.objectContaining({ kind: 'runtime_signal', signal: 'rate_limit' }),
+      { kind: 'text', content: '恢复后的输出', isStreaming: true },
+    ])
+  })
+
+  it('removes a reconnect notice when host thinking output resumes', () => {
+    const builder = new MessageBuilder()
+
+    builder.processEvent({
+      ...baseEvent('runtime_signal'),
+      id: 'reconnect-host',
+      type: 'runtime_signal',
+      signal: 'stream_reconnect',
+      level: 'info',
+      title: '网络连接中断，正在自动重连',
+      message: 'Reconnecting... 1/5',
+      code: 'CODEX_STREAM_RECONNECT',
+      retryable: false,
+    })
+    builder.processEvent({
+      ...baseEvent('agent_thinking'),
+      id: 'host-thinking',
+      type: 'agent_thinking',
+      mode: 'delta',
+      content: '继续处理',
+    })
+
+    expect(builder.getAllMessages()[0]?.blocks).toEqual([
+      { kind: 'thinking', content: '继续处理', isStreaming: true },
+    ])
+  })
+
+  it('removes a recovery notice when host output resumes with a tool call', () => {
+    const builder = new MessageBuilder()
+
+    builder.processEvent({
+      ...baseEvent('runtime_signal'),
+      id: 'reconnect-before-tool',
+      type: 'runtime_signal',
+      signal: 'stream_reconnect',
+      level: 'info',
+      title: '网络连接中断，正在自动重连',
+      message: 'Reconnecting... 1/5',
+      code: 'CODEX_STREAM_RECONNECT',
+      retryable: false,
+    })
+    builder.processEvent({
+      ...baseEvent('tool_call'),
+      id: 'host-tool-call',
+      type: 'tool_call',
+      toolCallId: 'tool-call-1',
+      toolName: 'Bash',
+      toolInput: { command: 'pwd' },
+      source: 'builtin',
+    })
+
+    expect(builder.getAllMessages()[0]?.blocks).toEqual([
+      {
+        kind: 'tool_call',
+        toolCallId: 'tool-call-1',
+        toolName: 'Bash',
+        toolInput: { command: 'pwd' },
+        status: 'pending',
+        output: undefined,
+        error: undefined,
+        durationMs: undefined,
+      },
+    ])
+  })
+
+  it('clears only the matching subagent recovery notice when its transcript resumes', () => {
+    const builder = new MessageBuilder()
+    const startSubagent = (id: string, toolCallId: string): AgentEvent => ({
+      ...baseEvent('subagent_started'),
+      id,
+      type: 'subagent_started',
+      toolCallId,
+      name: toolCallId,
+      role: 'Research',
+      task: 'Inspect the repository',
+    })
+    const retrySignal = (id: string, toolCallId: string): AgentEvent => ({
+      ...baseEvent('runtime_signal'),
+      id,
+      type: 'runtime_signal',
+      signal: 'api_retry',
+      level: 'warning',
+      title: 'Claude API 正在重试',
+      message: '当前请求超过了 Claude 的额度或速率限制。',
+      code: 'CLAUDE_API_RETRY_RATE_LIMIT',
+      retryable: false,
+      origin: { kind: 'subagent', toolCallId, name: toolCallId },
+    })
+
+    builder.processEvent(startSubagent('subagent-a-start', 'tool-a'))
+    builder.processEvent(startSubagent('subagent-b-start', 'tool-b'))
+    builder.processEvent(retrySignal('subagent-a-retry', 'tool-a'))
+    builder.processEvent(retrySignal('subagent-b-retry', 'tool-b'))
+    builder.processEvent({
+      ...baseEvent('subagent_message'),
+      id: 'subagent-a-output',
+      type: 'subagent_message',
+      toolCallId: 'tool-a',
+      contentKind: 'text',
+      mode: 'delta',
+      content: '子 Agent A 已恢复',
+      segmentId: 'segment-a',
+    })
+
+    const blocks = builder.getAllMessages()[0]?.blocks ?? []
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: 'subagent',
+        toolCallId: 'tool-a',
+        transcript: [expect.objectContaining({ kind: 'text', content: '子 Agent A 已恢复' })],
+      }),
+    )
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: 'runtime_signal',
+        signal: 'api_retry',
+        origin: { kind: 'subagent', toolCallId: 'tool-b', name: 'tool-b' },
+      }),
+    )
+    expect(blocks).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'runtime_signal',
+        signal: 'api_retry',
+        origin: { kind: 'subagent', toolCallId: 'tool-a', name: 'tool-a' },
+      }),
+    )
+  })
+
+  it('removes a host recovery notice when team member output resumes', () => {
+    const builder = new MessageBuilder()
+
+    builder.processEvent({
+      ...baseEvent('team_dispatch_requested'),
+      id: 'dispatch-requested',
+      type: 'team_dispatch_requested',
+      dispatchId: 'dispatch-1',
+      hostAgentId: 'host-agent',
+      memberAgentId: 'member-agent',
+      task: 'Continue the response',
+    })
+    builder.processEvent({
+      ...baseEvent('runtime_signal'),
+      id: 'team-reconnect',
+      type: 'runtime_signal',
+      signal: 'stream_reconnect',
+      level: 'info',
+      title: '网络连接中断，正在自动重连',
+      message: 'Reconnecting... 1/5',
+      code: 'CODEX_STREAM_RECONNECT',
+      retryable: false,
+    })
+    builder.processEvent({
+      ...baseEvent('team_member_message'),
+      id: 'team-member-output',
+      type: 'team_member_message',
+      dispatchId: 'dispatch-1',
+      memberAgentId: 'member-agent',
+      mode: 'delta',
+      content: '成员恢复后的输出',
+      isFinal: false,
+      segmentId: 'member-segment-1',
+    })
+
+    const blocks = builder.getAllMessages()[0]?.blocks ?? []
+    expect(blocks).toEqual([
+      expect.objectContaining({ kind: 'team_dispatch', dispatchId: 'dispatch-1' }),
+      expect.objectContaining({
+        kind: 'team_member_message',
+        dispatchId: 'dispatch-1',
+        content: '成员恢复后的输出',
+      }),
+    ])
+    expect(builder.getAllMessages()[0]?.eventIds).toContain('team-reconnect')
+  })
+
   it('does not merge permission denials for different tools', () => {
     const builder = new MessageBuilder()
     const permissionDenied = (id: string, tool: string): AgentEvent => ({
