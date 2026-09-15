@@ -77,8 +77,8 @@ describe('chat scroll controls', () => {
     )
 
     expect(component).toContain('chat-stream overlay-scrollbar-enabled')
-    expect(component).toContain(
-      '<ChatOverlayScrollbar scrollRef={streamRef} controlsId={streamId} />',
+    expect(component).toMatch(
+      /<ChatOverlayScrollbar\s+scrollRef=\{streamRef\}\s+controlsId=\{streamId\}\s+onUserScrollIntentUp=\{markUserScrollIntentUp\}\s*\/>/,
     )
     expect(overlayComponent).toContain('role="scrollbar"')
     expect(overlayComponent).toContain('ResizeObserver')

@@ -77,6 +77,8 @@ export function CustomCommandEditPanel({
                 { label: 'Python', value: 'python' },
               ]}
             />
+          </div>
+          <div className="custom-command-field">
             <label>
               提示词<span className="sub">脚本成功后继续交给 Agent</span>
             </label>
@@ -84,8 +86,11 @@ export function CustomCommandEditPanel({
               value={draft.prompt}
               onChange={(event) => patch({ prompt: event.target.value })}
               placeholder="请基于用户输入输出分阶段计划，并列出风险和验证步骤。"
-              className="rule-textarea custom-command-textarea"
+              autoSize={{ minRows: 5, maxRows: 20 }}
+              className="custom-command-prompt"
             />
+          </div>
+          <div className="custom-command-field">
             <label>
               脚本<span className="sub">命令后的文本会作为第一个参数传入</span>
             </label>
@@ -95,9 +100,10 @@ export function CustomCommandEditPanel({
               placeholder={
                 draft.scriptLanguage === 'python'
                   ? 'import sys\nprint(sys.argv[1] if len(sys.argv) > 1 else "")'
-                  : 'const arg = process.argv[2] || ""\\nconsole.log(arg)'
+                  : 'const arg = process.argv[2] || ""\nconsole.log(arg)'
               }
-              className="rule-textarea custom-command-textarea"
+              autoSize={{ minRows: 12, maxRows: 32 }}
+              className="custom-command-editor"
             />
           </div>
         </div>

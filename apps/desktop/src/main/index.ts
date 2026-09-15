@@ -142,6 +142,8 @@ import {
   setProductionDbInheritQuitRequester,
 } from './services/ProductionDbInheritService.js'
 import { installSingleInstanceLock } from './single-instance.js'
+import { startEventLoopMonitor } from './event-loop-monitor.js'
+import { buildStartupGuidanceDataUrl, resolveStartupGuidanceLocale } from './startup-guidance.js'
 import { getDatabase } from './db.js'
 import { getRecentSessionsForTray } from './ipc/index.js'
 import { createLogger } from '@spark/shared'
@@ -207,6 +209,9 @@ let computerControlTrayRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let isQuitting = false
 let requestedQuitReason: string | null = null
 let downloadedPromptVersion: string | null = null
+let startupGuidanceWindow: BrowserWindow | null = null
+let startupGuidanceShownAt: number | null = null
+let initializationReady = false
 const BROWSER_ZOOM_CHANGED_EVENT = 'spark:browser-zoom-changed'
 const UI_ZOOM_MIN = 80
 const UI_ZOOM_MAX = 150
@@ -266,6 +271,14 @@ function getResourcePath(fileName: string): string {
 }
 function showMainWindow(): void {
   if (revealAppWindow(getMainWindow())) return
+  if (!initializationReady) {
+    if (startupGuidanceWindow != null && !startupGuidanceWindow.isDestroyed()) {
+      if (startupGuidanceWindow.isMinimized()) startupGuidanceWindow.restore()
+      startupGuidanceWindow.show()
+      startupGuidanceWindow.focus()
+    }
+    return
+  }
   createWindow()
 }
 
@@ -723,6 +736,54 @@ function buildNativeSplashOptions(isDarwin: boolean): {
   return { backgroundColor: pickWindowBg() }
 }
 
+async function showStartupGuidanceWindow(): Promise<void> {
+  const win = new BrowserWindow({
+    title: 'SparkWork',
+    width: 520,
+    height: 320,
+    show: false,
+    frame: false,
+    closable: false,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    ...buildNativeSplashOptions(process.platform === 'darwin'),
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  })
+  startupGuidanceWindow = win
+  win.on('closed', () => {
+    if (startupGuidanceWindow === win) startupGuidanceWindow = null
+  })
+
+  const dataUrl = buildStartupGuidanceDataUrl({
+    locale: resolveStartupGuidanceLocale(app.getLocale()),
+    version: app.getVersion(),
+  })
+  await win.loadURL(dataUrl)
+  if (win.isDestroyed()) return
+  win.center()
+  win.show()
+  startupGuidanceShownAt = Date.now()
+  log.info('[startup-guidance] startup window shown')
+}
+
+function closeStartupGuidanceWindow(): void {
+  const win = startupGuidanceWindow
+  if (win == null || win.isDestroyed()) return
+  const elapsedMs = startupGuidanceShownAt == null ? null : Date.now() - startupGuidanceShownAt
+  const message = `[startup-guidance] startup window closed; elapsedMs=${elapsedMs ?? 'unknown'}`
+  if (elapsedMs != null && elapsedMs >= 1_500) log.warn(message)
+  else log.info(message)
+  win.destroy()
+  startupGuidanceWindow = null
+  startupGuidanceShownAt = null
+}
+
 function createWindow(): BrowserWindow {
   const iconPath = getResourcePath(process.platform === 'win32' ? 'taskbarIcon.png' : 'icon.png')
 
@@ -767,6 +828,7 @@ function createWindow(): BrowserWindow {
   // 窗口准备好后再显示，避免白屏闪烁
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
+    closeStartupGuidanceWindow()
   })
 
   mainWindow.on('close', (event) => {
@@ -893,7 +955,9 @@ async function initializeApp(): Promise<void> {
       appVersion: app.getVersion(),
     })
     if (inherited.applied) {
-      log.warn(`Inherited production db applied; previous db at ${inherited.backupDirectory ?? '?'}`)
+      log.warn(
+        `Inherited production db applied; previous db at ${inherited.backupDirectory ?? '?'}`,
+      )
     }
   } catch (err) {
     log.warn(`Apply pending inherited db failed (non-fatal): ${String(err)}`)
@@ -1066,6 +1130,11 @@ async function initializeApp(): Promise<void> {
   registerAllIpcHandlers()
   registerAppUnreadBadgeIpc()
   registerBrowserPanelDevtoolsIpc()
+
+  // 2.01 事件循环阻塞监测（诊断插桩）：registerAllIpcHandlers 内部已完成
+  // initFileLogger，此后 profile 落盘目录可解析。定位「鼠标变忙碌圈」类
+  // 主进程间歇卡顿根因后移除。SPARK_DISABLE_LOOP_MONITOR=1 可关闭。
+  startEventLoopMonitor(app)
 
   // 2.05 初始化 Cloud Auth（对接 spark-edugen/edu-server）
   // 默认 base URL：生产环境 https://spark.yiqibyte.com/；本地开发可通过
@@ -1383,7 +1452,7 @@ function setupApplicationMenu(): void {
 
 if (ownsSingleInstanceLock) {
   // Electron 生命周期：所有窗口就绪时初始化应用
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // 必须在 createWindow() 之前注册协议 handler，
     // 否则首次加载的 HTML 里的 <img src="safe-file://..."> 会得到 ERR_UNKNOWN_URL_SCHEME
     registerSafeFileProtocol()
@@ -1392,10 +1461,21 @@ if (ownsSingleInstanceLock) {
     // 注册应用菜单，使 F12 切换 DevTools 等快捷键生效
     setupApplicationMenu()
 
-    initializeApp().catch((err) => {
-      log.error(`Failed to initialize app: ${String(err)}`)
-      requestApplicationQuit('initialization-failed')
-    })
+    try {
+      await showStartupGuidanceWindow()
+    } catch (err) {
+      log.warn(`Failed to show startup guidance window (non-fatal): ${String(err)}`)
+    }
+
+    void initializeApp()
+      .then(() => {
+        initializationReady = true
+      })
+      .catch((err) => {
+        closeStartupGuidanceWindow()
+        log.error(`Failed to initialize app: ${String(err)}`)
+        requestApplicationQuit('initialization-failed')
+      })
 
     // macOS：点击 Dock 图标 / Cmd-Tab 等激活应用。
     // - 所有窗口都不可见：恢复应用内最后聚焦的窗口，没有可用窗口时回退到主窗口。

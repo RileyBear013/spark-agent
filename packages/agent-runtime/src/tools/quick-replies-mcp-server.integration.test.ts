@@ -149,6 +149,29 @@ describe('quick-replies MCP server', () => {
     })
   })
 
+  it('normalizes optional HTML height without rejecting otherwise valid content', async () => {
+    const cases = [
+      { input: 240.6, expected: 241 },
+      { input: '360px', expected: 360 },
+      { input: 80, expected: 120 },
+      { input: 1200, expected: 800 },
+      { input: 'auto', expected: 400 },
+    ]
+
+    for (const item of cases) {
+      const response = await rpc.call('tools/call', {
+        name: 'render_html',
+        arguments: { html: '<main>有效内容</main>', height: item.input },
+      })
+
+      expect(JSON.parse(response.content[0].text)).toMatchObject({
+        accepted: true,
+        height: item.expected,
+        html: '<main>有效内容</main>',
+      })
+    }
+  })
+
   it('exposes a diagram renderer for markmap and mermaid with bounded source', async () => {
     const response = await rpc.call('tools/list')
 

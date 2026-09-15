@@ -67,6 +67,64 @@ describe('buildFeishuCard', () => {
 })
 
 describe('remote command coverage', () => {
+  it('keeps the Telegram callback source message ID for in-place pagination', () => {
+    expect(
+      parseWebhookBody('telegram', {
+        callback_query: {
+          id: 'callback-1',
+          data: '/sessions --page 3',
+          from: { id: 9, first_name: 'Tester' },
+          message: { message_id: 88, chat: { id: 42 } },
+        },
+      }),
+    ).toMatchObject({
+      kind: 'message',
+      externalId: '42',
+      text: '/sessions --page 3',
+      messageId: 'telegram:callback:callback-1',
+      editMessageId: 88,
+    })
+  })
+
+  it('edits the callback message instead of sending another pagination message', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{"ok":true}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const service = new RemoteConnectionService({ get: () => null, set: () => undefined } as never)
+    const connection = service.createBotDraft('telegram').connection
+    connection.credentials.botToken = 'test-token'
+    const sender = service as unknown as {
+      sendTelegramMessage: (
+        connection: RemoteConnectionConfig,
+        externalId: string,
+        message: {
+          title: string
+          text: string
+          actions: Array<{ label: string; command: string }>
+          editMessageId: number
+        },
+      ) => Promise<void>
+    }
+
+    await sender.sendTelegramMessage(connection, '42', {
+      title: '主机会话 · 全部状态',
+      text: '共 393 项 · 第 3/66 页',
+      actions: [{ label: '下一页 ›', command: '/sessions --page 4' }],
+      editMessageId: 88,
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'https://api.telegram.org/bottest-token/editMessageText',
+    )
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      chat_id: '42',
+      message_id: 88,
+      reply_markup: {
+        inline_keyboard: [[{ text: '下一页 ›', callback_data: '/sessions --page 4' }]],
+      },
+    })
+  })
+
   it('parses Feishu image-only webhook events into image attachments', () => {
     expect(
       parseWebhookBody('feishu', {
@@ -594,5 +652,61 @@ describe('remote command coverage', () => {
     const bound = service.save({ ...draft, defaultSessionId: 'session-1' })
     const unbound = service.save({ ...bound, defaultSessionId: null })
     expect(unbound.defaultSessionId).toBeUndefined()
+  })
+
+  it('persists separate chat defaults and rejects a second chat using the same session', () => {
+    let stored: unknown = null
+    const settings = {
+      get: () => stored,
+      set: (_category: string, _key: string, value: unknown) => {
+        stored = value
+      },
+    }
+    const service = new RemoteConnectionService(settings as never)
+    const draft = service.createBotDraft('telegram').connection
+    service.save({
+      ...draft,
+      defaultSessionId: 'legacy-session',
+      allowedChatIds: ['chat-a', 'chat-b'],
+    })
+    expect(service.ensureRouteBinding(draft.id, 'chat-a').defaultSessionId).toBeUndefined()
+    expect(service.ensureRouteBinding(draft.id, 'chat-b').defaultSessionId).toBeUndefined()
+    service.updateRouteDefaults(draft.id, 'chat-a', {
+      defaultSessionId: 'session-a',
+      defaultModelId: 'model-a',
+    })
+    expect(() =>
+      service.updateRouteDefaults(draft.id, 'chat-b', {
+        defaultSessionId: 'session-a',
+      }),
+    ).toThrow('已绑定到其他远程聊天')
+    service.updateRouteDefaults(draft.id, 'chat-b', {
+      defaultSessionId: 'session-b',
+      defaultModelId: 'model-b',
+    })
+    const reloaded = new RemoteConnectionService(settings as never)
+    expect(reloaded.ensureRouteBinding(draft.id, 'chat-a')).toMatchObject({
+      defaultSessionId: 'session-a',
+      defaultModelId: 'model-a',
+    })
+    expect(reloaded.ensureRouteBinding(draft.id, 'chat-b')).toMatchObject({
+      defaultSessionId: 'session-b',
+      defaultModelId: 'model-b',
+    })
+  })
+
+  it('migrates a legacy default session only for its sole known chat', () => {
+    let stored: unknown = null
+    const settings = {
+      get: () => stored,
+      set: (_category: string, _key: string, value: unknown) => {
+        stored = value
+      },
+    }
+    const service = new RemoteConnectionService(settings as never)
+    const draft = service.createBotDraft('telegram').connection
+    service.save({ ...draft, defaultSessionId: 'legacy-session', allowedChatIds: ['chat-a'] })
+    expect(service.ensureRouteBinding(draft.id, 'chat-a').defaultSessionId).toBe('legacy-session')
+    expect(service.ensureRouteBinding(draft.id, 'chat-b').defaultSessionId).toBeUndefined()
   })
 })

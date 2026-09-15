@@ -32,11 +32,28 @@ export class SkillService {
     return this.repo.list(params).map(toSkillItem)
   }
 
-  createSkill(params: { id: string; scope: string; name: string; version: string; rootPath: string; manifestJson: string; enabled?: boolean }): SkillItem {
+  createSkill(params: {
+    id: string
+    scope: string
+    name: string
+    version: string
+    rootPath: string
+    manifestJson: string
+    enabled?: boolean
+  }): SkillItem {
     return toSkillItem(this.repo.create(params))
   }
 
-  updateSkill(id: string, fields: { name?: string; version?: string; rootPath?: string; manifestJson?: string; enabled?: boolean }): SkillItem {
+  updateSkill(
+    id: string,
+    fields: {
+      name?: string
+      version?: string
+      rootPath?: string
+      manifestJson?: string
+      enabled?: boolean
+    },
+  ): SkillItem {
     const row = this.repo.update(id, fields)
     if (row == null) throw new Error(`Skill not found: ${id}`)
     return toSkillItem(row)
@@ -63,9 +80,7 @@ export class SkillService {
   pruneDuplicateLinkedSkills(): number {
     const rows = this.repo.list()
     const nonLinkedNames = new Set(
-      rows
-        .filter((r) => !r.id.startsWith('local:linked:'))
-        .map((r) => r.name.trim().toLowerCase()),
+      rows.filter((r) => !r.id.startsWith('local:linked:')).map((r) => r.name.trim().toLowerCase()),
     )
     const seenLinked = new Set<string>()
     let removed = 0
@@ -96,9 +111,15 @@ export class SkillService {
 
   importLocalDirectory(directoryPath: string, source?: LocalSkillSource): SkillItem {
     const payload = importLocalSkillDirectory(directoryPath, source)
-    const existing = this.repo.get(payload.id) ?? this.repo.list().find((row) => row.root_path === payload.rootPath)
+    const existing = this.repo.get(payload.id) ?? this.repo.getByRootPath(payload.rootPath)
     if (existing != null) {
-      const fields: { name: string; version: string; rootPath: string; manifestJson: string; enabled?: boolean } = {
+      const fields: {
+        name: string
+        version: string
+        rootPath: string
+        manifestJson: string
+        enabled?: boolean
+      } = {
         name: payload.name,
         version: payload.version,
         rootPath: payload.rootPath,
@@ -120,7 +141,13 @@ export class SkillService {
     const payload = importLocalSkillFile(filePath)
     const existing = this.repo.get(payload.id)
     if (existing != null) {
-      const fields: { name: string; version: string; rootPath: string; manifestJson: string; enabled?: boolean } = {
+      const fields: {
+        name: string
+        version: string
+        rootPath: string
+        manifestJson: string
+        enabled?: boolean
+      } = {
         name: payload.name,
         version: payload.version,
         rootPath: payload.rootPath,
@@ -135,7 +162,11 @@ export class SkillService {
     return toSkillItem(this.repo.create(payload))
   }
 
-  importBatchLocal(candidates: Array<{ rootPath: string; source: LocalSkillSource }>): { skills: SkillItem[]; failed: number; errors: string[] } {
+  importBatchLocal(candidates: Array<{ rootPath: string; source: LocalSkillSource }>): {
+    skills: SkillItem[]
+    failed: number
+    errors: string[]
+  } {
     const skills: SkillItem[] = []
     const errors: string[] = []
     for (const c of candidates) {
@@ -181,7 +212,8 @@ export class SkillService {
    * 搜索本地 Skill（内置 + 已安装）
    */
   searchSkills(query: string): SkillItem[] {
-    return this.loader.search(query)
+    return this.loader
+      .search(query)
       .map((info) => info.dbRecord ?? this.getOrCreateBuiltinRecord(info.definition?.id ?? ''))
       .filter((item): item is SkillItem => item != null)
   }
@@ -191,7 +223,7 @@ export class SkillService {
    */
   buildSkillSystemPrompt(skillId: string, userParams: Record<string, unknown> = {}): string | null {
     return buildSkillSystemPrompt(
-      this.loader.getSkill(skillId)?.definition ?? {} as SkillDefinition,
+      this.loader.getSkill(skillId)?.definition ?? ({} as SkillDefinition),
       userParams,
     )
   }
@@ -256,7 +288,10 @@ export class SkillService {
           }
         } catch (err) {
           // 内置技能加载失败不应阻塞启动，记录日志即可
-          console.warn(`[SkillService] Failed to load bundled skill from ${candidate.rootPath}:`, err)
+          console.warn(
+            `[SkillService] Failed to load bundled skill from ${candidate.rootPath}:`,
+            err,
+          )
         }
       }
     }

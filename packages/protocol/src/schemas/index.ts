@@ -389,6 +389,11 @@ export const FilePrepareImagePreviewRequestSchema = z.object({
   sourcePath: z.string().min(1),
 })
 
+export const FilePrepareMediaInputRequestSchema = z.object({
+  sourcePath: z.string().min(1),
+  kind: z.enum(['image', 'video']),
+})
+
 export const FilePrepareSessionImagesRequestSchema = z.object({
   sourcePaths: z.array(z.string().min(1).max(4000)).max(20),
 })
@@ -1164,6 +1169,7 @@ export const IpcSchemaRegistry = {
   'file:save-pasted-text': FileSavePastedTextRequestSchema,
   'file:save-pasted-media': FileSavePastedMediaRequestSchema,
   'file:prepare-image-preview': FilePrepareImagePreviewRequestSchema,
+  'file:prepare-media-input': FilePrepareMediaInputRequestSchema,
   'file:prepare-session-images': FilePrepareSessionImagesRequestSchema,
   'file:stat-kind': FileStatKindRequestSchema,
   'file:trash': FileTrashRequestSchema,

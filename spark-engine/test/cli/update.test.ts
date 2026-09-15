@@ -567,7 +567,8 @@ describe('spark update — apply transaction (real npm prefix)', () => {
           cwd: test.cwd,
         },
       )
-      expect(again.stdout, `code=${again.code} stderr=${again.stderr}`).toContain('up to date')
+      expect(again.code, `stdout=${again.stdout} stderr=${again.stderr}`).toBe(1)
+      expect(await prefixSparkVersion(test)).toBe('0.0.9')
     },
     240_000,
   )

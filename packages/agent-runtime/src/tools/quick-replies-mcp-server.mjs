@@ -41,6 +41,20 @@ function normalizeReplies(input) {
   return { replies }
 }
 
+function normalizeHtmlHeight(value) {
+  if (typeof value === 'undefined') return DEFAULT_HTML_HEIGHT
+
+  const numericValue =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\s*\d+(?:\.\d+)?(?:px)?\s*$/i.test(value)
+        ? Number.parseFloat(value)
+        : Number.NaN
+
+  if (!Number.isFinite(numericValue)) return DEFAULT_HTML_HEIGHT
+  return Math.min(MAX_HTML_HEIGHT, Math.max(MIN_HTML_HEIGHT, Math.round(numericValue)))
+}
+
 const tool = {
   name: 'suggest_replies',
   description:
@@ -145,17 +159,6 @@ function normalizeHtml(input) {
       reason: `HTML title must not exceed ${MAX_HTML_TITLE_LENGTH} characters`,
     }
   }
-  if (
-    typeof input.height !== 'undefined' &&
-    (!Number.isInteger(input.height) ||
-      input.height < MIN_HTML_HEIGHT ||
-      input.height > MAX_HTML_HEIGHT)
-  ) {
-    return {
-      accepted: false,
-      reason: `HTML height must be an integer between ${MIN_HTML_HEIGHT} and ${MAX_HTML_HEIGHT}`,
-    }
-  }
   const forbidden = html.match(/<(iframe|form|object|embed|base)\b/i)
   if (forbidden != null) {
     return { accepted: false, reason: `HTML content cannot contain ${forbidden[1]} tags` }
@@ -167,7 +170,9 @@ function normalizeHtml(input) {
     accepted: true,
     html,
     title: typeof input.title === 'string' && input.title.trim() ? input.title.trim() : 'HTML 内容',
-    height: input.height ?? DEFAULT_HTML_HEIGHT,
+    // height 只是会话内预览的展示提示，不能让合法 HTML 因模型生成了小数、
+    // CSS px 字符串或越界值而整体渲染失败。
+    height: normalizeHtmlHeight(input.height),
     warnings,
   }
 }

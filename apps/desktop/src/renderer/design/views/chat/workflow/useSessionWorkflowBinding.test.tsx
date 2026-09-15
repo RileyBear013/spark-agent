@@ -10,6 +10,7 @@ const harness = vi.hoisted(() => ({
   setBinding: vi.fn(),
   listWorkflows: vi.fn(),
   abandonRun: vi.fn(),
+  streamSubscriptions: new Map<string, (payload: unknown) => void>(),
 }))
 
 vi.mock('../../../hooks/useIpc', () => ({
@@ -25,7 +26,9 @@ vi.mock('../../../hooks/useIpc', () => ({
     loading: false,
     error: null,
   }),
-  useIpcStream: vi.fn(),
+  useIpcStream: (channel: string, callback: (payload: unknown) => void) => {
+    harness.streamSubscriptions.set(channel, callback)
+  },
 }))
 
 import { useSessionWorkflowBinding } from './useSessionWorkflowBinding'
@@ -51,6 +54,7 @@ describe('useSessionWorkflowBinding', () => {
     harness.setBinding.mockReset()
     harness.listWorkflows.mockReset().mockResolvedValue({ workflows: [] })
     harness.abandonRun.mockReset()
+    harness.streamSubscriptions.clear()
     latestAbandon = null
   })
 
@@ -73,6 +77,28 @@ describe('useSessionWorkflowBinding', () => {
 
     await act(async () => sessionA.resolve(makeState('session-a')))
     expect(container.textContent).toBe('session-b')
+  })
+
+  it('reloads when the sessionWorkflowBinding settings flags change', async () => {
+    harness.getBinding.mockResolvedValue(makeState('session-a'))
+    await act(async () => root.render(<Probe sessionId="session-a" />))
+    expect(harness.getBinding).toHaveBeenCalledTimes(1)
+
+    const onConfigChanged = harness.streamSubscriptions.get('stream:config:changed')
+    expect(onConfigChanged).toBeDefined()
+
+    // 设置页灰度开关变更：立即重取 binding + features。
+    await act(async () =>
+      onConfigChanged?.({ scope: 'settings', action: 'update', id: 'sessionWorkflowBinding' }),
+    )
+    expect(harness.getBinding).toHaveBeenCalledTimes(2)
+
+    // 其他分类或其他 scope 的配置变更不触发。
+    await act(async () =>
+      onConfigChanged?.({ scope: 'settings', action: 'update', id: 'telemetry' }),
+    )
+    await act(async () => onConfigChanged?.({ scope: 'provider', action: 'update' }))
+    expect(harness.getBinding).toHaveBeenCalledTimes(2)
   })
 
   it('abandons the failed run with the observed generation and refreshes on conflict', async () => {

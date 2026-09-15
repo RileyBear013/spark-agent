@@ -102,6 +102,9 @@ const CanvasWorkflowLibraryView = React.lazy(async () => ({
 const CanvasPromptLibraryView = React.lazy(async () => ({
   default: (await import('./design/views/canvas/CanvasPromptLibraryView')).CanvasPromptLibraryView,
 }))
+const QuickCreateView = React.lazy(async () => ({
+  default: (await import('./design/views/canvas/QuickCreateView')).QuickCreateView,
+}))
 const CanvasVideoTasksView = React.lazy(async () => ({
   default: (await import('./design/views/canvas/CanvasVideoTasksView')).CanvasVideoTasksView,
 }))
@@ -210,6 +213,7 @@ const SYSTEM_NOTIFICATION_VIEW_TARGETS = new Set<ViewId>([
   'canvas',
   'canvas-workflows',
   'canvas-prompts',
+  'quick-create',
   'canvas-video-tasks',
   'scheduled-tasks',
   'skills',
@@ -349,6 +353,11 @@ function FloatingSidebar({ onNewTask }: { onNewTask: () => void }) {
   const handleOpenCanvasPromptLibrary = useCallback(() => {
     setTweak('workspaceMode', 'canvas')
     setTweak('view', 'canvas-prompts')
+  }, [setTweak])
+
+  const handleOpenQuickCreate = useCallback(() => {
+    setTweak('workspaceMode', 'canvas')
+    setTweak('view', 'quick-create')
   }, [setTweak])
 
   const handleOpenCanvasVideoTasks = useCallback(() => {
@@ -882,6 +891,16 @@ function FloatingSidebar({ onNewTask }: { onNewTask: () => void }) {
                 <Icons.Book size={16} />
               </span>
               <span className="nav-label">{tr('nav.canvas.promptLibrary')}</span>
+            </button>
+            <button
+              className={`nav-item${t.view === 'quick-create' ? ' active' : ''}`}
+              onClick={handleOpenQuickCreate}
+              title={tr('nav.canvas.quickCreate')}
+            >
+              <span className="nav-icon">
+                <Icons.Wand size={16} />
+              </span>
+              <span className="nav-label">{tr('nav.canvas.quickCreate')}</span>
             </button>
             <button
               className={`nav-item${t.view === 'canvas-video-tasks' ? ' active' : ''}`}
@@ -1942,6 +1961,8 @@ function Shell() {
         return <CanvasWorkflowLibraryView />
       case 'canvas-prompts':
         return <CanvasPromptLibraryView />
+      case 'quick-create':
+        return <QuickCreateView />
       case 'canvas-video-tasks':
         return <CanvasVideoTasksView />
       case 'scheduled-tasks':
@@ -2005,6 +2026,7 @@ function Shell() {
     t.view === 'canvas' ||
     t.view === 'canvas-workflows' ||
     t.view === 'canvas-prompts' ||
+    t.view === 'quick-create' ||
     t.view === 'canvas-video-tasks'
   // Keep the shared drag strip, but allow full-bleed views to extend their
   // surface into it. This preserves the native-window hit area while avoiding

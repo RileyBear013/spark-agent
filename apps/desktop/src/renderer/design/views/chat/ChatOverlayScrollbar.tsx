@@ -10,13 +10,17 @@ import {
   EMPTY_CHAT_OVERLAY_SCROLL_METRICS,
   type ChatOverlayScrollMetrics,
 } from './chat-overlay-scrollbar-metrics'
+import { isUpwardScrollbarKey, isUpwardScrollbarMove } from './overlay-scrollbar-user-intent'
 
 export function ChatOverlayScrollbar({
   scrollRef,
   controlsId,
+  onUserScrollIntentUp,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>
   controlsId: string
+  /** 用户通过滚动条产生「向上滚动」意图（上移拖拽 / 点击轨道上半区 / 向上按键）时触发。 */
+  onUserScrollIntentUp?: () => void
 }) {
   const trackRef = useRef<HTMLDivElement>(null)
   const [metrics, setMetrics] = useState<ChatOverlayScrollMetrics>(
@@ -102,7 +106,9 @@ export function ChatOverlayScrollbar({
             delta,
         ),
       )
+      const prevScrollTop = element.scrollTop
       element.scrollTop = (nextTop / dragTravelRef.current) * dragMaxScrollTopRef.current
+      if (isUpwardScrollbarMove(prevScrollTop, element.scrollTop)) onUserScrollIntentUp?.()
     }
 
     const stopDragging = () => {
@@ -117,7 +123,7 @@ export function ChatOverlayScrollbar({
       window.removeEventListener('pointerup', stopDragging)
       window.removeEventListener('pointercancel', stopDragging)
     }
-  }, [dragging, scrollRef])
+  }, [dragging, scrollRef, onUserScrollIntentUp])
 
   const handleTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest('.chat-overlay-scrollbar-thumb')) return
@@ -131,7 +137,9 @@ export function ChatOverlayScrollbar({
       0,
       Math.min(1, (event.clientY - rect.top - metrics.thumbHeight / 2) / travel),
     )
+    const prevScrollTop = element.scrollTop
     element.scrollTop = ratio * metrics.maxScrollTop
+    if (isUpwardScrollbarMove(prevScrollTop, element.scrollTop)) onUserScrollIntentUp?.()
   }
 
   const handleThumbPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -148,6 +156,7 @@ export function ChatOverlayScrollbar({
     const element = scrollRef.current
     if (!element) return
 
+    if (isUpwardScrollbarKey(event.key)) onUserScrollIntentUp?.()
     const page = Math.max(48, element.clientHeight * 0.9)
     switch (event.key) {
       case 'ArrowUp':
