@@ -28,6 +28,7 @@ import {
   shell,
 } from 'electron'
 import { join } from 'path'
+import { existsSync } from 'node:fs'
 import { MAIN_WINDOW_MIN_WIDTH } from '../window-sizing.js'
 
 // ─── Broken pipe guard (EPIPE / EIO) ─────────────────────────────────────────
@@ -134,7 +135,10 @@ import { registerSnapshotProtocol } from './services/computer-use/SnapshotProtoc
 import { registerPrivilegedProtocolSchemes } from './services/PrivilegedProtocolSchemes.js'
 import { isWebviewSourceAllowed, openExternalUrlSafely } from './services/ExternalUrlPolicy.js'
 import {
+  DEFAULT_BACKUP_MAX_AGE_DAYS,
+  DEFAULT_MAX_DATABASE_BACKUPS,
   ensurePreMigrationBackup,
+  pruneDatabaseBackups,
   restoreDatabaseBackup,
 } from './services/DatabaseBackupService.js'
 import {
@@ -143,10 +147,14 @@ import {
 } from './services/ProductionDbInheritService.js'
 import { installSingleInstanceLock } from './single-instance.js'
 import { startEventLoopMonitor } from './event-loop-monitor.js'
-import { buildStartupGuidanceDataUrl, resolveStartupGuidanceLocale } from './startup-guidance.js'
+import {
+  buildStartupGuidanceDataUrl,
+  resolveStartupGuidanceLocale,
+  type StartupGuidanceUpdate,
+} from './startup-guidance.js'
 import { getDatabase } from './db.js'
 import { getRecentSessionsForTray } from './ipc/index.js'
-import { createLogger } from '@spark/shared'
+import { createLogger, initFileLogger } from '@spark/shared'
 import type { UpdateInfo, UpdateStatus } from '@spark/protocol'
 import { ProviderService, resolveProviderApiKey, SettingsService } from '@spark/agent-runtime'
 import { ProviderProfileRepository, SettingsRepository } from '@spark/storage'
@@ -736,7 +744,11 @@ function buildNativeSplashOptions(isDarwin: boolean): {
   return { backgroundColor: pickWindowBg() }
 }
 
-async function showStartupGuidanceWindow(): Promise<void> {
+async function showStartupGuidanceWindow(options: {
+  migrationTotal?: number
+  preflightFallback?: boolean
+}): Promise<void> {
+  if (startupGuidanceWindow != null && !startupGuidanceWindow.isDestroyed()) return
   const win = new BrowserWindow({
     title: 'SparkWork',
     width: 520,
@@ -763,13 +775,33 @@ async function showStartupGuidanceWindow(): Promise<void> {
   const dataUrl = buildStartupGuidanceDataUrl({
     locale: resolveStartupGuidanceLocale(app.getLocale()),
     version: app.getVersion(),
+    ...(options.migrationTotal != null ? { migrationTotal: options.migrationTotal } : {}),
+    ...(options.preflightFallback != null ? { preflightFallback: options.preflightFallback } : {}),
   })
-  await win.loadURL(dataUrl)
+  try {
+    await win.loadURL(dataUrl)
+  } catch (error) {
+    if (!win.isDestroyed()) win.destroy()
+    throw error
+  }
   if (win.isDestroyed()) return
   win.center()
   win.show()
   startupGuidanceShownAt = Date.now()
-  log.info('[startup-guidance] startup window shown')
+  log.warn(
+    `[startup-guidance] database upgrade window shown; migrations=${options.migrationTotal ?? 'unknown'}; preflightFallback=${options.preflightFallback === true}`,
+  )
+}
+
+function updateStartupGuidanceWindow(update: StartupGuidanceUpdate): void {
+  const win = startupGuidanceWindow
+  if (win == null || win.isDestroyed()) return
+  const script = `window.__sparkUpdateStartupGuidance?.(${JSON.stringify(update)})`
+  void win.webContents.executeJavaScript(script, true).catch((error) => {
+    if (!win.isDestroyed()) {
+      log.warn(`[startup-guidance] failed to update progress: ${String(error)}`)
+    }
+  })
 }
 
 function closeStartupGuidanceWindow(): void {
@@ -941,6 +973,7 @@ async function initializeApp(): Promise<void> {
 
   // 1. 初始化数据库
   const dbPath = getDatabasePath()
+  const backupRoot = join(app.getPath('userData'), 'backups', 'database')
   // 消息通知轮询服务（auth 初始化完成后赋值启动；提前声明供数据库 try 块内注册的退出清理引用）
   let notificationService: NotificationService | null = null
   let sparkCliBridge: SparkCliBridge | null = null
@@ -962,26 +995,83 @@ async function initializeApp(): Promise<void> {
   } catch (err) {
     log.warn(`Apply pending inherited db failed (non-fatal): ${String(err)}`)
   }
-  let databaseBackup: Awaited<ReturnType<typeof ensurePreMigrationBackup>>
-  try {
-    databaseBackup = await ensurePreMigrationBackup({
-      databasePath: dbPath,
-      backupRoot: join(app.getPath('userData'), 'backups', 'database'),
-      appVersion: app.getVersion(),
-    })
-  } catch (error) {
-    log.error(`Failed to create pre-migration database backup: ${String(error)}`)
-    dialog.showErrorBox(
-      'SparkWork 无法创建升级恢复点',
-      '现有数据库无法安全备份，应用将退出且不会执行迁移。请检查磁盘空间和应用数据目录权限后重试。',
+  const databaseExistedBeforeInitialization = existsSync(dbPath)
+  const migrationsDir = is.dev ? undefined : join(process.resourcesPath, 'migrations')
+  const storage = await import('@spark/storage')
+  let databaseBackup: Awaited<ReturnType<typeof ensurePreMigrationBackup>> = null
+  let pendingMigrations: Array<{ version: number; name: string }> = []
+  let migrationPreflightFailed = false
+
+  if (databaseExistedBeforeInitialization) {
+    try {
+      const plan = storage.inspectPendingMigrations(dbPath, migrationsDir)
+      pendingMigrations = plan.pendingMigrations
+      log.info(
+        `[database-upgrade] migration preflight complete; pending=${pendingMigrations.length}; applied=${plan.appliedMigrations}; total=${plan.totalMigrations}`,
+      )
+    } catch (error) {
+      migrationPreflightFailed = true
+      log.warn(
+        `[database-upgrade] migration preflight failed; using conservative backup path: ${String(error)}`,
+      )
+    }
+  } else {
+    log.info('[database-upgrade] new database; migrations will run without a recovery snapshot')
+  }
+
+  const requiresUpgradePreparation =
+    databaseExistedBeforeInitialization &&
+    (migrationPreflightFailed || pendingMigrations.length > 0)
+  if (requiresUpgradePreparation) {
+    try {
+      await showStartupGuidanceWindow(
+        migrationPreflightFailed
+          ? { preflightFallback: true }
+          : { migrationTotal: pendingMigrations.length },
+      )
+    } catch (error) {
+      log.warn(`Failed to show database upgrade window (non-fatal): ${String(error)}`)
+    }
+
+    try {
+      databaseBackup = await ensurePreMigrationBackup({
+        databasePath: dbPath,
+        backupRoot,
+        appVersion: app.getVersion(),
+        onProgress: ({ percent }) => {
+          updateStartupGuidanceWindow({ stage: 'backup', backupPercent: percent })
+        },
+      })
+      updateStartupGuidanceWindow({ stage: 'backup', backupPercent: 100 })
+      log.warn(
+        `[database-upgrade] recovery snapshot ready; directory=${databaseBackup?.directory ?? 'none'}; reused=${databaseBackup?.createdThisStartup === false}`,
+      )
+    } catch (error) {
+      log.error(`Failed to create pre-migration database backup: ${String(error)}`)
+      dialog.showErrorBox(
+        'SparkWork 无法创建升级恢复点',
+        '现有数据库无法安全备份，应用将退出且不会执行迁移。请检查磁盘空间和应用数据目录权限后重试。',
+      )
+      throw error
+    }
+  } else if (databaseExistedBeforeInitialization) {
+    log.info(
+      '[database-upgrade] no pending migrations; skipped recovery snapshot and upgrade window',
     )
-    throw error
   }
 
   try {
-    const { createDatabase } = await import('@spark/storage')
-    const migrationsDir = is.dev ? undefined : join(process.resourcesPath, 'migrations')
-    const db = createDatabase(dbPath, migrationsDir)
+    const db = storage.createDatabase(dbPath, migrationsDir, {
+      onProgress: ({ current, total, migration }) => {
+        updateStartupGuidanceWindow({
+          stage: 'migration',
+          migrationCurrent: current,
+          migrationTotal: total,
+          migrationName: migration.name,
+        })
+      },
+    })
+    updateStartupGuidanceWindow({ stage: 'launch' })
     setDatabaseInstance(db)
     initializeComputerUseServices(db, {
       shortcutRegistrar: globalShortcut,
@@ -1148,7 +1238,7 @@ async function initializeApp(): Promise<void> {
     await getAuthService().start({
       // 全新安装没有任何旧会话可迁移，不应为了探测不存在的条目访问系统钥匙串。
       // 已有数据库的升级安装仍允许读取一次旧 keytar 会话并写入加密备份。
-      allowLegacyKeytarFallback: databaseBackup != null,
+      allowLegacyKeytarFallback: databaseExistedBeforeInitialization,
     })
     getPlatformModelService()
     getAuthService().addLoginHook(async () => processPendingPlatformRedeemCodes())
@@ -1209,6 +1299,22 @@ async function initializeApp(): Promise<void> {
   // 3. 创建主窗口
   createWindow()
   createTray()
+
+  // 备份回收与新备份创建解耦：即使本版本没有 migration，也会在正常启动后按
+  // 14 天 / 最多 2 份策略清理历史恢复点。异步尽力执行，不阻塞主窗口可用。
+  setTimeout(() => {
+    void pruneDatabaseBackups(backupRoot, {
+      maxBackups: DEFAULT_MAX_DATABASE_BACKUPS,
+      maxAgeDays: DEFAULT_BACKUP_MAX_AGE_DAYS,
+      now: new Date(),
+    })
+      .then(() => {
+        log.info('[database-backup] background retention cleanup completed')
+      })
+      .catch((error) => {
+        log.warn(`[database-backup] background retention cleanup failed: ${String(error)}`)
+      })
+  }, 5_000)
 
   // 3.1 安装内置浏览器 webview 的 popup 路由（window.open → 新 tab）
   installWebviewPopupRouter()
@@ -1458,14 +1564,16 @@ if (ownsSingleInstanceLock) {
     registerSafeFileProtocol()
     registerCapabilityAssetProtocol()
 
+    // 数据库预检与升级发生在 IPC 注册之前；提前启用统一文件日志，确保备份进度、
+    // 保守回退和迁移失败都有 main.log 证据。registerAllIpcHandlers 会幂等刷新状态。
+    try {
+      initFileLogger(app.getPath('logs'))
+    } catch (error) {
+      log.warn(`Failed to initialize startup file logger: ${String(error)}`)
+    }
+
     // 注册应用菜单，使 F12 切换 DevTools 等快捷键生效
     setupApplicationMenu()
-
-    try {
-      await showStartupGuidanceWindow()
-    } catch (err) {
-      log.warn(`Failed to show startup guidance window (non-fatal): ${String(err)}`)
-    }
 
     void initializeApp()
       .then(() => {

@@ -30,6 +30,122 @@ export type SqliteDatabase = BetterSqlite3.Database
 
 const log = createLogger('storage:database')
 
+export interface DatabaseMigration {
+  version: number
+  name: string
+}
+
+export interface DatabaseMigrationPlan {
+  totalMigrations: number
+  appliedMigrations: number
+  pendingMigrations: DatabaseMigration[]
+}
+
+export interface DatabaseMigrationProgress {
+  phase: 'applying' | 'applied'
+  current: number
+  total: number
+  migration: DatabaseMigration
+}
+
+export interface RunMigrationsOptions {
+  onProgress?: (progress: DatabaseMigrationProgress) => void
+}
+
+interface MigrationFile extends DatabaseMigration {
+  path: string
+}
+
+function defaultMigrationsDir(): string {
+  const currentDir =
+    typeof __dirname !== 'undefined' ? __dirname : fileURLToPath(new URL('.', import.meta.url))
+  return join(currentDir, '..', 'migrations')
+}
+
+function extractMigrationVersion(filename: string): number {
+  const versionText = basename(filename).match(/^(\d+)/)?.[1]
+  if (versionText == null) {
+    throw new Error(`Invalid migration filename: ${filename}. Expected format: {number}_{name}.sql`)
+  }
+  return parseInt(versionText, 10)
+}
+
+function assertUniqueMigrationVersions(files: Array<{ name: string }>): void {
+  const seen = new Map<number, string>()
+  for (const file of files) {
+    const version = extractMigrationVersion(file.name)
+    const existing = seen.get(version)
+    if (existing != null) {
+      throw new Error(
+        `Duplicate migration version ${version}: "${existing}" 与 "${file.name}" 撞号。` +
+          `请把其中一个重命名为未使用的序号。`,
+      )
+    }
+    seen.set(version, file.name)
+  }
+}
+
+function getMigrationFiles(dir = defaultMigrationsDir()): MigrationFile[] {
+  const files = readdirSync(dir)
+    .filter((file) => file.endsWith('.sql'))
+    .sort()
+    .map((name) => ({
+      version: extractMigrationVersion(name),
+      name,
+      path: join(dir, name),
+    }))
+  assertUniqueMigrationVersions(files)
+  return files
+}
+
+function notifyMigrationProgress(
+  onProgress: RunMigrationsOptions['onProgress'],
+  progress: DatabaseMigrationProgress,
+): void {
+  try {
+    onProgress?.(progress)
+  } catch (error) {
+    // 进度展示是旁路能力，观察者异常不能中止或回滚数据库 migration。
+    log.warn(`Migration progress observer failed: ${String(error)}`)
+  }
+}
+
+/**
+ * 只读检查现有数据库还缺哪些 migration。
+ *
+ * 不创建表、不切换 WAL 模式，也不修改 schema；调用方可据此决定是否需要在升级前
+ * 创建恢复点。数据库不存在或无法读取时直接抛错，由上层选择保守备份路径。
+ */
+export function inspectPendingMigrations(
+  dbPath: string,
+  migrationsDir?: string,
+): DatabaseMigrationPlan {
+  const db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true })
+  try {
+    const files = getMigrationFiles(migrationsDir)
+    const migrationsTable = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+      .get() as { name: string } | undefined
+    const appliedVersions = new Set<number>()
+    if (migrationsTable != null) {
+      const rows = db.prepare('SELECT version FROM schema_migrations').all() as Array<{
+        version: number
+      }>
+      for (const row of rows) appliedVersions.add(row.version)
+    }
+    const pendingMigrations = files
+      .filter((file) => !appliedVersions.has(file.version))
+      .map(({ version, name }) => ({ version, name }))
+    return {
+      totalMigrations: files.length,
+      appliedMigrations: files.length - pendingMigrations.length,
+      pendingMigrations,
+    }
+  } finally {
+    db.close()
+  }
+}
+
 /**
  * Spark Agent 数据库实例
  *
@@ -78,7 +194,7 @@ export class SparkDatabase {
    *   - schema_migrations 表跟踪已执行的版本
    *   - 每次 migration 在事务中执行
    */
-  runMigrations(migrationsDir?: string): void {
+  runMigrations(migrationsDir?: string, options: RunMigrationsOptions = {}): void {
     // 确保 schema_migrations 表存在
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -88,32 +204,32 @@ export class SparkDatabase {
       )
     `)
 
-    const dir = migrationsDir ?? this.getDefaultMigrationsDir()
-    const files = this.getMigrationFiles(dir)
+    const files = getMigrationFiles(migrationsDir)
+    const pendingFiles = files.filter((file) => !this.isMigrationApplied(file.version))
 
-    // 防止再次出现"撞号"：两个文件共享同一 version 时，按 version 去重会
-    // 静默跳过其中一个 migration（历史上 028 撞号曾导致 media 表未被创建）。
-    // 这里在启动时直接抛错，把问题暴露在开发期而不是用户机器上。
-    this.assertUniqueVersions(files)
-
-    for (const file of files) {
-      const version = this.extractVersion(file.name)
-      const applied = this.isMigrationApplied(version)
-
-      if (!applied) {
-        if (this.applyMigrationWithCompatibilityHandler(file, version)) {
-          continue
-        }
-        if (this.shouldMarkMigrationAppliedWithoutRunning(version)) {
-          this.recordMigration(version, file.name)
-          log.info(`Migration ${version} already reflected in schema; marked as applied`)
-          continue
-        }
-        this.applyMigration(file, version)
+    for (const [index, file] of pendingFiles.entries()) {
+      const progress = {
+        current: index + 1,
+        total: pendingFiles.length,
+        migration: { version: file.version, name: file.name },
       }
+      notifyMigrationProgress(options.onProgress, { phase: 'applying', ...progress })
+
+      if (this.applyMigrationWithCompatibilityHandler(file, file.version)) {
+        notifyMigrationProgress(options.onProgress, { phase: 'applied', ...progress })
+        continue
+      }
+      if (this.shouldMarkMigrationAppliedWithoutRunning(file.version)) {
+        this.recordMigration(file.version, file.name)
+        log.info(`Migration ${file.version} already reflected in schema; marked as applied`)
+        notifyMigrationProgress(options.onProgress, { phase: 'applied', ...progress })
+        continue
+      }
+      this.applyMigration(file, file.version)
+      notifyMigrationProgress(options.onProgress, { phase: 'applied', ...progress })
     }
 
-    log.info(`Migrations complete. Applied: ${files.length} migration(s)`)
+    log.info(`Migrations complete. Applied this run: ${pendingFiles.length}/${files.length}`)
   }
 
   /**
@@ -130,66 +246,6 @@ export class SparkDatabase {
   }
 
   // ─── Private Helpers ──────────────────────────────────────────────────
-
-  /**
-   * 获取默认 migrations 目录路径
-   *
-   * 返回 packages/storage/migrations/ 的绝对路径
-   */
-  private getDefaultMigrationsDir(): string {
-    // ESM 环境下获取当前文件所在目录
-    const currentDir =
-      typeof __dirname !== 'undefined' ? __dirname : fileURLToPath(new URL('.', import.meta.url))
-    return join(currentDir, '..', 'migrations')
-  }
-
-  /**
-   * 获取 migrations 目录下所有 .sql 文件，按名称排序
-   */
-  private getMigrationFiles(dir: string): Array<{ name: string; path: string }> {
-    const files = readdirSync(dir)
-      .filter((f) => f.endsWith('.sql'))
-      .sort()
-
-    return files.map((name) => ({
-      name,
-      path: join(dir, name),
-    }))
-  }
-
-  /**
-   * 校验所有 migration 文件的 version 唯一。
-   *
-   * schema_migrations 以 version 为主键去重，撞号会导致后出现的同号文件被静默跳过。
-   */
-  private assertUniqueVersions(files: Array<{ name: string }>): void {
-    const seen = new Map<number, string>()
-    for (const file of files) {
-      const version = this.extractVersion(file.name)
-      const existing = seen.get(version)
-      if (existing != null) {
-        throw new Error(
-          `Duplicate migration version ${version}: "${existing}" 与 "${file.name}" 撞号。` +
-            `请把其中一个重命名为未使用的序号。`,
-        )
-      }
-      seen.set(version, file.name)
-    }
-  }
-
-  /**
-   * 从 migration 文件名中提取版本号
-   * @example extractVersion('001_initial_schema.sql') → 1
-   */
-  private extractVersion(filename: string): number {
-    const match = basename(filename).match(/^(\d+)/)
-    if (match == null) {
-      throw new Error(
-        `Invalid migration filename: ${filename}. Expected format: {number}_{name}.sql`,
-      )
-    }
-    return parseInt(match[1]!, 10)
-  }
 
   /**
    * 检查指定版本号的 migration 是否已执行
@@ -321,10 +377,14 @@ export class SparkDatabase {
  * // db 已完成 migration，可直接使用
  * const stmt = db.raw.prepare('SELECT * FROM sessions')
  */
-export function createDatabase(dbPath: string, migrationsDir?: string): SparkDatabase {
+export function createDatabase(
+  dbPath: string,
+  migrationsDir?: string,
+  options: RunMigrationsOptions = {},
+): SparkDatabase {
   const db = new SparkDatabase(dbPath)
   try {
-    db.runMigrations(migrationsDir)
+    db.runMigrations(migrationsDir, options)
     return db
   } catch (error) {
     // 迁移失败时必须先释放 WAL/文件锁，主进程才能安全恢复升级前快照。
