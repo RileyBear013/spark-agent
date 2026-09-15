@@ -11,6 +11,7 @@
  */
 
 import { typedIpcHandle, pushStreamEvent } from './typed-ipc.js'
+import { assertWorkflowGraphValid } from './workflow-graph-guard.js'
 import { MAIN_WINDOW_MIN_WIDTH } from '../../window-sizing.js'
 import { CanvasSnapshotWriteCoordinator } from './canvasSnapshotWriteCoordinator.js'
 import { registerOutcomeRoomIpc } from './registerOutcomeRoomIpc.js'
@@ -173,11 +174,6 @@ import {
   EmbeddingService,
   ensureSessionWorkspaceRootPath,
   NO_PROJECT_WORKSPACE_NAME,
-  detectWorkflowConditionReferenceErrors,
-  detectWorkflowGraphCycles,
-  formatWorkflowConditionReferenceError,
-  formatWorkflowCycleError,
-  normalizeWorkflowGraph,
   SCHEDULED_TASK_SESSION_TITLE_PREFIX,
   HookLegacyMigrationService,
 } from '@spark/agent-runtime'
@@ -8488,19 +8484,6 @@ export function registerAllIpcHandlers(): void {
     return { workflow: workflow != null ? toWorkflowItem(workflow) : null }
   })
 
-  // 保存前环校验：环图在运行时只能以 workflow_deadlock 失败（英文裸 node id 报错），
-  // 这里在持久化前用拓扑排序即时拦截，报错带节点标题便于用户定位。
-  const assertWorkflowGraphValid = (graph: unknown): void => {
-    if (graph == null) return
-    const normalized = normalizeWorkflowGraph(graph as Parameters<typeof normalizeWorkflowGraph>[0])
-    const cycleReports = detectWorkflowGraphCycles(normalized)
-    if (cycleReports.length > 0) throw new Error(formatWorkflowCycleError(cycleReports))
-    const referenceReports = detectWorkflowConditionReferenceErrors(normalized)
-    if (referenceReports.length > 0) {
-      throw new Error(formatWorkflowConditionReferenceError(referenceReports))
-    }
-  }
-
   typedIpcHandle('workflow:create', async (req) => {
     const { graph, ...fields } = req
     assertWorkflowGraphValid(graph)
@@ -8595,7 +8578,7 @@ export function registerAllIpcHandlers(): void {
   })
 
   // ─── Team Registry 信封资产（工作流/Agent/子应用 推拉，M3/M4） ──────────
-  // 放在 team-registry handler 块之后：依赖上方声明的 assertWorkflowGraphValid 闭包
+  // 放在 team-registry handler 块之后：图校验与 workflow:create/update 共用同一实现
   registerTeamAssetIpc({
     assertWorkflowGraphValid,
     refreshAgentRuntime: (agentId, prompt, skillIds, disabledSkillIds) => {
