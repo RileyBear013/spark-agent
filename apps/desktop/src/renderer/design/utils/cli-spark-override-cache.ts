@@ -2,7 +2,11 @@ import type { CliSparkOverride } from '@spark/protocol'
 
 export const CLI_SPARK_OVERRIDE_CACHE_KEY = 'spark-agent:cli-spark-override-cache'
 
-export type CliSparkOverrideCache = Record<string, CliSparkOverride>
+/**
+ * `null` is intentional: it records that the user explicitly chose the
+ * host CLI configuration, instead of treating the entry as "not selected".
+ */
+export type CliSparkOverrideCache = Record<string, CliSparkOverride | null>
 
 export function readCliSparkOverrideCache(): CliSparkOverrideCache {
   if (typeof window === 'undefined') return {}
@@ -13,6 +17,10 @@ export function readCliSparkOverrideCache(): CliSparkOverrideCache {
     if (parsed == null || typeof parsed !== 'object') return {}
     const cache: CliSparkOverrideCache = {}
     for (const [primaryProviderId, value] of Object.entries(parsed)) {
+      if (value === null) {
+        cache[primaryProviderId] = null
+        continue
+      }
       if (value == null || typeof value !== 'object') continue
       const candidate = value as Partial<CliSparkOverride>
       if (
@@ -36,7 +44,7 @@ export function readCliSparkOverrideCache(): CliSparkOverrideCache {
 
 export function rememberCliSparkOverride(
   primaryProviderId: string,
-  override: CliSparkOverride,
+  override: CliSparkOverride | null,
 ): void {
   if (typeof window === 'undefined') return
   try {

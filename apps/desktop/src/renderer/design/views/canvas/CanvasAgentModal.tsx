@@ -1117,6 +1117,7 @@ export function CanvasAgentModal({
       const isHostCliModel =
         isLocalCli && nextModelId === resolveProviderModel(provider, provider.modelIds[0])
       const clearCliSparkOverride = cliSparkOverride != null && (!isLocalCli || isHostCliModel)
+      if (isHostCliModel) rememberCliSparkOverride(provider.id, null)
       if (clearCliSparkOverride) setCliSparkOverride(null)
       setDraftAdapter(nextAdapter)
       setDraftPermissionMode(nextPermissionMode)
@@ -1178,6 +1179,9 @@ export function CanvasAgentModal({
   )
 
   const handleClearCliSparkOverride = useCallback(() => {
+    if (selectedProvider != null && isBuiltInLocalCliProvider(selectedProvider)) {
+      rememberCliSparkOverride(selectedProvider.id, null)
+    }
     if (cliSparkOverride == null) return
     setCliSparkOverride(null)
     if (sessionId != null) {
@@ -1188,7 +1192,7 @@ export function CanvasAgentModal({
         })
         .catch(() => {})
     }
-  }, [cliSparkOverride, sessionId])
+  }, [cliSparkOverride, selectedProvider, sessionId])
 
   const handleChangeSkills = useCallback((skillIds: string[]) => {
     skillSelectionTouchedRef.current = true
