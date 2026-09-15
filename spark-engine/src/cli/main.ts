@@ -22,6 +22,7 @@ import type { SettingsScope } from '../config/settings.js'
 import { executeConfigCommand } from './config-command.js'
 import { executeMcpCommand, type McpAddInput } from './mcp-command.js'
 import { executeMemoryCommand } from './memory-command.js'
+import { executePlanCommand } from './plan-command.js'
 import { executeTodoCommand } from './todo-command.js'
 import { JsonlSessionStore, shortSessionId } from '../events/ledger.js'
 import type { AgentEvent } from '../events/schema.js'
@@ -83,6 +84,9 @@ interface CliOptions {
   readonly memoryType?: string
   readonly memoryConfidence?: string
   readonly memoryAgentId?: string
+  /** `spark plan` command flags. */
+  readonly planBody?: string
+  readonly planSessionId?: string
   /** `spark todo` command flags. */
   readonly todoTitle?: string
   readonly todoStatus?: string
@@ -239,6 +243,27 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       ...(options.todoNotes === undefined ? {} : { notes: options.todoNotes }),
       ...(options.todoLimit === undefined ? {} : { limit: options.todoLimit }),
       all: options.todoAll,
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
+  if (maintenance === 'plan') {
+    if (options.prompt) {
+      process.stderr.write('spark plan does not accept a task prompt.\n')
+      return 2
+    }
+    return executePlanCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      cwd: process.cwd(),
+      dataRoot: defaultSparkHome(),
+      ...(options.planBody === undefined ? {} : { body: options.planBody }),
+      ...(options.planSessionId === undefined ? {} : { sessionId: options.planSessionId }),
       stdout: (text) => {
         process.stdout.write(text)
       },
@@ -566,6 +591,7 @@ function parseCli(argv: readonly string[]): CliOptions {
       name: { type: 'string' },
       description: { type: 'string' },
       body: { type: 'string' },
+      session: { type: 'string' },
       type: { type: 'string' },
       confidence: { type: 'string' },
       agent: { type: 'string' },
@@ -663,6 +689,8 @@ function parseCli(argv: readonly string[]): CliOptions {
       ? {}
       : { memoryDescription: parsed.values.description }),
     ...(parsed.values.body === undefined ? {} : { memoryBody: parsed.values.body }),
+    ...(parsed.values.body === undefined ? {} : { planBody: parsed.values.body }),
+    ...(parsed.values.session === undefined ? {} : { planSessionId: parsed.values.session }),
     ...(parsed.values.type === undefined ? {} : { memoryType: parsed.values.type }),
     ...(parsed.values.confidence === undefined
       ? {}
@@ -1089,6 +1117,12 @@ Usage:
   spark memory search <q>   Search memory summaries
   spark memory recall <id>  Read one complete memory entry
   spark memory save ...     Save a durable memory as Markdown
+  spark plan show [session]  Show the current session execution plan
+  spark plan set [session]   Replace a session plan with --body <markdown>
+  spark plan append [session]
+                            Append Markdown to a session plan
+  spark plan clear [session]
+                            Clear a session plan
   spark todo list            List current project tasks
   spark todo add <title>     Add a pending task
   spark todo update <id>     Update task fields
@@ -1143,6 +1177,7 @@ Options:
       --name <name>         With 'spark memory save': memory title
       --description <text>  With 'spark memory save': compact summary
       --body <markdown>     With 'spark memory save': complete memory body
+      --session <id>        With 'spark plan': session id (defaults to latest session)
       --type <type>         With 'spark memory save': user | feedback | project | reference
       --confidence <0..1>   With 'spark memory save': confidence score
       --agent <id>          With 'spark memory': agent scope profile id

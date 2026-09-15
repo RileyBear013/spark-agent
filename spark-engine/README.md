@@ -197,6 +197,25 @@ The model receives `todo_list` (read-only) and `todo_update` (add/update/complet
 the normal permission policy and are serialized; the JSON file is schema-validated and atomically
 replaced, so malformed data or an interrupted write does not silently become a new task state.
 
+### Session execution plans
+
+The standalone CLI also keeps the active session's execution plan as Markdown at
+`.spark/plans/<session_id>.md`. Plans are intentionally separate from `.spark/todos.json`: a plan
+captures the current turn's steps and decisions, while todos are durable project tasks shared by
+future sessions.
+
+```bash
+spark plan show [session_id]
+spark plan set [session_id] --body "# Plan\n\n1. Inspect\n2. Verify"
+spark plan append [session_id] --body "3. Ship"
+spark plan clear [session_id]
+```
+
+When no session id is given, the CLI uses the most recently updated user session in the current
+directory. The model gets a no-approval `plan` read tool and a serialized, permission-controlled
+`plan_update` write tool with `set`, `append`, and `clear` operations. Plan content is capped at
+256 KiB and written atomically.
+
 ## Model configuration
 
 Spark reads `~/.spark/config.toml` and then project `.spark/config.toml`. Provider credentials are referenced by environment-variable name and are never stored in the config or session snapshot.

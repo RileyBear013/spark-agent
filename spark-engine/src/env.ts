@@ -27,6 +27,8 @@ import { FakeToolExecutor, fakeToolDefinitions } from './tools/fake/tools.js'
 import { VirtualFileSystem } from './tools/fake/virtual-fs.js'
 import { OrderedToolRegistry } from './tools/registry.js'
 import { taskToolDefinition } from './tools/task/definition.js'
+import { planToolDefinitions, PlanToolExecutor } from './tools/plan/tools.js'
+import { PlanStore } from './tools/plan/store.js'
 import { todoToolDefinitions, TodoToolExecutor } from './tools/todo/tools.js'
 import { TodoStore } from './tools/todo/store.js'
 import { webFetchToolDefinition, WebFetchToolExecutor } from './tools/web-fetch.js'
@@ -166,6 +168,7 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
         ...workspaceToolDefinitions,
         ...(memoryEnabled ? memoryToolDefinitions : []),
         ...todoToolDefinitions,
+        ...planToolDefinitions,
         webFetchToolDefinition,
         ...(mcp?.listDefinitions() ?? []),
         taskToolDefinition,
@@ -178,12 +181,14 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
   const disallowedTools = [...(options.disallowedTools ?? []), ...(options.hiddenTools ?? [])]
   const workspaceExecutor = new WorkspaceToolExecutor(options.cwd, options.customEnv)
   const todoExecutor = new TodoToolExecutor(new TodoStore({ cwd: options.cwd, logger }))
+  const planExecutor = new PlanToolExecutor(new PlanStore({ cwd: options.cwd, logger }))
   const webFetchExecutor = new WebFetchToolExecutor(logger)
   const executor = new CompositeToolExecutor(
     workspaceExecutor,
     mcp,
     memoryExecutor,
     todoExecutor,
+    planExecutor,
     webFetchExecutor,
   )
   const hooks = loadHookRunner({

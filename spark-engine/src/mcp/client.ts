@@ -13,6 +13,7 @@ import { withCustomEnvironment } from '../tools/workspace/process.js'
 import { SPARK_ENGINE_VERSION } from '../version.js'
 import type { MemoryToolExecutor } from '../memory/tools.js'
 import type { TodoToolExecutor } from '../tools/todo/tools.js'
+import type { PlanToolExecutor } from '../tools/plan/tools.js'
 import type { WebFetchToolExecutor } from '../tools/web-fetch.js'
 import type { SparkMcpServerConfig, SparkMcpServerMap } from './types.js'
 
@@ -209,6 +210,7 @@ export class CompositeToolExecutor implements ToolExecutor {
     private readonly mcp?: McpToolManager,
     private readonly memory?: MemoryToolExecutor,
     private readonly todo?: TodoToolExecutor,
+    private readonly plan?: PlanToolExecutor,
     private readonly webFetch?: WebFetchToolExecutor,
   ) {}
 
@@ -223,6 +225,7 @@ export class CompositeToolExecutor implements ToolExecutor {
   execute(call: ResolvedToolCall, context: ToolCallContext): Promise<ToolOutcome> {
     if (this.memory?.hasTool(call.name)) return this.memory.execute(call, context)
     if (this.todo?.hasTool(call.name)) return this.todo.execute(call, context)
+    if (this.plan?.hasTool(call.name)) return this.plan.execute(call, context)
     if (this.webFetch?.hasTool(call.name)) return this.webFetch.execute(call, context)
     if (this.mcp?.hasTool(call.name)) return this.mcp.execute(call, context)
     return this.builtIn.execute(call, context)
