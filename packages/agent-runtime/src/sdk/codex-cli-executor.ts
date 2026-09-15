@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { homedir, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent } from '@spark/protocol'
@@ -34,6 +34,7 @@ import { StreamTerminalizer } from './stream-terminalizer.js'
 import type { EngineExecutor } from './engine-executor.js'
 import type { SDKExecutorConfig, SDKMcpServerConfig, SDKTurnAttachment } from './types.js'
 import { buildDefaultGitChildEnvironment } from '../services/git-command.service.js'
+import { resolveCodexHome, withCodexModelCatalog } from './codex-model-catalog.js'
 
 type Listener = (event: AgentEvent) => void
 type EventBase = { id: string; sessionId: string; turnId: string; timestamp: string; seq: number }
@@ -101,14 +102,18 @@ export class CodexCliExecutor implements EngineExecutor {
     config: SDKExecutorConfig,
   ): Promise<void> {
     this.cancelled = false
-    const skillIsolation = resolveCodexSkillIsolation(config.workspaceRootPath)
+    const effectiveConfig = await withCodexModelCatalog(config)
+    const skillIsolation = resolveCodexSkillIsolation(effectiveConfig.workspaceRootPath)
     const tempDir = await mkdtemp(path.join(tmpdir(), 'spark-codex-'))
     if (this.cancelled) {
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined)
       return
     }
     const outputFile = path.join(tempDir, 'last-message.txt')
-    const prompt = buildCodexPrompt(buildCodexGoalPrompt(userMessage, config), config)
+    const prompt = buildCodexPrompt(
+      buildCodexGoalPrompt(userMessage, effectiveConfig),
+      effectiveConfig,
+    )
     let tempProfile: CodexTempProfile | null = null
     const streamTerminalizer = new StreamTerminalizer()
     this.streamTerminalizer = streamTerminalizer
@@ -124,9 +129,9 @@ export class CodexCliExecutor implements EngineExecutor {
       ...makeBase(),
       type: 'user_message',
       content: userMessage,
-      ...(config.attachments != null && config.attachments.length > 0
+      ...(effectiveConfig.attachments != null && effectiveConfig.attachments.length > 0
         ? {
-            attachments: config.attachments.map((attachment) => ({
+            attachments: effectiveConfig.attachments.map((attachment) => ({
               type: attachment.type,
               path: attachment.path,
               name: attachment.name,
@@ -145,19 +150,20 @@ export class CodexCliExecutor implements EngineExecutor {
       type: 'context_usage',
       estimatedTokens: estimateTokens(prompt),
       softLimitTokens:
-        config.contextWindowTokens != null && config.contextWindowTokens > 0
-          ? resolveSoftContextLimitForWindow(config.contextWindowTokens)
-          : resolveSoftContextLimit(config.model),
-      contextWindowTokens: config.contextWindowTokens ?? resolveModelContextWindow(config.model),
+        effectiveConfig.contextWindowTokens != null && effectiveConfig.contextWindowTokens > 0
+          ? resolveSoftContextLimitForWindow(effectiveConfig.contextWindowTokens)
+          : resolveSoftContextLimit(effectiveConfig.model),
+      contextWindowTokens:
+        effectiveConfig.contextWindowTokens ?? resolveModelContextWindow(effectiveConfig.model),
       compacted: false,
     })
     this.emitSkillIsolationWarning(skillIsolation, makeBase)
 
     try {
-      tempProfile = await writeCodexTempProfile(config, skillIsolation)
+      tempProfile = await writeCodexTempProfile(effectiveConfig, skillIsolation)
       if (this.cancelled) return
-      const args = buildCodexArgs(config, outputFile, tempProfile?.name)
-      config.invocationObserver?.({
+      const args = buildCodexArgs(effectiveConfig, outputFile, tempProfile?.name)
+      effectiveConfig.invocationObserver?.({
         transport: 'codex-cli',
         request: {
           command: 'codex',
@@ -167,7 +173,13 @@ export class CodexCliExecutor implements EngineExecutor {
           credentials: '[local-cli configuration]',
         },
       })
-      const result = await this.runCodex(args, prompt, makeBase, config.workspaceRootPath, config)
+      const result = await this.runCodex(
+        args,
+        prompt,
+        makeBase,
+        effectiveConfig.workspaceRootPath,
+        effectiveConfig,
+      )
       if (result.exitCode !== 0) {
         for (const event of streamTerminalizer.finalize(makeBase)) this.emit(event)
         if (this.cancelled) {
@@ -530,7 +542,7 @@ async function writeCodexTempProfile(
 ): Promise<CodexTempProfile | null> {
   const items = buildCodexProfileConfigItems(config, skillIsolation)
   if (items.length === 0) return null
-  const codexHome = process.env.CODEX_HOME?.trim() || path.join(homedir(), '.codex')
+  const codexHome = resolveCodexHome(config)
   await mkdir(codexHome, { recursive: true })
   const name = `spark-${randomUUID()}`
   const filePath = path.join(codexHome, `${name}.config.toml`)
@@ -565,6 +577,9 @@ function buildCodexProfileConfigItems(
   const contextWindowConfig = buildCodexContextWindowConfig(config.contextWindowTokens)
   if (contextWindowConfig.model_context_window != null) {
     items.push(`model_context_window=${contextWindowConfig.model_context_window}`)
+  }
+  if (config.codexModelCatalogPath != null) {
+    items.push(`model_catalog_json=${tomlString(config.codexModelCatalogPath)}`)
   }
   items.push(`approval_policy=${tomlString(policy.approvalPolicy)}`)
   if (policy.approvalsReviewer != null) {

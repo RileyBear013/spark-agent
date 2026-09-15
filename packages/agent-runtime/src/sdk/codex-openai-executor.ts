@@ -1,7 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import OpenAI from 'openai'
 import type { AgentEvent } from '@spark/protocol'
-import { estimateTokens, resolveModelContextWindow, resolveSoftContextLimit } from '@spark/shared'
+import {
+  estimateTokens,
+  resolveModelContextWindow,
+  resolveSoftContextLimit,
+  resolveSoftContextLimitForWindow,
+} from '@spark/shared'
 import type { EngineExecutor } from './engine-executor.js'
 import { buildOpenAIChatUserContent, redactOpenAIChatImages } from './openai-chat-image-input.js'
 import type { OpenAIChatToolDefinition, SDKExecutorConfig, SDKTurnAttachment } from './types.js'
@@ -97,8 +102,12 @@ export class CodexOpenAIExecutor implements EngineExecutor {
       ...makeBase(),
       type: 'context_usage',
       estimatedTokens: estimateTokens(prompt),
-      softLimitTokens: resolveSoftContextLimit(config.model),
-      contextWindowTokens: config.contextWindowTokens ?? resolveModelContextWindow(config.model),
+      softLimitTokens:
+        config.contextWindowTokens != null && config.contextWindowTokens > 0
+          ? resolveSoftContextLimitForWindow(config.contextWindowTokens)
+          : resolveSoftContextLimit(config.model),
+      contextWindowTokens:
+        config.contextWindowTokens ?? resolveModelContextWindow(config.model),
       compacted: false,
     })
 

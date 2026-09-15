@@ -1,6 +1,6 @@
 # Spark Engine CLI / SDK 运行时说明
 
-> 状态: 已落地 | 最后核对: 2026-09-11
+> 状态: 已落地 | 最后核对: 2026-09-16
 
 本文记录 `spark-engine` 当前可验证的提示词归属、外部注入、MCP stdio/Streamable HTTP、模型预算解析、TUI 工具日志和同步 `task` 子代理边界。
 
@@ -40,6 +40,8 @@
 每次请求会用 system、消息和工具定义做保守输入 token 估算，再以 context window 的剩余空间收敛 `max_tokens`。reasoning tokens 与可见正文共享上游输出上限；Anthropic 的 `budget_tokens` 会在协议层保证正文保留量，OpenAI Responses 的 `max_output_tokens` 包含 reasoning 与正文。预算不足时返回 `llm.context_window_exhausted`，不把上游 400 或空正文伪装成正常完成。
 
 桌面端通过 SparkWork loopback bridge 把 Provider 的 `maxTokens` 和模型级/Provider 级上下文窗口传给 CLI；Spark executor 同样消费 `SDKExecutorConfig.maxTokens`、`contextWindowTokens` 和 `reasoningBudgetTokens`。CLI `/model` 切换后，`SwitchableLlmService` 会随当前 route 更新预算，task 子代理和 failover route 继续沿用各自的上限。
+
+对于 OpenCode 等自定义 Codex Provider，运行时还会把当前模型和 Spark 配置的上下文窗口写入 `CODEX_HOME` 下的哈希命名 `model_catalog_json`，并在启动 Codex 时加载。Codex 对目录外的未知模型会使用 272K fallback，再乘以 95% 的有效窗口，所以会出现 258.4K；目录桥接后，模型的 `context_window` 和 `max_context_window` 使用 Provider 配置值，避免这个 fallback 覆盖 Spark 的 1M 设置。Spark 自己继续按 70% soft limit 和 90% auto-compact 规则预留空间；如果 Codex 目录不可写，则保留原配置并让运行时按自身 fallback 工作。
 
 ## 模型流式容错
 

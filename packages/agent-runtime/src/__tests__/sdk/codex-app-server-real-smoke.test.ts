@@ -176,6 +176,7 @@ describe.skipIf(!RUN_SMOKE || SMOKE_EXECUTABLE_PATH == null)(
         model: 'mock-gpt',
         permissionMode: 'codex-default',
         workspaceRootPath: tmpdir(),
+        contextWindowTokens: 1_000_000,
         codexCliProvider: {
           id: 'mocksmoke',
           name: 'Mock Smoke Provider',
@@ -219,6 +220,12 @@ describe.skipIf(!RUN_SMOKE || SMOKE_EXECUTABLE_PATH == null)(
       expect((finalComplete as { content?: string } | undefined)?.content).toContain(
         'Token by token',
       )
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'runtime_context_snapshot',
+          contextWindowTokens: 1_000_000,
+        }),
+      )
       const statuses = events.filter((event) => event.type === 'agent_status')
       expect(statuses.at(-1)).toMatchObject({ status: 'completed' })
     }, 90_000)
@@ -234,6 +241,7 @@ describe.skipIf(!RUN_SMOKE || SMOKE_EXECUTABLE_PATH == null)(
         model: 'mock-gpt',
         permissionMode: 'codex-default',
         workspaceRootPath: tmpdir(),
+        contextWindowTokens: 1_000_000,
         codexRuntimeLeaseKey: 'release-baseline-session',
         codexNativeThreadBindingKey: 'release-baseline-binding',
         codexNativeThreadBindingObserver: async () => undefined,

@@ -737,6 +737,7 @@ describe('CodexCliExecutor', () => {
         useLocalConfig: false,
         apiKey: 'sk-third-party',
         model: 'provider-coder',
+        contextWindowTokens: 1_000_000,
         codexCliProvider: {
           id: 'spark-provider',
           name: 'Third Party Codex',
@@ -757,6 +758,10 @@ describe('CodexCliExecutor', () => {
       "model_providers.spark-provider.base_url='https://provider.example.com/v1'",
     )
     expect(profileConfig).toContain("model_providers.spark-provider.wire_api='responses'")
+    expect(profileConfig).toContain('model_context_window=1000000')
+    expect(profileConfig).toMatch(
+      /model_catalog_json='[^']*spark-model-catalog-[a-f0-9]{20}\.json'/,
+    )
     expect(profileConfig).toContain(
       "model_providers.spark-provider.env_key='SPARK_CODEX_API_KEY_TEST'",
     )

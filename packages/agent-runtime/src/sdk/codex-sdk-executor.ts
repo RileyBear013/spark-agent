@@ -12,7 +12,12 @@ import type {
   ThreadOptions,
 } from '@openai/codex-sdk'
 import type { AgentEvent } from '@spark/protocol'
-import { estimateTokens, resolveModelContextWindow, resolveSoftContextLimit } from '@spark/shared'
+import {
+  estimateTokens,
+  resolveModelContextWindow,
+  resolveSoftContextLimit,
+  resolveSoftContextLimitForWindow,
+} from '@spark/shared'
 import { extractCodexCompactionEvent } from './codex-compaction-event.js'
 import {
   appendCodexReasoningSummaryDelta,
@@ -39,6 +44,7 @@ import type { EngineExecutor } from './engine-executor.js'
 import type { SDKExecutorConfig, SDKMcpServerConfig, SDKTurnAttachment } from './types.js'
 import { codexTargetTriple, resolveManagedCodexCli } from './codex-runtime.js'
 import { buildDefaultGitChildEnvironment } from '../services/git-command.service.js'
+import { withCodexModelCatalog } from './codex-model-catalog.js'
 
 type Listener = (event: AgentEvent) => void
 type EventBase = { id: string; sessionId: string; turnId: string; timestamp: string; seq: number }
@@ -131,6 +137,7 @@ export class CodexSdkExecutor implements EngineExecutor {
     userMessage: string,
     config: SDKExecutorConfig,
   ): Promise<void> {
+    const effectiveConfig = await withCodexModelCatalog(config)
     const makeBase = (): EventBase => ({
       id: randomUUID(),
       sessionId,
@@ -138,11 +145,14 @@ export class CodexSdkExecutor implements EngineExecutor {
       timestamp: new Date().toISOString(),
       seq: 0,
     })
-    const prompt = buildCodexSdkPrompt(buildCodexGoalPrompt(userMessage, config), config)
-    const input = buildCodexSdkInput(prompt, config.attachments)
+    const prompt = buildCodexSdkPrompt(
+      buildCodexGoalPrompt(userMessage, effectiveConfig),
+      effectiveConfig,
+    )
+    const input = buildCodexSdkInput(prompt, effectiveConfig.attachments)
     const controller = new AbortController()
     const streamTerminalizer = new StreamTerminalizer()
-    const skillIsolation = resolveCodexSkillIsolation(config.workspaceRootPath)
+    const skillIsolation = resolveCodexSkillIsolation(effectiveConfig.workspaceRootPath)
     this.abortController = controller
     this.streamTerminalizer = streamTerminalizer
 
@@ -150,9 +160,9 @@ export class CodexSdkExecutor implements EngineExecutor {
       ...makeBase(),
       type: 'user_message',
       content: userMessage,
-      ...(config.attachments != null && config.attachments.length > 0
+      ...(effectiveConfig.attachments != null && effectiveConfig.attachments.length > 0
         ? {
-            attachments: config.attachments.map((attachment) => ({
+            attachments: effectiveConfig.attachments.map((attachment) => ({
               type: attachment.type,
               path: attachment.path,
               name: attachment.name,
@@ -170,17 +180,21 @@ export class CodexSdkExecutor implements EngineExecutor {
       ...makeBase(),
       type: 'context_usage',
       estimatedTokens: estimateTokens(prompt),
-      softLimitTokens: resolveSoftContextLimit(config.model),
-      contextWindowTokens: config.contextWindowTokens ?? resolveModelContextWindow(config.model),
+      softLimitTokens:
+        effectiveConfig.contextWindowTokens != null && effectiveConfig.contextWindowTokens > 0
+          ? resolveSoftContextLimitForWindow(effectiveConfig.contextWindowTokens)
+          : resolveSoftContextLimit(effectiveConfig.model),
+      contextWindowTokens:
+        effectiveConfig.contextWindowTokens ?? resolveModelContextWindow(effectiveConfig.model),
       compacted: false,
     })
     this.emitSkillIsolationWarning(skillIsolation, makeBase)
 
     try {
       const sdk = await loadCodexSdk()
-      const codexOptions = buildCodexOptions(config, skillIsolation)
-      const threadOptions = buildThreadOptions(config)
-      config.invocationObserver?.({
+      const codexOptions = buildCodexOptions(effectiveConfig, skillIsolation)
+      const threadOptions = buildThreadOptions(effectiveConfig)
+      effectiveConfig.invocationObserver?.({
         transport: 'codex-sdk',
         request: {
           input,
@@ -190,8 +204,8 @@ export class CodexSdkExecutor implements EngineExecutor {
       })
       const codex = new sdk.Codex(codexOptions) as CodexClient
       const thread =
-        config.sdkSessionId != null && config.continueSession === true
-          ? codex.resumeThread(config.sdkSessionId, threadOptions)
+        effectiveConfig.sdkSessionId != null && effectiveConfig.continueSession === true
+          ? codex.resumeThread(effectiveConfig.sdkSessionId, threadOptions)
           : codex.startThread(threadOptions)
       this.thread = thread
 
@@ -213,7 +227,7 @@ export class CodexSdkExecutor implements EngineExecutor {
       }
       const streamed = await thread.runStreamed(input, { signal: controller.signal })
       for await (const event of streamed.events) {
-        this.dispatchEvent(event, makeBase, config, state)
+        this.dispatchEvent(event, makeBase, effectiveConfig, state)
       }
 
       completeCodexSdkRawTextSegment(state)
@@ -808,6 +822,9 @@ export function buildCodexConfig(
     ...(config.fastMode === true ? { service_tier: 'fast' } : {}),
     ...CODEX_CONTEXT_POLICY_CONFIG,
     ...buildCodexContextWindowConfig(config.contextWindowTokens),
+    ...(config.codexModelCatalogPath != null
+      ? { model_catalog_json: config.codexModelCatalogPath }
+      : {}),
     ...(policy.approvalsReviewer == null ? {} : { approvals_reviewer: policy.approvalsReviewer }),
     ...buildCodexModelProviderConfig(config),
     ...buildCodexMcpConfig(config.mcpServers),
