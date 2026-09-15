@@ -58,7 +58,7 @@ function normalizeHtmlHeight(value) {
 const tool = {
   name: 'suggest_replies',
   description:
-    'Optionally show 1-4 concise reply buttons above the chat input. The user can click one to immediately send that exact text as their next message. Use only for simple ordinary-text replies, immediately before a final response that asks the user to choose or confirm. Never use together with AskUserQuestion or request_user_input, and never use for permissions or destructive-action approval.',
+    'Show 1-4 concise reply buttons above the chat input when the final response asks the user for a simple ordinary-text decision or choice, across any task type (for example confirm, agree, start, continue, adopt, revise, or pause). The user can click one to immediately send that exact text as their next message. Use immediately before the final response. Never use together with AskUserQuestion or request_user_input, and never use for permissions or destructive-action approval.',
   inputSchema: {
     type: 'object',
     properties: {

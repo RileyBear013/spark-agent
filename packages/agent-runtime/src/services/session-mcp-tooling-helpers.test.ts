@@ -160,11 +160,13 @@ describe('WEB_SEARCH_SYSTEM_PROMPT', () => {
 })
 
 describe('QUICK_REPLIES_SYSTEM_PROMPT', () => {
-  it('prefers the optional tool for simple confirmations while keeping replies short and exclusive', () => {
+  it('requires quick replies for lightweight decisions across task types', () => {
     expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('simple confirmation')
-    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('approve a proposed fix')
-    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('prefer offering quick replies')
-    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('You decide whether the tool is useful')
+    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('not only software development')
+    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('确认按此方案开始吗？')
+    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('strong default')
+    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('main decision branches')
+    expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('research, writing, design, planning, and development')
     expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('1-4')
     expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('at most 40 characters')
     expect(QUICK_REPLIES_SYSTEM_PROMPT).toContain('`用户补充：`')
