@@ -15,8 +15,7 @@ export type SparkExecutorAvailability =
   | { available: false; reason: SparkExecutorUnavailableReason }
 
 export const SPARK_EXECUTOR_UNAVAILABLE_HINTS: Record<SparkExecutorUnavailableReason, string> = {
-  'chat-completions-openai':
-    'Spark 执行器暂不支持 Chat Completions API 渠道，将 API 协议切换为 Responses API 后可开启',
+  'chat-completions-openai': 'Chat Completions 不支持 Spark 执行器，请切换至 Responses API',
 }
 
 export function sparkExecutorAvailability(

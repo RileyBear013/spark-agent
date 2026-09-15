@@ -966,6 +966,11 @@
   gap: 6px;
 }
 
+.pv_form_grid .pv_form_label + .pv_spark_executor_control {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
 .pv_endpoint_inline_hint {
   min-width: 0;
   color: var(--text-muted);
@@ -978,10 +983,14 @@
 }
 
 .pv_spark_executor_hint {
+  max-width: 100%;
   min-width: 0;
+  overflow: hidden;
   color: var(--warning);
   font-size: 11px;
   line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pv_endpoint_inline_hint_code {

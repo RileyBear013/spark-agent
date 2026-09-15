@@ -1725,7 +1725,12 @@ describe('ProviderEditPanel spark executor switch', () => {
     const sparkSwitch = findSparkSwitch()
     expect(sparkSwitch).not.toBeNull()
     expect(sparkSwitch?.hasAttribute('disabled')).toBe(true)
-    expect(container.textContent).toContain('Spark 执行器暂不支持 Chat Completions API 渠道')
+    expect(container.textContent).toContain(
+      'Chat Completions 不支持 Spark 执行器，请切换至 Responses API',
+    )
+    const hint = container.querySelector('.pv_spark_executor_hint')
+    expect(hint?.parentElement?.classList.contains('pv_spark_executor_control')).toBe(true)
+    expect(hint?.parentElement?.nextElementSibling?.textContent?.includes('API Key')).toBe(true)
 
     await act(async () => {
       saveButton?.click()

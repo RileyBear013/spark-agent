@@ -25,7 +25,9 @@ describe('sparkExecutorAvailability', () => {
     const result = sparkExecutorAvailability('openai', 'chat')
     expect(result).toEqual({ available: false, reason: 'chat-completions-openai' })
     if (!result.available) {
-      expect(SPARK_EXECUTOR_UNAVAILABLE_HINTS[result.reason].length).toBeGreaterThan(0)
+      expect(SPARK_EXECUTOR_UNAVAILABLE_HINTS[result.reason]).toBe(
+        'Chat Completions 不支持 Spark 执行器，请切换至 Responses API',
+      )
     }
   })
 
