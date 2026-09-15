@@ -511,4 +511,30 @@ max_retries = 2
 # [models.claude]
 # provider = "anthropic"
 # model = "claude-sonnet-4-5"
+
+# ─── Session behaviour ────────────────────────────────────────────────────────
+# Tool patterns use the same '*' wildcard syntax as permission rules, and every
+# list below replaces the user-level list instead of appending to it.
+#
+# [permissions]
+# mode = "manual"          # default permission mode for new sessions
+# allow = ["read", "glob", "grep"]   # run without an approval prompt in manual mode
+# deny = ["bash"]                    # always denied, even in auto/bypass
+# ask = ["write", "edit"]            # always require approval
+#
+# [tools]
+# disabled = ["task"]      # hidden from the model and denied at execution time
+# enabled = ["read", "grep"]         # exclusive allowlist (instead of disabled)
+
+# ─── MCP servers ──────────────────────────────────────────────────────────────
+# stdio servers inherit your shell environment plus the env map below, so keep
+# secrets in the environment instead of this file.
+#
+# [mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#
+# [mcp.servers.remote]
+# url = "https://example.com/mcp"
+# headers = { Authorization = "Bearer \${REMOTE_MCP_TOKEN}" }
 `

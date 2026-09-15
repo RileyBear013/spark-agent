@@ -1,9 +1,16 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 
-import { parse, stringify } from 'smol-toml'
 import { z } from 'zod'
+
+import {
+  asRecord,
+  deepMergeLayers,
+  errorMessage,
+  readTomlLayer,
+  writeTomlLayerAtomic,
+} from './config-file.js'
+import { ModelConfigSchema, type ModelConfig } from './root-schema.js'
 
 import type { LlmService } from '../seams.js'
 import type { FetchLike } from '../llm/http/client.js'
@@ -17,68 +24,6 @@ import {
   type SparkWorkHostCatalog,
   type SparkWorkHostRoute,
 } from './sparkwork-host.js'
-
-const ProtocolSchema = z.enum(['anthropic-messages', 'openai-responses'])
-const PermissionModeSchema = z.enum(['manual', 'auto', 'bypass'])
-const ReasoningEffortSchema = z.enum(['off', 'low', 'medium', 'high', 'max'])
-const CapabilitiesSchema = z
-  .object({
-    tools: z.boolean().optional(),
-    parallel_tool_calls: z.boolean().optional(),
-    thinking: z.boolean().optional(),
-    prompt_caching: z.boolean().optional(),
-    assistant_prefill: z.boolean().optional(),
-    images: z.boolean().optional(),
-  })
-  .strict()
-const ProviderSchema = z
-  .object({
-    protocol: ProtocolSchema,
-    base_url: z.url().optional(),
-    api_key_env: z
-      .string()
-      .regex(/^[A-Z_][A-Z0-9_]*$/u)
-      .optional(),
-  })
-  .strict()
-const ModelSchema = z
-  .object({
-    provider: z.string().min(1),
-    model: z.string().min(1),
-    /** Model-level limits for standalone CLI configurations. */
-    context_window: z.number().int().positive().optional(),
-    max_tokens: z.number().int().positive().optional(),
-    capabilities: CapabilitiesSchema.optional(),
-  })
-  .strict()
-const AgentSchema = z
-  .object({
-    model: z.string().min(1).optional(),
-    permission_mode: PermissionModeSchema.optional(),
-    reasoning_effort: ReasoningEffortSchema.optional(),
-    failover: z.array(z.string().min(1)).default([]),
-    max_retries: z.number().int().min(0).max(10).default(2),
-    retry_initial_delay_ms: z.number().int().min(0).max(60_000).default(500),
-    retry_max_delay_ms: z.number().int().min(0).max(300_000).default(60_000),
-    retry_jitter_ratio: z.number().min(0).max(1).default(0.2),
-  })
-  .strict()
-  .default({
-    failover: [],
-    max_retries: 2,
-    retry_initial_delay_ms: 500,
-    retry_max_delay_ms: 60_000,
-    retry_jitter_ratio: 0.2,
-  })
-const ModelConfigSchema = z
-  .object({
-    agent: AgentSchema,
-    providers: z.record(z.string(), ProviderSchema).default({}),
-    models: z.record(z.string(), ModelSchema).default({}),
-  })
-  .strict()
-
-type ModelConfig = z.output<typeof ModelConfigSchema>
 
 export interface LoadModelConfigOptions {
   readonly cwd: string
@@ -423,10 +368,7 @@ async function writeGlobalConfig(
     )
   }
 
-  await mkdir(sparkHome, { recursive: true, mode: 0o700 })
-  const temporary = resolve(sparkHome, `.config.toml.${process.pid}.tmp`)
-  await writeFile(temporary, `${stringify(mutated)}\n`, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporary, configPath)
+  await writeTomlLayerAtomic(configPath, mutated)
   return configPath
 }
 
@@ -522,18 +464,10 @@ interface ConfigLayer {
 }
 
 async function readLayer(path: string): Promise<ConfigLayer> {
-  let source: string
   try {
-    source = await readFile(path, 'utf8')
+    return await readTomlLayer(path)
   } catch (error) {
-    if (isMissing(error)) return { layer: {}, exists: false }
-    throw new ModelConfigError(`Unable to read Spark config ${path}`, { cause: error })
-  }
-  try {
-    const value: unknown = parse(source)
-    return { layer: asRecord(value) ?? {}, exists: true }
-  } catch (error) {
-    throw new ModelConfigError(`Invalid TOML in ${path}: ${message(error)}`, { cause: error })
+    throw new ModelConfigError(errorMessage(error), { cause: error })
   }
 }
 
@@ -542,26 +476,13 @@ function mergeConfigLayers(
   projectLayer: Record<string, unknown>,
   environment: NodeJS.ProcessEnv,
 ): Record<string, unknown> {
-  const merged = deepMerge(globalLayer, projectLayer)
+  const merged = deepMergeLayers(globalLayer, projectLayer)
   const agent = asRecord(merged.agent) ?? {}
   if (environment.SPARK_MODEL) agent.model = environment.SPARK_MODEL
   const failover = parseFailover(environment.SPARK_FAILOVER_MODELS)
   if (failover) agent.failover = failover
   merged.agent = agent
   return merged
-}
-
-function deepMerge(
-  lower: Readonly<Record<string, unknown>>,
-  upper: Readonly<Record<string, unknown>>,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = structuredClone(lower)
-  for (const [key, value] of Object.entries(upper)) {
-    const previous = asRecord(result[key])
-    const next = asRecord(value)
-    result[key] = previous && next ? deepMerge(previous, next) : structuredClone(value)
-  }
-  return result
 }
 
 function registerConfiguredModel(
@@ -670,23 +591,9 @@ function parseFailover(value: string | undefined): string[] | undefined {
     .filter(Boolean)
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined
-}
-
-function isMissing(error: unknown): boolean {
-  return asRecord(error)?.code === 'ENOENT'
-}
-
 function formatZodError(error: unknown): string {
-  if (!(error instanceof z.ZodError)) return message(error)
+  if (!(error instanceof z.ZodError)) return errorMessage(error)
   return error.issues
     .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
     .join('; ')
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }

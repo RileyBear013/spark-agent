@@ -118,6 +118,65 @@ Reasoning effort (`/effort`, or `--effort off|low|medium|high|max` on one-shot r
 
 Approvals remain fail-closed: every side-effecting tool call renders a card with the exact arguments, policy reason, and risk class, offering allow-once, allow-for-session (when the policy grants that scope), and deny; Esc always denies.
 
+## Configuration
+
+`spark` reads `~/.spark/config.toml` and then `<cwd>/.spark/config.toml`, merging them with the
+project file taking precedence (lists replace instead of appending). Both files stay 0600, and every
+edit made through `spark config` is validated against the full schema before an atomic write, so a
+rejected edit never leaves a half-written file behind.
+
+```bash
+spark config                       # list effective keys with their source layer
+spark config get permissions.mode  # print one value (raw in text mode)
+spark config set tools.disabled '["task"]' --project
+spark config unset permissions.mode
+spark config path                  # both file paths and whether they exist
+```
+
+Sections beyond the model channels:
+
+```toml
+[permissions]
+mode = "manual"                    # default permission mode for new sessions
+allow = ["read", "glob", "grep"]   # no approval prompt in manual mode
+deny = ["bash"]                    # hard deny: enforced in manual, auto, and bypass
+ask = ["write", "edit"]            # always require approval
+
+[tools]
+disabled = ["task"]                # hidden from the model and denied at execution
+# enabled = ["read", "grep"]       # exclusive allowlist instead of disabled
+
+[mcp.servers.filesystem]           # stdio transport
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+env = { LOG_LEVEL = "info" }       # stdio servers also inherit your shell environment
+
+[mcp.servers.remote]               # Streamable HTTP transport
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
+```
+
+Tool patterns use the same `*` wildcard syntax as permission rules (`mcp__*`, `ba*`). Deny entries are
+hard denies rather than ordinary rules: `bypass` skips policy rules but never a configured deny.
+`${VAR}` references in MCP `env` and `headers` values resolve from the environment at load time and
+fail with an actionable message when the variable is unset, so credentials stay out of the file.
+
+### Managing MCP servers
+
+```bash
+spark mcp list                                        # configured servers, transport, layer
+spark mcp add filesystem --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg /tmp
+spark mcp add remote --url https://example.com/mcp --header Authorization='Bearer token'
+spark mcp status                                      # start every enabled server, report its tools
+spark mcp remove filesystem
+```
+
+Configured servers are connected for every CLI and TUI session; their tools appear as
+`mcp__<server>__<tool>` and go through the normal permission, budget, and ledger path. A server that
+fails to start never blocks the session: `spark` reports the failure on stderr and continues with the
+built-in tools. `spark mcp status` is the diagnostic that starts the processes deliberately (15s per
+server) and exits non-zero if any server fails.
+
 ## Model configuration
 
 Spark reads `~/.spark/config.toml` and then project `.spark/config.toml`. Provider credentials are referenced by environment-variable name and are never stored in the config or session snapshot.

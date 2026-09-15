@@ -11,12 +11,15 @@ import { FakeModel } from './llm/fake/model.js'
 import type { FakeScriptItem } from './llm/fake/reply-dsl.js'
 import { loadHookRunner } from './hooks/settings.js'
 import { FileInstructionLoader } from './memory/instructions.js'
+import { FileMemoryStore } from './memory/store.js'
+import { memoryToolDefinitions, MemoryToolExecutor } from './memory/tools.js'
 import { CompositeToolExecutor, McpToolManager } from './mcp/client.js'
 import type { SparkMcpServerMap } from './mcp/types.js'
 import type { LlmService } from './seams.js'
+import type { ToolDefinition } from './tools/contract.js'
 import type { AgentEnv, Approver } from './seams.js'
 import { FakeApprover } from './permission/approver.js'
-import { RulePermissionPolicy, type PermissionRule } from './permission/policy.js'
+import { RulePermissionPolicy, wildcardMatches, type PermissionRule } from './permission/policy.js'
 import type { PermissionDecision } from './permission/types.js'
 import { NullTelemetry, MemoryTelemetry } from './telemetry.js'
 import { FakeShell, type FakeShellReply } from './tools/fake/shell.js'
@@ -27,6 +30,7 @@ import { taskToolDefinition } from './tools/task/definition.js'
 import { workspaceToolDefinitions } from './tools/workspace/definitions.js'
 import { WorkspaceToolExecutor } from './tools/workspace/executor.js'
 import { withCustomEnvironment } from './tools/workspace/process.js'
+import { createRuntimeLogger, type RuntimeLogger } from './observability/logger.js'
 
 export interface DefaultEnvOptions {
   readonly cwd: string
@@ -39,8 +43,22 @@ export interface DefaultEnvOptions {
   readonly customEnv?: Readonly<Record<string, string>>
   /** Tool names that may run without an interactive approval in manual mode. */
   readonly allowedTools?: readonly string[]
-  /** Tool names/patterns that are always denied and hidden from no model state. */
+  /** Tool names/patterns that are always denied. */
   readonly disallowedTools?: readonly string[]
+  /** Exclusive allowlist: when set, only matching tool patterns are exposed. */
+  readonly enabledTools?: readonly string[]
+  /** Tool patterns removed from the registry, so the model never sees them. */
+  readonly hiddenTools?: readonly string[]
+  /** Filesystem root for the desktop-compatible Markdown memory store. */
+  readonly memoryRoot?: string
+  /** Agent profile directory used by the agent memory scope. */
+  readonly memoryAgentId?: string
+  /** Whether memory tools and prompt injection are enabled. */
+  readonly memoryEnabled?: boolean
+  /** Maximum estimated tokens used by the injected memory summary. */
+  readonly memoryMaxInjectTokens?: number
+  /** Host logger; CLI defaults to a stderr logger. */
+  readonly logger?: RuntimeLogger
 }
 
 export function defaultSparkHome(): string {
@@ -86,17 +104,75 @@ export async function createDefaultEnvWithMcp(
   }
 }
 
+export interface ManagedEnvResult {
+  readonly env: AgentEnv
+  /** Set when configured MCP servers could not be connected. */
+  readonly mcpError?: string
+  readonly close: () => Promise<void>
+}
+
+/**
+ * MCP-tolerant variant of {@link createDefaultEnvWithMcp} for the CLI and TUI:
+ * a broken `[mcp]` entry degrades the session to built-in tools with a
+ * diagnostic instead of aborting startup. Host embeddings that must fail
+ * loudly keep using `createDefaultEnvWithMcp`.
+ */
+export async function createResilientEnv(options: McpDefaultEnvOptions): Promise<ManagedEnvResult> {
+  if (Object.keys(options.mcpServers ?? {}).length === 0) {
+    return { env: createDefaultEnv(options), close: async () => undefined }
+  }
+  try {
+    const managed = await createDefaultEnvWithMcp(options)
+    return { env: managed.env, close: managed.close }
+  } catch (error) {
+    return {
+      env: createDefaultEnv(options),
+      close: async () => undefined,
+      mcpError: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
 function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): AgentEnv {
   const clock = new SystemClock()
   const dataRoot = resolve(options.dataRoot ?? defaultSparkHome())
-  const registry = new OrderedToolRegistry([
-    ...workspaceToolDefinitions,
-    ...(mcp?.listDefinitions() ?? []),
-    taskToolDefinition,
-  ])
+  const logger = options.logger ?? createRuntimeLogger('engine')
+  // Keep the SDK's historical no-memory default when an embedding host does
+  // not opt into the memory layer. CLI/TUI always pass the resolved memory
+  // settings, so standalone commands still enable it by default.
+  const memoryConfigured =
+    options.memoryRoot !== undefined ||
+    options.memoryAgentId !== undefined ||
+    options.memoryEnabled !== undefined ||
+    options.memoryMaxInjectTokens !== undefined
+  const memoryEnabled = memoryConfigured && options.memoryEnabled !== false
+  const memory = new FileMemoryStore({
+    cwd: options.cwd,
+    ...(options.memoryRoot === undefined ? {} : { homeDir: options.memoryRoot }),
+    ...(options.memoryAgentId === undefined ? {} : { agentId: options.memoryAgentId }),
+    ...(options.memoryMaxInjectTokens === undefined
+      ? {}
+      : { maxInjectTokens: options.memoryMaxInjectTokens }),
+    enabled: memoryEnabled,
+    logger,
+  })
+  const memoryExecutor = new MemoryToolExecutor(memory)
+  const registry = new OrderedToolRegistry(
+    filterToolDefinitions(
+      [
+        ...workspaceToolDefinitions,
+        ...(memoryEnabled ? memoryToolDefinitions : []),
+        ...(mcp?.listDefinitions() ?? []),
+        taskToolDefinition,
+      ],
+      options,
+    ),
+  )
+  // Hidden tools are also hard-denied: a resumed session can still replay a
+  // call that predates the filter, and it must not bypass the configuration.
+  const disallowedTools = [...(options.disallowedTools ?? []), ...(options.hiddenTools ?? [])]
   const workspaceExecutor = new WorkspaceToolExecutor(options.cwd, options.customEnv)
-  const executor =
-    mcp === undefined ? workspaceExecutor : new CompositeToolExecutor(workspaceExecutor, mcp)
+  const executor = new CompositeToolExecutor(workspaceExecutor, mcp, memoryExecutor)
   const hooks = loadHookRunner({
     cwd: options.cwd,
     userSettingsDir: dataRoot,
@@ -116,9 +192,7 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
             ? []
             : [{ source: 'host', rules: options.permissionRules }],
         ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
-        ...(options.disallowedTools === undefined
-          ? {}
-          : { disallowedTools: options.disallowedTools }),
+        ...(disallowedTools.length === 0 ? {} : { disallowedTools }),
       }),
       approver: options.approver ?? new FakeApprover(),
     },
@@ -129,11 +203,31 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
       ...(options.skillSystemPrompt === undefined
         ? {}
         : { skillSystemPrompt: options.skillSystemPrompt }),
+      memory,
     }),
     ...(hooks === undefined ? {} : { hooks }),
     budgets: new DefaultBudgetFactory(clock),
     telemetry: new NullTelemetry(),
   }
+}
+
+/**
+ * Applies the `[tools]` configuration to the definitions handed to the model.
+ * Patterns use the same `*` wildcard syntax as permission rules, so `mcp__*`
+ * disables every MCP tool of an environment at once.
+ */
+function filterToolDefinitions(
+  definitions: readonly ToolDefinition[],
+  options: DefaultEnvOptions,
+): readonly ToolDefinition[] {
+  const hidden = options.hiddenTools ?? []
+  const enabled = options.enabledTools
+  if (hidden.length === 0 && enabled === undefined) return definitions
+  return definitions.filter((definition) => {
+    if (hidden.some((pattern) => wildcardMatches(pattern, definition.name))) return false
+    if (enabled === undefined) return true
+    return enabled.some((pattern) => wildcardMatches(pattern, definition.name))
+  })
 }
 
 export interface DeterministicEnvOptions {

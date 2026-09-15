@@ -3,9 +3,10 @@ import React from 'react'
 
 import { loadCustomCommands, type CustomCommand } from '../commands/custom-commands.js'
 import { persistCliPreferences } from '../config/model-config.js'
-import { createDefaultEnv, defaultSparkHome } from '../env.js'
+import type { ResolvedEngineSettings } from '../config/settings.js'
+import { createResilientEnv, defaultSparkHome } from '../env.js'
 import type { PermissionMode } from '../permission/types.js'
-import type { LlmService, SessionMeta } from '../seams.js'
+import type { AgentEnv, LlmService, SessionMeta } from '../seams.js'
 import { InteractiveApprover } from '../permission/interactive.js'
 import { SLASH_COMMANDS } from './slash-commands.js'
 import { Agent, type AgentSession } from '../sdk/agent.js'
@@ -21,7 +22,13 @@ export interface RunTuiOptions {
   readonly cwd?: string
   readonly dataRoot?: string
   readonly stdout?: NodeJS.WriteStream
+  readonly stderr?: NodeJS.WriteStream
   readonly stdin?: NodeJS.ReadStream
+  /**
+   * Resolved `[permissions]` / `[tools]` / `[mcp]` configuration. Undefined
+   * keeps the built-in defaults so SDK embeddings stay unchanged.
+   */
+  readonly engineSettings?: ResolvedEngineSettings | undefined
   readonly llm?: LlmService | undefined
   readonly model?: string | undefined
   /** Real package version for the welcome screen; avoids stale fallback text. */
@@ -49,12 +56,41 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
   const approver = new InteractiveApprover()
   const switchable = new SwitchableLlmService()
   if (options.llm) switchable.set(options.llm)
-  const env = createDefaultEnv({
+  const managed = await createResilientEnv({
     cwd,
     approver,
     llm: switchable,
     ...(options.dataRoot === undefined ? {} : { dataRoot: options.dataRoot }),
+    ...(options.engineSettings ?? {}),
   })
+  if (managed.mcpError !== undefined) {
+    const stream = options.stderr ?? process.stderr
+    stream.write(
+      `MCP servers were not connected: ${managed.mcpError}\n` +
+        'Continuing without MCP tools. Review the [mcp] section with `spark config list`.\n',
+    )
+  }
+  try {
+    await runTuiWithEnv(options, {
+      cwd,
+      approver,
+      switchable,
+      env: managed.env,
+    })
+  } finally {
+    await managed.close()
+  }
+}
+
+interface TuiRunContext {
+  readonly cwd: string
+  readonly approver: InteractiveApprover
+  readonly switchable: SwitchableLlmService
+  readonly env: AgentEnv
+}
+
+async function runTuiWithEnv(options: RunTuiOptions, context: TuiRunContext): Promise<void> {
+  const { cwd, approver, switchable, env } = context
   const agent = Agent.open({ cwd, env })
   const permissionMode = options.permissionMode ?? 'manual'
   const permissionModeExplicit =

@@ -11,12 +11,23 @@ import {
   type ConfiguredModelCatalog,
   type ConfiguredModelRuntime,
 } from '../config/model-config.js'
-import { createDefaultEnv, defaultSparkHome } from '../env.js'
+import { createResilientEnv, defaultSparkHome, type ManagedEnvResult } from '../env.js'
+import {
+  loadSparkSettings,
+  resolveEngineSettings,
+  resolveSessionPermissionMode,
+  type ResolvedEngineSettings,
+} from '../config/settings.js'
+import type { SettingsScope } from '../config/settings.js'
+import { executeConfigCommand } from './config-command.js'
+import { executeMcpCommand, type McpAddInput } from './mcp-command.js'
+import { executeMemoryCommand } from './memory-command.js'
 import { JsonlSessionStore, shortSessionId } from '../events/ledger.js'
 import type { AgentEvent } from '../events/schema.js'
 import type { LlmDelta, ReasoningEffort } from '../llm/types.js'
 import { isReasoningEffort } from '../llm/types.js'
 import { isPermissionMode, type PermissionMode } from '../permission/types.js'
+import type { AgentEnv } from '../seams.js'
 import { Agent, type AgentSession } from '../sdk/agent.js'
 import {
   buildInstallReport,
@@ -58,6 +69,19 @@ interface CliOptions {
   readonly continueSession: boolean
   /** '' = picker sentinel (bare --resume); a concrete session id otherwise. */
   readonly resume?: string
+  /** `--global` / `--project` for `spark config` / `spark mcp`, when given. */
+  readonly settingsScope?: SettingsScope
+  /** `spark mcp add` transport flags. */
+  readonly mcpAdd?: McpAddInput
+  /** `spark memory` command flags. */
+  readonly memoryScope?: string
+  readonly memoryLimit?: string
+  readonly memoryName?: string
+  readonly memoryDescription?: string
+  readonly memoryBody?: string
+  readonly memoryType?: string
+  readonly memoryConfidence?: string
+  readonly memoryAgentId?: string
   readonly positionals: readonly string[]
 }
 
@@ -124,6 +148,73 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     }
     return runMaintenanceCommand(maintenance, options)
   }
+  if (maintenance === 'config') {
+    if (options.prompt) {
+      process.stderr.write('spark config does not accept a task prompt.\n')
+      return 2
+    }
+    return executeConfigCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      ...(options.settingsScope === undefined ? {} : { scope: options.settingsScope }),
+      cwd: process.cwd(),
+      sparkHome: defaultSparkHome(),
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
+  if (maintenance === 'mcp') {
+    if (options.prompt) {
+      process.stderr.write('spark mcp does not accept a task prompt.\n')
+      return 2
+    }
+    return executeMcpCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      ...(options.settingsScope === undefined ? {} : { scope: options.settingsScope }),
+      ...(options.mcpAdd === undefined ? {} : { add: options.mcpAdd }),
+      cwd: process.cwd(),
+      sparkHome: defaultSparkHome(),
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
+  if (maintenance === 'memory') {
+    if (options.prompt) {
+      process.stderr.write('spark memory does not accept a task prompt.\n')
+      return 2
+    }
+    return executeMemoryCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      cwd: process.cwd(),
+      ...(options.memoryScope === undefined ? {} : { scope: options.memoryScope }),
+      ...(options.memoryLimit === undefined ? {} : { limit: options.memoryLimit }),
+      ...(options.memoryName === undefined ? {} : { name: options.memoryName }),
+      ...(options.memoryDescription === undefined ? {} : { description: options.memoryDescription }),
+      ...(options.memoryBody === undefined ? {} : { body: options.memoryBody }),
+      ...(options.memoryType === undefined ? {} : { type: options.memoryType }),
+      ...(options.memoryConfidence === undefined ? {} : { confidence: options.memoryConfidence }),
+      ...(options.memoryAgentId === undefined ? {} : { agentId: options.memoryAgentId }),
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
   if (maintenance === 'sessions') {
     if (options.positionals.length > 1 || options.prompt) {
       process.stderr.write('spark sessions does not accept extra arguments.\n')
@@ -132,12 +223,22 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return listSessionsCommand(options.json)
   }
 
+  let settings: Awaited<ReturnType<typeof loadSparkSettings>>
+  let engineSettings: ResolvedEngineSettings
+  try {
+    settings = await loadSparkSettings({ cwd: process.cwd() })
+    engineSettings = resolveEngineSettings(settings)
+  } catch (error) {
+    process.stderr.write(`${terminalSafe(message(error))}\n`)
+    return 2
+  }
   const storedPreferences = await loadCliPreferences({ cwd: process.cwd() }).catch(() => undefined)
+  // `loadCliPreferences` folds an unset `agent.permission_mode` into `manual`;
+  // reading the raw layer keeps a configured `[permissions].mode` effective.
+  const configuredDefaultMode = resolveSessionPermissionMode(settings) ?? 'manual'
   const resolvedOptions: CliOptions = {
     ...options,
-    permissionMode: options.permissionModeExplicit
-      ? options.permissionMode
-      : (storedPreferences?.permissionMode ?? 'manual'),
+    permissionMode: options.permissionModeExplicit ? options.permissionMode : configuredDefaultMode,
     reasoningEffort: options.reasoningEffort ?? storedPreferences?.reasoningEffort ?? 'high',
   }
 
@@ -190,6 +291,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
       ...(options.resume === '' ? { resumePicker: true } : {}),
       reasoningEffort: resolvedOptions.reasoningEffort,
+      engineSettings,
       ...(runtime ? { llm: runtime.service, model: runtime.modelId } : { startupError }),
     })
     const notice = await Promise.race([
@@ -227,10 +329,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`${terminalSafe(message(error))}\n`)
     return 2
   }
-  if (prompt) return runOnce(prompt, resolvedOptions, runtime, resumeSessionId)
+  if (prompt) return runOnce(prompt, resolvedOptions, runtime, engineSettings, resumeSessionId)
 
   if (process.stdin.isTTY && process.stdout.isTTY && options.plain) {
-    return runPlainRepl(runtime, resolvedOptions, resumeSessionId)
+    return runPlainRepl(runtime, resolvedOptions, engineSettings, resumeSessionId)
   }
   process.stderr.write(
     'No task was provided. Pass a prompt, pipe stdin, or run spark in an interactive TTY.\n',
@@ -420,6 +522,21 @@ function parseCli(argv: readonly string[]): CliOptions {
       'output-format': { type: 'string' },
       continue: { type: 'boolean', short: 'c', default: false },
       resume: { type: 'string', short: 'r' },
+      global: { type: 'boolean', default: false },
+      project: { type: 'boolean', default: false },
+      command: { type: 'string' },
+      url: { type: 'string' },
+      arg: { type: 'string', multiple: true },
+      env: { type: 'string', multiple: true },
+      header: { type: 'string', multiple: true },
+      scope: { type: 'string' },
+      limit: { type: 'string' },
+      name: { type: 'string' },
+      description: { type: 'string' },
+      body: { type: 'string' },
+      type: { type: 'string' },
+      confidence: { type: 'string' },
+      agent: { type: 'string' },
     },
   })
   const requestedOutputFormat = parsed.values['output-format']
@@ -457,6 +574,11 @@ function parseCli(argv: readonly string[]): CliOptions {
   if (continueLatest && resume !== undefined) {
     throw new Error('--continue and --resume are mutually exclusive')
   }
+  const globalScope = parsed.values.global ?? false
+  const projectScope = parsed.values.project ?? false
+  if (globalScope && projectScope) {
+    throw new Error('--global and --project are mutually exclusive')
+  }
   return {
     help: parsed.values.help ?? false,
     version: parsed.values.version ?? false,
@@ -479,6 +601,36 @@ function parseCli(argv: readonly string[]): CliOptions {
     continueSession: continueLatest,
     // '' sentinel = bare --resume → in-TUI session picker; otherwise a concrete id.
     ...(resume === undefined ? {} : { resume }),
+    ...(globalScope || projectScope
+      ? { settingsScope: globalScope ? ('global' as const) : ('project' as const) }
+      : {}),
+    ...(parsed.values.command === undefined &&
+    parsed.values.url === undefined &&
+    (parsed.values.arg?.length ?? 0) === 0 &&
+    (parsed.values.env?.length ?? 0) === 0 &&
+    (parsed.values.header?.length ?? 0) === 0
+      ? {}
+      : {
+          mcpAdd: {
+            ...(parsed.values.command === undefined ? {} : { command: parsed.values.command }),
+            ...(parsed.values.url === undefined ? {} : { url: parsed.values.url }),
+            args: parsed.values.arg ?? [],
+            env: parsed.values.env ?? [],
+            headers: parsed.values.header ?? [],
+          },
+        }),
+    ...(parsed.values.scope === undefined ? {} : { memoryScope: parsed.values.scope }),
+    ...(parsed.values.limit === undefined ? {} : { memoryLimit: parsed.values.limit }),
+    ...(parsed.values.name === undefined ? {} : { memoryName: parsed.values.name }),
+    ...(parsed.values.description === undefined
+      ? {}
+      : { memoryDescription: parsed.values.description }),
+    ...(parsed.values.body === undefined ? {} : { memoryBody: parsed.values.body }),
+    ...(parsed.values.type === undefined ? {} : { memoryType: parsed.values.type }),
+    ...(parsed.values.confidence === undefined
+      ? {}
+      : { memoryConfidence: parsed.values.confidence }),
+    ...(parsed.values.agent === undefined ? {} : { memoryAgentId: parsed.values.agent }),
     positionals: parsed.positionals,
   }
 }
@@ -564,9 +716,25 @@ async function runOnce(
   prompt: string,
   options: CliOptions,
   runtime: ConfiguredModelRuntime,
+  engineSettings: ResolvedEngineSettings,
   resumeSessionId?: string,
 ): Promise<number> {
-  const agent = createConfiguredAgent(runtime)
+  const managed = await openConfiguredEnv(runtime, engineSettings)
+  try {
+    return await runOnceWithEnv(prompt, options, runtime, managed.env, resumeSessionId)
+  } finally {
+    await managed.close()
+  }
+}
+
+async function runOnceWithEnv(
+  prompt: string,
+  options: CliOptions,
+  runtime: ConfiguredModelRuntime,
+  env: AgentEnv,
+  resumeSessionId?: string,
+): Promise<number> {
+  const agent = Agent.open({ cwd: process.cwd(), env })
   warnPermissionBypass(options.permissionMode)
   const session = await openOrCreateSession(
     agent,
@@ -668,9 +836,24 @@ function terminalStatus(terminal: AgentEvent): 'completed' | 'cancelled' | 'fail
 async function runPlainRepl(
   runtime: ConfiguredModelRuntime,
   options: CliOptions,
+  engineSettings: ResolvedEngineSettings,
   resumeSessionId?: string,
 ): Promise<number> {
-  const agent = createConfiguredAgent(runtime)
+  const managed = await openConfiguredEnv(runtime, engineSettings)
+  try {
+    return await runPlainReplWithEnv(runtime, options, managed.env, resumeSessionId)
+  } finally {
+    await managed.close()
+  }
+}
+
+async function runPlainReplWithEnv(
+  runtime: ConfiguredModelRuntime,
+  options: CliOptions,
+  env: AgentEnv,
+  resumeSessionId?: string,
+): Promise<number> {
+  const agent = Agent.open({ cwd: process.cwd(), env })
   warnPermissionBypass(options.permissionMode)
   const session = await openOrCreateSession(
     agent,
@@ -848,6 +1031,21 @@ Usage:
   spark models              List local and SparkWork-synced models
   spark doctor              Diagnose install, discovery, and model selection
   spark sessions            List sessions recorded for the current directory
+  spark config [list]       Show the effective layered configuration
+  spark config get <key>    Print one value (raw in text mode)
+  spark config set <key> <value>
+                            Write a value (--global default, or --project)
+  spark config unset <key>  Remove a value from one layer
+  spark config path         Show the global and project configuration paths
+  spark mcp list            List configured MCP servers
+  spark mcp add <name> --command <cmd> [--arg v]... [--env K=V]...
+  spark mcp add <name> --url <endpoint> [--header K=V]...
+  spark mcp status          Start every enabled server and report its tools
+  spark mcp remove <name>   Remove a server from its configuration layer
+  spark memory list         List user/project/agent long-term memories
+  spark memory search <q>   Search memory summaries
+  spark memory recall <id>  Read one complete memory entry
+  spark memory save ...     Save a durable memory as Markdown
   spark install [--bin dir] Link the spark launcher onto PATH
   spark uninstall [--bin dir]
                             Remove the spark launcher only
@@ -863,11 +1061,20 @@ Update exit codes:
   2 usage error                               3 check or upgrade failed
   4 another update is in progress
 
+  Configuration:
+  ~/.spark/config.toml and <cwd>/.spark/config.toml are merged (project wins).
+  Sections: [agent] [providers] [models] (model channels),
+            [permissions] mode/allow/deny/ask, [tools] enabled/disabled,
+            [mcp.servers.<name>] command|url,
+            [memory] enabled/max_inject_tokens/agent_id.
+
 Options:
   -p, --prompt <text>       Task prompt
   -m, --model <id>          Select a local id, SparkWork route id, or unique model name
   -c, --continue            Continue the most recent session in this directory
   -r, --resume [<id>]       Resume a session; without an id pick one in the TUI
+      --global              With 'spark config': use ~/.spark/config.toml (default)
+      --project             With 'spark config': use <cwd>/.spark/config.toml
       --bin <dir>           Launcher directory for install/uninstall (default ~/.spark/bin)
       --base <url>          Release base for update (default SPARK_RELEASE_BASE, SPARK_INSTALL_BASE,
                             [update] base_url in config.toml, then the built-in release host)
@@ -884,6 +1091,13 @@ Options:
       --effort <level>      Reasoning effort: off | low | medium | high | max (default: high)
       --dangerously-skip-permissions
                              Alias for --permission-mode bypass
+      --scope <scope>       With 'spark memory': user | project | agent
+      --name <name>         With 'spark memory save': memory title
+      --description <text>  With 'spark memory save': compact summary
+      --body <markdown>     With 'spark memory save': complete memory body
+      --type <type>         With 'spark memory save': user | feedback | project | reference
+      --confidence <0..1>   With 'spark memory save': confidence score
+      --agent <id>          With 'spark memory': agent scope profile id
   -h, --help                Show help
   -V, --version             Show version
 `
@@ -946,9 +1160,27 @@ function terminalDiagnostic(value: string, maxLength = 2_048): string {
   return safe.length <= maxLength ? safe : `${safe.slice(0, Math.max(0, maxLength - 1))}…`
 }
 
-function createConfiguredAgent(runtime: ConfiguredModelRuntime): Agent {
-  const cwd = process.cwd()
-  return Agent.open({ cwd, env: createDefaultEnv({ cwd, llm: runtime.service }) })
+/**
+ * Builds the session env from the layered `[permissions]` / `[tools]` / `[mcp]`
+ * configuration. A broken MCP entry degrades to built-in tools with a
+ * diagnostic instead of aborting the run.
+ */
+async function openConfiguredEnv(
+  runtime: ConfiguredModelRuntime,
+  engineSettings: ResolvedEngineSettings,
+): Promise<ManagedEnvResult> {
+  const managed = await createResilientEnv({
+    cwd: process.cwd(),
+    llm: runtime.service,
+    ...engineSettings,
+  })
+  if (managed.mcpError !== undefined) {
+    process.stderr.write(
+      `MCP servers were not connected: ${terminalDiagnostic(managed.mcpError)}\n` +
+        'Continuing without MCP tools. Review the [mcp] section with `spark config list`.\n',
+    )
+  }
+  return managed
 }
 
 function warnPermissionBypass(mode: PermissionMode): void {

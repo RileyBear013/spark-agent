@@ -7,6 +7,7 @@ import type {
 } from '../seams.js'
 import type { IrMessage, SystemSection } from '../llm/types.js'
 import type { InstructionProvider } from '../memory/instructions.js'
+import type { MemoryProvider } from '../memory/store.js'
 import { SPARK_KERNEL_PROMPT } from '../prompts/kernel.js'
 import type { AgentEvent } from './schema.js'
 
@@ -67,17 +68,21 @@ export interface DefaultPromptComposerOptions {
   readonly systemPrompt?: string
   /** Progressive skill context supplied by the host. */
   readonly skillSystemPrompt?: string
+  /** Optional local/host memory provider for compact session injection. */
+  readonly memory?: MemoryProvider
 }
 
 export class DefaultPromptComposer implements PromptComposer {
   readonly #instructions: InstructionProvider | undefined
   readonly #systemPrompt: string | undefined
   readonly #skillSystemPrompt: string | undefined
+  readonly #memory: MemoryProvider | undefined
 
   constructor(options: DefaultPromptComposerOptions = {}) {
     this.#instructions = options.instructions
     this.#systemPrompt = nonEmpty(options.systemPrompt)
     this.#skillSystemPrompt = nonEmpty(options.skillSystemPrompt)
+    this.#memory = options.memory
   }
 
   async compose(facts: SessionFacts, config: ProjectorConfig): Promise<readonly SystemSection[]> {
@@ -118,6 +123,21 @@ export class DefaultPromptComposer implements PromptComposer {
         stability: 'stable',
         content: this.#skillSystemPrompt,
       })
+    }
+    if (this.#memory) {
+      try {
+        const memory = await this.#memory.injection()
+        if (memory.block.length > 0) {
+          sections.splice(1, 0, {
+            id: 'long-term-memory',
+            stability: 'stable',
+            content: memory.block,
+          })
+        }
+      } catch {
+        // Memory is an optional context enhancement; a store failure must not
+        // make the main turn unavailable. The store itself logs diagnostics.
+      }
     }
     if (facts.warning) {
       sections.push({ id: 'budget-warning', stability: 'volatile', content: facts.warning })

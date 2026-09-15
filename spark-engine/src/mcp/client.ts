@@ -11,6 +11,7 @@ import type { ToolExecutor, ToolCallContext, ToolOwner } from '../seams.js'
 import type { ResolvedToolCall, ToolDefinition, ToolOutcome } from '../tools/contract.js'
 import { withCustomEnvironment } from '../tools/workspace/process.js'
 import { SPARK_ENGINE_VERSION } from '../version.js'
+import type { MemoryToolExecutor } from '../memory/tools.js'
 import type { SparkMcpServerConfig, SparkMcpServerMap } from './types.js'
 
 const DEFAULT_MCP_TIMEOUT_MS = 120_000
@@ -203,7 +204,8 @@ function createTransport(
 export class CompositeToolExecutor implements ToolExecutor {
   constructor(
     private readonly builtIn: ToolExecutor,
-    private readonly mcp: McpToolManager,
+    private readonly mcp?: McpToolManager,
+    private readonly memory?: MemoryToolExecutor,
   ) {}
 
   assertTurnSettled(owner: ToolOwner): void {
@@ -215,9 +217,9 @@ export class CompositeToolExecutor implements ToolExecutor {
   }
 
   execute(call: ResolvedToolCall, context: ToolCallContext): Promise<ToolOutcome> {
-    return this.mcp.hasTool(call.name)
-      ? this.mcp.execute(call, context)
-      : this.builtIn.execute(call, context)
+    if (this.memory?.hasTool(call.name)) return this.memory.execute(call, context)
+    if (this.mcp?.hasTool(call.name)) return this.mcp.execute(call, context)
+    return this.builtIn.execute(call, context)
   }
 }
 
