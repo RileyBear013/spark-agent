@@ -23,6 +23,7 @@ import { executeConfigCommand } from './config-command.js'
 import { executeMcpCommand, type McpAddInput } from './mcp-command.js'
 import { executeMemoryCommand } from './memory-command.js'
 import { executePlanCommand } from './plan-command.js'
+import { executeSkillsCommand } from './skills-command.js'
 import { executeTodoCommand } from './todo-command.js'
 import { JsonlSessionStore, shortSessionId } from '../events/ledger.js'
 import type { AgentEvent } from '../events/schema.js'
@@ -87,6 +88,8 @@ interface CliOptions {
   /** `spark plan` command flags. */
   readonly planBody?: string
   readonly planSessionId?: string
+  /** `spark skills` command flags. */
+  readonly skillLimit?: string
   /** `spark todo` command flags. */
   readonly todoTitle?: string
   readonly todoStatus?: string
@@ -214,7 +217,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       ...(options.memoryScope === undefined ? {} : { scope: options.memoryScope }),
       ...(options.memoryLimit === undefined ? {} : { limit: options.memoryLimit }),
       ...(options.memoryName === undefined ? {} : { name: options.memoryName }),
-      ...(options.memoryDescription === undefined ? {} : { description: options.memoryDescription }),
+      ...(options.memoryDescription === undefined
+        ? {}
+        : { description: options.memoryDescription }),
       ...(options.memoryBody === undefined ? {} : { body: options.memoryBody }),
       ...(options.memoryType === undefined ? {} : { type: options.memoryType }),
       ...(options.memoryConfidence === undefined ? {} : { confidence: options.memoryConfidence }),
@@ -264,6 +269,25 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       dataRoot: defaultSparkHome(),
       ...(options.planBody === undefined ? {} : { body: options.planBody }),
       ...(options.planSessionId === undefined ? {} : { sessionId: options.planSessionId }),
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
+  }
+  if (maintenance === 'skills') {
+    if (options.prompt) {
+      process.stderr.write('spark skills does not accept a task prompt.\n')
+      return 2
+    }
+    return executeSkillsCommand({
+      subcommand: options.positionals[1] ?? '',
+      args: options.positionals.slice(2),
+      json: options.json,
+      cwd: process.cwd(),
+      ...(options.skillLimit === undefined ? {} : { limit: options.skillLimit }),
       stdout: (text) => {
         process.stdout.write(text)
       },
@@ -701,6 +725,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     ...(parsed.values.priority === undefined ? {} : { todoPriority: parsed.values.priority }),
     ...(parsed.values.notes === undefined ? {} : { todoNotes: parsed.values.notes }),
     ...(parsed.values.limit === undefined ? {} : { todoLimit: parsed.values.limit }),
+    ...(parsed.values.limit === undefined ? {} : { skillLimit: parsed.values.limit }),
     todoAll: parsed.values.all ?? false,
     positionals: parsed.positionals,
   }
@@ -1123,6 +1148,8 @@ Usage:
                             Append Markdown to a session plan
   spark plan clear [session]
                             Clear a session plan
+  spark skills list [query] List local skills by name and description
+  spark skills read <id>   Load one complete local SKILL.md instruction body
   spark todo list            List current project tasks
   spark todo add <title>     Add a pending task
   spark todo update <id>     Update task fields
@@ -1181,7 +1208,7 @@ Options:
       --type <type>         With 'spark memory save': user | feedback | project | reference
       --confidence <0..1>   With 'spark memory save': confidence score
       --agent <id>          With 'spark memory': agent scope profile id
-      --limit <n>           With 'spark memory search' or 'spark todo list': max results
+      --limit <n>           With 'spark memory search', 'spark skills list', or 'spark todo list': max results
       --title <text>        With 'spark todo add|update': task title
       --status <status>     With 'spark todo': pending | in_progress | completed | cancelled
       --priority <level>    With 'spark todo': low | normal | high
@@ -1261,6 +1288,7 @@ async function openConfiguredEnv(
   const managed = await createResilientEnv({
     cwd: process.cwd(),
     llm: runtime.service,
+    skillsEnabled: true,
     ...engineSettings,
   })
   if (managed.mcpError !== undefined) {

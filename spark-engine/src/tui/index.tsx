@@ -60,6 +60,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     cwd,
     approver,
     llm: switchable,
+    skillsEnabled: true,
     ...(options.dataRoot === undefined ? {} : { dataRoot: options.dataRoot }),
     ...(options.engineSettings ?? {}),
   })

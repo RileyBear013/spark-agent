@@ -15,6 +15,8 @@ import { FileMemoryStore } from './memory/store.js'
 import { memoryToolDefinitions, MemoryToolExecutor } from './memory/tools.js'
 import { CompositeToolExecutor, McpToolManager } from './mcp/client.js'
 import type { SparkMcpServerMap } from './mcp/types.js'
+import { LocalSkillCatalog } from './skills/catalog.js'
+import { skillToolDefinitions, SkillToolExecutor } from './skills/tools.js'
 import type { LlmService } from './seams.js'
 import type { ToolDefinition } from './tools/contract.js'
 import type { AgentEnv, Approver } from './seams.js'
@@ -45,6 +47,8 @@ export interface DefaultEnvOptions {
   readonly approver?: Approver
   readonly systemPrompt?: string
   readonly skillSystemPrompt?: string
+  /** Enables local `skills_list` / `skills_load` for CLI/TUI hosts. */
+  readonly skillsEnabled?: boolean
   readonly customEnv?: Readonly<Record<string, string>>
   /** Tool names that may run without an interactive approval in manual mode. */
   readonly allowedTools?: readonly string[]
@@ -167,6 +171,7 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
       [
         ...workspaceToolDefinitions,
         ...(memoryEnabled ? memoryToolDefinitions : []),
+        ...(options.skillsEnabled === true ? skillToolDefinitions : []),
         ...todoToolDefinitions,
         ...planToolDefinitions,
         webFetchToolDefinition,
@@ -182,6 +187,10 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
   const workspaceExecutor = new WorkspaceToolExecutor(options.cwd, options.customEnv)
   const todoExecutor = new TodoToolExecutor(new TodoStore({ cwd: options.cwd, logger }))
   const planExecutor = new PlanToolExecutor(new PlanStore({ cwd: options.cwd, logger }))
+  const skillExecutor =
+    options.skillsEnabled === true
+      ? new SkillToolExecutor(new LocalSkillCatalog({ cwd: options.cwd, logger }))
+      : undefined
   const webFetchExecutor = new WebFetchToolExecutor(logger)
   const executor = new CompositeToolExecutor(
     workspaceExecutor,
@@ -190,6 +199,7 @@ function buildDefaultEnv(options: DefaultEnvOptions, mcp?: McpToolManager): Agen
     todoExecutor,
     planExecutor,
     webFetchExecutor,
+    skillExecutor,
   )
   const hooks = loadHookRunner({
     cwd: options.cwd,

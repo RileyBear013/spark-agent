@@ -216,6 +216,25 @@ directory. The model gets a no-approval `plan` read tool and a serialized, permi
 `plan_update` write tool with `set`, `append`, and `clear` operations. Plan content is capped at
 256 KiB and written atomically.
 
+### Local skills and progressive disclosure
+
+CLI/TUI sessions discover local `SKILL.md` documents from the user home and the current directory's
+ancestor chain. Supported roots are `.spark/skills`, `.claude/skills`, `.codex/skills`, and
+`.agents/skills`; a more specific project root overrides a global skill with the same name. Each
+document needs YAML frontmatter with non-empty `name` and `description` fields.
+
+```bash
+spark skills list
+spark skills list react --limit 20
+spark skills read <skill_id_or_name>
+```
+
+The model receives `skills_list` as a compact name/description catalog and calls `skills_load` only
+when it has selected a skill. Loading returns the Markdown body without frontmatter, is read-only,
+and never executes scripts from the skill directory. Documents are bounded to 256 KiB by default;
+the SDK keeps this tool family opt-in through `skillsEnabled` so existing embeddings do not change
+their default tool set.
+
 ## Model configuration
 
 Spark reads `~/.spark/config.toml` and then project `.spark/config.toml`. Provider credentials are referenced by environment-variable name and are never stored in the config or session snapshot.
@@ -264,7 +283,7 @@ produces a result/status record and returns a non-zero process status.
 
 The production CLI/TUI requires a configured real model. `FakeModel`, `VirtualFileSystem`, and `FakeShell` remain exported only as deterministic SDK test seams.
 
-Built-in workspace tools are `read`, `glob`, `grep`, `write`, `edit`, and `bash`; `web_fetch` retrieves bounded readable text from HTTPS pages (localhost HTTP is allowed for development) and always uses the external-tool approval class. The `task` tool can delegate focused prompts to isolated child sessions: children are read-only by default, `allowed_tools` is an exact capability allowlist, and each child has independent step/tool-call/time budgets while inheriting the parent turn's permission mode and reasoning effort. Independent read-only task calls from one model step run concurrently, with a shared SDK limit of four active children by default (`maxConcurrentSubagents`, 1–32); mutation-capable children remain serial while they share a workspace. Child ledgers are hidden from normal session listings and `--continue`; the returned child session id can be used for explicit inspection or resume, with its allowlist re-applied. File writes are atomic and require the SHA-256 revision returned by `read` when replacing an existing file.
+Built-in workspace tools are `read`, `glob`, `grep`, `write`, `edit`, and `bash`; `web_fetch` retrieves bounded readable text from HTTPS pages (localhost HTTP is allowed for development) and always uses the external-tool approval class. CLI/TUI also expose local `skills_list` / `skills_load` for progressive `SKILL.md` disclosure. The `task` tool can delegate focused prompts to isolated child sessions: children are read-only by default, `allowed_tools` is an exact capability allowlist, and each child has independent step/tool-call/time budgets while inheriting the parent turn's permission mode and reasoning effort. Independent read-only task calls from one model step run concurrently, with a shared SDK limit of four active children by default (`maxConcurrentSubagents`, 1–32); mutation-capable children remain serial while they share a workspace. Child ledgers are hidden from normal session listings and `--continue`; the returned child session id can be used for explicit inspection or resume, with its allowlist re-applied. File writes are atomic and require the SHA-256 revision returned by `read` when replacing an existing file.
 
 When Spark is embedded by a host, the host can provide stable system/skill prompt sections, custom environment variables, permission lists, and MCP servers. Spark passes custom environment variables only to its workspace shell and hook children; configured MCP servers receive only their own explicit server environment. MCP `stdio` and Streamable HTTP transports are supported by the Spark engine; legacy SSE and in-process SDK servers are skipped at the boundary. Host team tools use the same Streamable HTTP bridge as other external consumers, so tool calls retain normal permission and event handling.
 

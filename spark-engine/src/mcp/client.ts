@@ -12,6 +12,7 @@ import type { ResolvedToolCall, ToolDefinition, ToolOutcome } from '../tools/con
 import { withCustomEnvironment } from '../tools/workspace/process.js'
 import { SPARK_ENGINE_VERSION } from '../version.js'
 import type { MemoryToolExecutor } from '../memory/tools.js'
+import type { SkillToolExecutor } from '../skills/tools.js'
 import type { TodoToolExecutor } from '../tools/todo/tools.js'
 import type { PlanToolExecutor } from '../tools/plan/tools.js'
 import type { WebFetchToolExecutor } from '../tools/web-fetch.js'
@@ -212,6 +213,8 @@ export class CompositeToolExecutor implements ToolExecutor {
     private readonly todo?: TodoToolExecutor,
     private readonly plan?: PlanToolExecutor,
     private readonly webFetch?: WebFetchToolExecutor,
+    /** Appended to preserve the positional constructor contract for SDK hosts. */
+    private readonly skills?: SkillToolExecutor,
   ) {}
 
   assertTurnSettled(owner: ToolOwner): void {
@@ -224,6 +227,7 @@ export class CompositeToolExecutor implements ToolExecutor {
 
   execute(call: ResolvedToolCall, context: ToolCallContext): Promise<ToolOutcome> {
     if (this.memory?.hasTool(call.name)) return this.memory.execute(call, context)
+    if (this.skills?.hasTool(call.name)) return this.skills.execute(call, context)
     if (this.todo?.hasTool(call.name)) return this.todo.execute(call, context)
     if (this.plan?.hasTool(call.name)) return this.plan.execute(call, context)
     if (this.webFetch?.hasTool(call.name)) return this.webFetch.execute(call, context)
