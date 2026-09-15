@@ -726,9 +726,20 @@ function truncateGoalSupplementaryMessage(message: string): string {
   return `${trimmed.slice(0, GOAL_SUPPLEMENTARY_MESSAGE_MAX_CHARS)}…[truncated]`
 }
 
+/**
+ * 进度条目是否落在当前预算周期内（cycleStartMs <= 0 表示没有周期语义，全部计入）。
+ * createdAt 不可解析时按「在周期内」处理，让轮次/熔断在脏数据下依然从严生效。
+ */
+function isGoalProgressEntryInBudgetCycle(entry: GoalProgressEntry, cycleStartMs: number): boolean {
+  if (cycleStartMs <= 0) return true
+  const ts = Date.parse(entry.createdAt)
+  return !Number.isFinite(ts) || ts >= cycleStartMs
+}
+
 function buildGoalIterationPrompt(
   goal: StoredSessionGoal,
   supplementaryUserMessages: string[] = [],
+  cycleStartMs = 0,
 ): string {
   const progress =
     goal.progressLog
@@ -752,8 +763,21 @@ function buildGoalIterationPrompt(
   const commands = goal.validation.commands?.length
     ? goal.validation.commands.map((item) => `- ${item}`).join('\n')
     : '- Choose the narrowest safe validation command(s) available; if none can run, explain why.'
-  const maxIterations = goal.budget.maxIterations ?? 12
-  const iterationHeader = `Recent progress (iteration ${goal.progressLog.length + 1} of ${maxIterations}):`
+  // 未设置 maxIterations 时不再展示轮次上限：目标自决跑到完成，仅按轮次序号汇报进度。
+  // 轮次按「当前预算周期」汇报：resume 会开启新周期，若仍用累计值就会出现
+  // "iteration 3 of 2" 这种自相矛盾的预算暗示，反而催模型提前收口。
+  const overallIteration = goal.progressLog.length + 1
+  const cycleIteration =
+    goal.progressLog.filter((entry) => isGoalProgressEntryInBudgetCycle(entry, cycleStartMs))
+      .length + 1
+  const crossedBudgetCycles = cycleIteration < overallIteration
+  const cycleNote = crossedBudgetCycles
+    ? `, ${overallIteration} iterations overall across budget cycles`
+    : ''
+  const iterationHeader =
+    goal.budget.maxIterations != null
+      ? `Recent progress (iteration ${cycleIteration} of ${goal.budget.maxIterations}${cycleNote}):`
+      : `Recent progress (iteration ${cycleIteration}${cycleNote}):`
   const lastError =
     goal.lastError != null && goal.lastError.length > 0
       ? ['', `Last recorded error (already accounted for, do not repeat it):\n${goal.lastError}`]
@@ -9596,7 +9620,9 @@ export class SessionService {
       successCriteria: params.successCriteria ?? [],
       constraints: params.constraints ?? [],
       validation: params.validation ?? {},
-      budget: params.budget ?? { maxIterations: 12, maxConsecutiveFailures: 3, noProgressLimit: 3 },
+      // 默认不设轮次上限（对齐 Codex 等主流「模型自驱完成」）：目标自决跑到完成，
+      // 仅保留连续失败/无进展两类卡死熔断；显式传入 budget 时按调用方配置生效。
+      budget: params.budget ?? { maxConsecutiveFailures: 3, noProgressLimit: 3 },
       mode,
     })
     // /goal 命令走 executeCommandAsEvents，不经过 dispatchTurn 的首轮标题派生与
@@ -9722,13 +9748,17 @@ export class SessionService {
       return { goal: toProtocolGoal(updated) }
     }
     if (params.action === 'resume') {
+      // 从预算/熔断停机恢复时显式说明「开启新周期」，否则时间线上只有一次停机 + 后续
+      // 迭代，用户无法判断之前触顶的预算为何重新可用。
+      const budgetStopped = goal.status === 'stopped_by_budget'
       const updated = repo.updateStatus(goal.id, 'active')
       this.emitGoalEvent(
         params.sessionId,
         updated ?? goal,
         'goal_resumed',
         'active',
-        params.summary ?? 'Goal resumed',
+        params.summary ??
+          (budgetStopped ? 'Goal resumed with a fresh budget cycle' : 'Goal resumed'),
       )
       await this.startGoalLoop(params.sessionId)
       return { goal: toProtocolGoal(updated) }
@@ -9760,8 +9790,10 @@ export class SessionService {
    * 累计目标暂停时长（ms）：按 goal_paused → goal_resumed 事件配对求和。
    * 未闭合的暂停（当前仍处于 paused）计到当前时刻。事件按 goalId 过滤，
    * 同会话旧目标的暂停不计入新目标。
+   * sinceMs 传预算周期起点时只累计该时刻之后的暂停（跨周期的暂停按边界裁剪），
+   * 默认 0 即全量累计，与旧行为一致。
    */
-  private computeGoalPausedMs(sessionId: string, goal: StoredSessionGoal): number {
+  private computeGoalPausedMs(sessionId: string, goal: StoredSessionGoal, sinceMs = 0): number {
     try {
       const eventRepo = new EventRepository(this.db)
       const collectTimestamps = (eventType: string): number[] =>
@@ -9784,12 +9816,10 @@ export class SessionService {
       let pausedMs = 0
       for (const pauseTs of pauses) {
         const resumeIdx = resumes.findIndex((resumeTs) => resumeTs >= pauseTs)
-        if (resumeIdx === -1) {
-          pausedMs += Date.now() - pauseTs
-          break
-        }
-        pausedMs += resumes[resumeIdx]! - pauseTs
-        resumes.splice(resumeIdx, 1)
+        const endTs = resumeIdx === -1 ? Date.now() : resumes[resumeIdx]!
+        if (resumeIdx !== -1) resumes.splice(resumeIdx, 1)
+        pausedMs += Math.max(0, endTs - Math.max(pauseTs, sinceMs))
+        if (resumeIdx === -1) break
       }
       return Math.max(0, pausedMs)
     } catch {
@@ -9798,20 +9828,40 @@ export class SessionService {
     }
   }
 
-  private getGoalLoopBudgetStopSummary(sessionId: string, goal: StoredSessionGoal): string | null {
+  private getGoalLoopBudgetStopSummary(
+    sessionId: string,
+    goal: StoredSessionGoal,
+    cycleStartMs: number,
+  ): string | null {
     const budget = goal.budget ?? {}
-    const maxIterations = budget.maxIterations ?? 12
-    if (goal.progressLog.length >= maxIterations) {
-      return `Goal stopped after ${maxIterations} iterations.`
+    // 预算按「周期」结算（周期起点由调用方经 getGoalBudgetCycleStartMs 算出）：停机不是
+    // 死刑——停机后用户「继续」即开启新周期（轮次/时长/成本/熔断都重新起算），否则
+    // startGoalLoop 会立刻被同一条件再次停车，目标只能清除重建。暂停→恢复不算新周期，
+    // 这类目标周期起点仍是 createdAt，与旧行为一致。
+    const cycleProgressLog = goal.progressLog.filter((entry) =>
+      isGoalProgressEntryInBudgetCycle(entry, cycleStartMs),
+    )
+    // maxIterations 未设置时不再按轮次停车：完成判定交给模型自驱（或由
+    // maxConsecutiveFailures / noProgressLimit 卡死熔断兜底）；显式设置仍生效。
+    if (
+      budget.maxIterations != null &&
+      budget.maxIterations > 0 &&
+      cycleProgressLog.length >= budget.maxIterations
+    ) {
+      return `Goal stopped after ${budget.maxIterations} iterations.`
     }
 
     if (budget.maxBudgetUsd != null && Number.isFinite(budget.maxBudgetUsd)) {
       try {
-        // 预算只统计目标自身的消耗（goal 创建时刻起），不含目标开始前的会话聊天。
+        // 预算只统计目标自身当前周期的消耗，不含目标开始前的会话聊天；
+        // createdAt 不可解析时保持旧口径（createdAt 原值），不让预算判定失效。
         const ledger = new UsageLedgerRepository(this.db)
         const usage =
           typeof ledger.getSessionUsageSince === 'function'
-            ? ledger.getSessionUsageSince(sessionId, goal.createdAt)
+            ? ledger.getSessionUsageSince(
+                sessionId,
+                cycleStartMs > 0 ? new Date(cycleStartMs).toISOString() : goal.createdAt,
+              )
             : ledger.getSessionUsage(sessionId)
         if (usage.totalCostUsd >= budget.maxBudgetUsd) {
           return `Goal stopped after reaching budget limit: $${usage.totalCostUsd.toFixed(4)} >= $${budget.maxBudgetUsd.toFixed(4)}.`
@@ -9822,12 +9872,11 @@ export class SessionService {
     }
 
     if (budget.maxRuntimeMinutes != null && Number.isFinite(budget.maxRuntimeMinutes)) {
-      const createdAtMs = Date.parse(goal.createdAt)
-      if (Number.isFinite(createdAtMs)) {
-        // 运行时长排除暂停时段：goal_paused → goal_resumed 的间隔不计入，
-        // 否则暂停一小时会直接吃掉 maxRuntimeMinutes 的全部额度。
-        const pausedMs = this.computeGoalPausedMs(sessionId, goal)
-        const activeMinutes = (Date.now() - createdAtMs - pausedMs) / 60_000
+      if (cycleStartMs > 0) {
+        // 运行时长只累计当前周期，并排除周期内的暂停：goal_paused → goal_resumed 的
+        // 间隔不计入，否则暂停一小时会直接吃掉 maxRuntimeMinutes 的全部额度。
+        const pausedMs = this.computeGoalPausedMs(sessionId, goal, cycleStartMs)
+        const activeMinutes = (Date.now() - cycleStartMs - pausedMs) / 60_000
         if (activeMinutes >= budget.maxRuntimeMinutes) {
           const pausedMinutes = pausedMs / 60_000
           const pausedNote =
@@ -9838,22 +9887,60 @@ export class SessionService {
     }
 
     if (budget.maxConsecutiveFailures != null && budget.maxConsecutiveFailures > 0) {
-      const trailingFailures = this.countTrailingFailureLikeGoalProgress(goal.progressLog)
+      const trailingFailures = this.countTrailingFailureLikeGoalProgress(cycleProgressLog)
       if (trailingFailures >= budget.maxConsecutiveFailures) {
         return `Goal stopped after ${trailingFailures} consecutive failed or blocked iterations.`
       }
     }
 
     if (budget.noProgressLimit != null && budget.noProgressLimit > 0) {
-      const trailingNoProgress = this.countTrailingContinueEntriesWithoutProgressEvidence(
-        goal.progressLog,
-      )
+      const trailingNoProgress =
+        this.countTrailingContinueEntriesWithoutProgressEvidence(cycleProgressLog)
       if (trailingNoProgress >= budget.noProgressLimit) {
         return `Goal stopped after ${trailingNoProgress} consecutive iterations without progress evidence.`
       }
     }
 
     return null
+  }
+
+  /**
+   * 当前预算周期起点（ms）：目标创建时刻，或最近一次 goal_resumed 时刻。
+   * 只有「预算/熔断停机之后的第一次继续」才开启新周期：暂停 → 恢复属于同一运行周期，
+   * 不能借它重置预算（maxRuntimeMinutes「排除暂停时长但继续累计」的语义正建立在这点上）。
+   * 事件来源与 computeGoalPausedMs 同源，并按 goalId 过滤（同会话旧目标的事件不计入）；
+   * 事件读取失败（旧库、测试 double）按「未停机过」处理，保持向后兼容；
+   * createdAt 不可解析时回落到 0，调用方据此保持旧口径而不是让预算判定失效。
+   */
+  private getGoalBudgetCycleStartMs(sessionId: string, goal: StoredSessionGoal): number {
+    const createdMs = Date.parse(goal.createdAt)
+    const fallbackMs = Number.isFinite(createdMs) ? createdMs : 0
+    try {
+      const eventRepo = new EventRepository(this.db)
+      const collectTimestamps = (eventType: string): number[] =>
+        eventRepo
+          .queryBySession({ sessionId, eventType, limit: 1000 })
+          .events.flatMap((row) => {
+            try {
+              const parsed = JSON.parse(row.event_json) as { goalId?: unknown; timestamp?: unknown }
+              if (parsed.goalId !== goal.id || typeof parsed.timestamp !== 'string') return []
+              const ts = Date.parse(parsed.timestamp)
+              return Number.isFinite(ts) ? [ts] : []
+            } catch {
+              return []
+            }
+          })
+          .sort((a, b) => a - b)
+      let cycleStartMs = fallbackMs
+      const resumes = collectTimestamps('goal_resumed')
+      for (const stopTs of collectTimestamps('goal_budget_stopped')) {
+        const nextResume = resumes.find((resumeTs) => resumeTs > stopTs)
+        if (nextResume != null) cycleStartMs = Math.max(cycleStartMs, nextResume)
+      }
+      return cycleStartMs
+    } catch {
+      return fallbackMs
+    }
   }
 
   private countTrailingFailureLikeGoalProgress(progressLog: GoalProgressEntry[]): number {
@@ -10019,17 +10106,28 @@ export class SessionService {
     const goal = repo.getCurrent(sessionId)
     if (goal == null || goal.status !== 'active') return
     if (this.hasActiveSessionExecution(sessionId)) return
-    const budgetStopSummary = this.getGoalLoopBudgetStopSummary(sessionId, goal)
+    // 预算周期起点（创建或最近一次「继续」）在一次泵运行内只解析一次：停车判定与迭代
+    // prompt 的轮次口径必须同源，否则两者会给出互相矛盾的轮次。
+    const cycleStartMs = this.getGoalBudgetCycleStartMs(sessionId, goal)
+    const cycleIterations =
+      goal.progressLog.filter((entry) => isGoalProgressEntryInBudgetCycle(entry, cycleStartMs))
+        .length + 1
+    const budgetStopSummary = this.getGoalLoopBudgetStopSummary(sessionId, goal, cycleStartMs)
     if (budgetStopSummary != null) {
       log.warn('goal loop: stopped by budget', { sessionId, goalId: goal.id })
       this.stopGoalLoopByBudget(repo, sessionId, goal, budgetStopSummary)
       return
     }
-    log.info('goal loop: iteration', { sessionId, iteration: goal.progressLog.length + 1 })
+    log.info('goal loop: iteration', {
+      sessionId,
+      iteration: goal.progressLog.length + 1,
+      cycleIteration: cycleIterations,
+      budgetCycleStartMs: cycleStartMs,
+    })
     const turnId = crypto.randomUUID()
     const goalAttachments = attachments ?? this.findGoalSourceAttachments(sessionId, goal.objective)
     const supplementaryUserMessages = this.drainQueuedUserTurnsForGoalIteration(sessionId)
-    const prompt = buildGoalIterationPrompt(goal, supplementaryUserMessages)
+    const prompt = buildGoalIterationPrompt(goal, supplementaryUserMessages, cycleStartMs)
     // 启动只发事件、不写 progressLog：真实进度条目唯一来源是 turn 结束时解析的
     // spark-goal-status 块。此前每轮先 append 一条固定 nextStep 的"启动占位条目"，
     // 导致 progressLog 每轮 +2——迭代计数双倍（maxIterations 减半生效）、

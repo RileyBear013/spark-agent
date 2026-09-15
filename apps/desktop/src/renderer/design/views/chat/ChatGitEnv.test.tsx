@@ -193,3 +193,55 @@ describe('GitEnvPanel open-terminal running indicator', () => {
     expect(terminalRow?.getAttribute('title')).toContain('终端运行中 (2)')
   })
 })
+
+describe('GitEnvPanel budget-stopped goal', () => {
+  let container: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    container.remove()
+  })
+
+  it('offers 继续 for a goal stopped by budget so it can be resumed', () => {
+    const onGoalControl = vi.fn()
+    act(() => {
+      root.render(
+        <GitEnvPanel
+          status={null}
+          branchState={{ currentBranch: 'master', branches: [] }}
+          onClose={vi.fn()}
+          onOpenCreateBranch={vi.fn()}
+          onOpenCommit={vi.fn()}
+          onOpenBranches={vi.fn()}
+          onOpenReview={vi.fn()}
+          onOpenTerminal={vi.fn()}
+          tasks={[]}
+          goal={{
+            goalId: 'goal-1',
+            objective: 'Ship the goal',
+            status: 'stopped_by_budget',
+            iteration: 5,
+            summary: 'Goal stopped after 3 consecutive failed or blocked iterations.',
+          }}
+          onGoalControl={onGoalControl}
+        />,
+      )
+    })
+
+    // 预算停机不再是终点：状态标签与「继续」入口都要出现在面板里。
+    expect(container.textContent).toContain('预算用尽')
+    const resumeButton = Array.from(container.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('继续'),
+    )
+    expect(resumeButton).toBeDefined()
+    act(() => resumeButton?.click())
+    expect(onGoalControl).toHaveBeenCalledWith('resume')
+  })
+})

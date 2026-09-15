@@ -355,6 +355,9 @@ function GitGoalSection({
   const isPaused = goal.status === 'paused'
   const isActive = goal.status === 'active'
   const isPendingContract = goal.status === 'pending_contract'
+  // 预算/熔断停机不再是终点：目标用尽预算后仍可「继续」，由后端开启新的预算周期。
+  const isBudgetStopped = goal.status === 'stopped_by_budget'
+  const canResume = isPaused || isBudgetStopped
 
   return (
     <div className="git-goal-section">
@@ -414,14 +417,14 @@ function GitGoalSection({
                 <Icons.Pause size={12} /> 暂停
               </button>
             )}
-            {isPaused && (
+            {canResume && (
               <button
                 type="button"
                 className="git-goal-action"
                 onClick={() => onGoalControl('resume')}
-                title="恢复目标循环"
+                title={isBudgetStopped ? '继续该目标并开启新的预算周期' : '恢复目标循环'}
               >
-                <Icons.Play size={12} /> 恢复
+                <Icons.Play size={12} /> {isBudgetStopped ? '继续' : '恢复'}
               </button>
             )}
             <button

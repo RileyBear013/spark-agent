@@ -120,8 +120,14 @@ vi.mock('@spark/storage', () => {
     nextSeqBySession(): number {
       return state.events.reduce((max, event) => Math.max(max, event.seq), -1) + 1
     }
-    queryBySession(): { events: unknown[]; hasMore: boolean } {
-      return { events: [], hasMore: false }
+    // 预算周期起点要读 goal_resumed 事件，这里按 eventType 过滤返回已 emit 的事件行，
+    // 与真实仓储的 queried 行为对齐（未指定 eventType 时返回全部）。
+    queryBySession(params?: { eventType?: string }): { events: unknown[]; hasMore: boolean } {
+      const eventType = params?.eventType
+      const events = state.events
+        .filter((event) => eventType == null || event.type === eventType)
+        .map((event) => ({ event_json: JSON.stringify(event), event_type: event.type }))
+      return { events, hasMore: false }
     }
     queryStreamEventsByTurn(): unknown[] {
       return []
@@ -235,7 +241,10 @@ function seedGoal(patch: Partial<StoredGoal> = {}): StoredGoal {
 function createService() {
   const emitted: AgentEvent[] = []
   const service = new TestSessionService({} as never, (event) => emitted.push(event))
-  const startTurn = vi.fn(async () => undefined)
+  // 显式声明参数元组：预算用例需要读取 startTurn 收到的迭代 prompt。
+  const startTurn = vi.fn(
+    async (_sessionId: string, _turnId: string, _prompt: string, ..._rest: unknown[]) => undefined,
+  )
   ;(service as unknown as { startTurn: typeof startTurn }).startTurn = startTurn
   const startGoalLoop = (
     service as unknown as { startGoalLoop(sessionId: string): Promise<void> }
@@ -416,5 +425,157 @@ describe('SessionService goal loop budget enforcement', () => {
         iteration: 2,
       }),
     )
+  })
+
+  it('keeps iterating past the legacy 12-round cap when no maxIterations budget is set', async () => {
+    // 自决式目标：默认不再按轮次停车，15 轮后仍应派发下一轮。
+    const progressLog = Array.from({ length: 15 }, (_, index) => ({
+      iteration: index + 1,
+      phase: 'act' as const,
+      status: 'continue' as const,
+      summary: `Step ${index + 1} landed`,
+      evidence: [`file-${index + 1}.ts`],
+      nextStep: `Handle step ${index + 2}`,
+      createdAt: '2026-06-30T10:00:00.000Z',
+    }))
+    seedGoal({
+      budget: { maxConsecutiveFailures: 3, noProgressLimit: 3 },
+      progressLog,
+    })
+    const { startGoalLoop, startTurn } = createService()
+
+    await startGoalLoop('session-1')
+
+    expect(state.goals.get('goal-1')?.status).toBe('active')
+    expect(startTurn).toHaveBeenCalledTimes(1)
+    const prompt = startTurn.mock.calls[0]![2]
+    expect(prompt).toContain('Recent progress (iteration 16):')
+    expect(prompt).not.toContain('of 12')
+  })
+
+  it('still stops before another turn when maxIterations is explicitly configured', async () => {
+    seedGoal({
+      budget: { maxIterations: 2 },
+      progressLog: [
+        {
+          iteration: 1,
+          phase: 'act',
+          status: 'continue',
+          summary: 'Step 1 landed',
+          evidence: ['file-1.ts'],
+          createdAt: '2026-06-30T10:00:00.000Z',
+        },
+        {
+          iteration: 2,
+          phase: 'act',
+          status: 'continue',
+          summary: 'Step 2 landed',
+          evidence: ['file-2.ts'],
+          createdAt: '2026-06-30T10:01:00.000Z',
+        },
+      ],
+    })
+    const { startGoalLoop, startTurn } = createService()
+
+    await startGoalLoop('session-1')
+
+    expect(state.goals.get('goal-1')?.status).toBe('stopped_by_budget')
+    expect(startTurn).not.toHaveBeenCalled()
+    expect(state.events).toContainEqual(
+      expect.objectContaining({
+        type: 'goal_budget_stopped',
+        status: 'stopped_by_budget',
+        summary: expect.stringContaining('2 iterations'),
+      }),
+    )
+  })
+
+  it('treats an explicit resume as a fresh budget cycle so a fuse-stopped goal can run again', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-30T10:03:00.000Z'))
+    seedGoal({
+      budget: { noProgressLimit: 2 },
+      progressLog: [
+        {
+          iteration: 1,
+          phase: 'act',
+          status: 'continue',
+          summary: 'Made a change',
+          evidence: ['file.ts'],
+          nextStep: 'Run tests',
+          createdAt: '2026-06-30T10:00:00.000Z',
+        },
+        {
+          iteration: 2,
+          phase: 'review',
+          status: 'continue',
+          summary: 'Still reviewing',
+          nextStep: 'Run tests',
+          createdAt: '2026-06-30T10:01:00.000Z',
+        },
+        {
+          iteration: 3,
+          phase: 'review',
+          status: 'continue',
+          summary: 'Still reviewing',
+          nextStep: 'Run tests',
+          createdAt: '2026-06-30T10:02:00.000Z',
+        },
+      ],
+    })
+    const { service, startTurn, startGoalLoop } = createService()
+
+    // 熔断停机：同一份 progressLog 直接再跑泵仍会被同一条件停车（停机不自愈）。
+    await startGoalLoop('session-1')
+    expect(state.goals.get('goal-1')?.status).toBe('stopped_by_budget')
+    expect(startTurn).not.toHaveBeenCalled()
+
+    vi.setSystemTime(new Date('2026-07-01T09:00:00.000Z'))
+    await service.controlGoal({ sessionId: 'session-1', action: 'resume' })
+
+    // resume 开启新周期：熔断窗口按最近一次 resume 重新起算，目标能继续跑。
+    expect(state.goals.get('goal-1')?.status).toBe('active')
+    expect(startTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('grants a fresh iteration allowance after resume instead of re-stopping on the spent maxIterations', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-30T10:03:00.000Z'))
+    seedGoal({
+      budget: { maxIterations: 2 },
+      progressLog: [
+        {
+          iteration: 1,
+          phase: 'act',
+          status: 'continue',
+          summary: 'Step 1 landed',
+          evidence: ['file-1.ts'],
+          createdAt: '2026-06-30T10:00:00.000Z',
+        },
+        {
+          iteration: 2,
+          phase: 'act',
+          status: 'continue',
+          summary: 'Step 2 landed',
+          evidence: ['file-2.ts'],
+          createdAt: '2026-06-30T10:01:00.000Z',
+        },
+      ],
+    })
+    const { service, startTurn, startGoalLoop } = createService()
+
+    // 触顶停机（真实链路：先发出 goal_budget_stopped，再由「继续」开启新周期）。
+    await startGoalLoop('session-1')
+    expect(state.goals.get('goal-1')?.status).toBe('stopped_by_budget')
+    expect(startTurn).not.toHaveBeenCalled()
+
+    vi.setSystemTime(new Date('2026-07-01T09:00:00.000Z'))
+    await service.controlGoal({ sessionId: 'session-1', action: 'resume' })
+
+    expect(startTurn).toHaveBeenCalledTimes(1)
+    const prompt = startTurn.mock.calls[0]![2]
+    // 轮次口径跟随新周期，不再出现「第 3 轮 / 共 2 轮」这种自相矛盾的预算暗示。
+    expect(prompt).toContain('Recent progress (iteration 1 of 2')
+    expect(prompt).toContain('3 iterations overall across budget cycles')
   })
 })
