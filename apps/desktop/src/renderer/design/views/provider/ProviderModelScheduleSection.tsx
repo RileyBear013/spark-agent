@@ -105,7 +105,7 @@ export function ProviderModelScheduleSection({
         </span>
         <span className="pv_section_title">定时禁用</span>
         <span className="pv_section_hint">
-          峰谷定价时段内，模型在全局不可见、不可选、不可用；时段结束自动恢复
+          峰谷定价时段内，模型在全局不可见、不可选、不可用
         </span>
         <button
           type="button"

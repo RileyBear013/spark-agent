@@ -29,7 +29,6 @@ export function SparkExecutorSwitch({
     <>
       <label className="pv_form_label">
         执行引擎
-        <span className="pv_form_sub">开启后该渠道会话默认使用自研 Spark 执行器执行任务</span>
       </label>
       <div className="pv_form_control_inline pv_spark_executor_control">
         <Switch

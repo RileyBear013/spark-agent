@@ -143,11 +143,6 @@ export function ProviderModelCatalog({
         <div className="pmc_head">
           <div className="pmc_head_main">
             <span className="pmc_title">已启用模型（全局可用）</span>
-            <span className="pmc_hint">
-              {scheduledBlockedCount > 0
-                ? `圆点设为默认，✕ 移除；${scheduledBlockedCount} 个模型处于定时禁用时段`
-                : '圆点设为默认，✕ 移除'}
-            </span>
           </div>
           <button
             type="button"
