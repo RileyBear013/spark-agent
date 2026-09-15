@@ -25,6 +25,7 @@ import { useToast } from '../components/Toast'
 import { useApp } from '../AppContext'
 import { useSessionSidebar } from '../SessionSidebarContext'
 import { filterProvidersForVisibleUi } from '../utils/auto-router-ui'
+import { filterConversationalProviders } from '../utils/provider-model-kind'
 import './ScheduledTasksView.less'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -968,8 +969,10 @@ function TaskFormPage({
   const [intervalSeconds, setIntervalSeconds] = useState(task?.intervalSeconds ?? 3600)
   const [cronExpression, setCronExpression] = useState(task?.cronExpression ?? '0 */1 * * *')
   const [runAt, setRunAt] = useState(task?.runAt ?? '')
+  // 执行主体只能有一个。旧表单允许 Agent / Team 双选，历史数据可能同时存了两者；
+  // 执行器实际只消费 agentId（resolveScheduledTaskRuntime），因此这里按同一优先级只保留 Agent。
   const [agentId, setAgentId] = useState(task?.agentId ?? '')
-  const [teamId, setTeamId] = useState(task?.teamId ?? '')
+  const [teamId, setTeamId] = useState(task?.agentId ? '' : (task?.teamId ?? ''))
   const [modelId, setModelId] = useState(task?.modelId ?? '')
   const [workspaceId, setWorkspaceId] = useState(task?.workspaceId ?? '')
   const [promptTemplate, setPromptTemplate] = useState(task?.promptTemplate ?? '')
@@ -1000,7 +1003,11 @@ function TaskFormPage({
       .then(([agentRes, teamRes, providerRes, workspaceRes]) => {
         setAgents(agentRes.agents ?? [])
         setTeams(teamRes.teams ?? [])
-        setProviders(filterProvidersForVisibleUi(providerRes.profiles ?? []))
+        // 定时任务执行的是文本 turn，多媒体渠道（图像/语音/视频）的模型不能进入候选：
+        // 主进程会按 modelId 反查渠道，选中多媒体模型会把 turn 落到图像/视频渠道上。
+        setProviders(
+          filterConversationalProviders(filterProvidersForVisibleUi(providerRes.profiles ?? [])),
+        )
         setWorkspaces(workspaceRes.workspaces ?? [])
       })
       .catch(console.error)
@@ -1024,6 +1031,23 @@ function TaskFormPage({
     () => workspaces.map((w) => ({ label: w.name, value: w.id })),
     [workspaces],
   )
+
+  // Agent / Team 互斥：执行主体只能有一个，选中一个就清空另一个。
+  const handleAgentChange = (value?: string) => {
+    setAgentId(value ?? '')
+    if (value) setTeamId('')
+  }
+
+  const handleTeamChange = (value?: string) => {
+    setTeamId(value ?? '')
+    if (value) setAgentId('')
+  }
+
+  const subjectHint = agentId
+    ? '已选择 Agent，Team 已禁用：执行主体只能有一个。'
+    : teamId
+      ? '已选择 Team，Agent 已禁用：执行主体只能有一个。'
+      : 'Agent 与 Team 互斥，只能选择一个作为执行主体。'
 
   const canSave = name.trim().length > 0 && promptTemplate.trim().length > 0
 
@@ -1334,45 +1358,50 @@ function TaskFormPage({
             </div>
           </div>
           <div className="st-form-section-body">
-            <div className="st-form-field-row">
-              <div className="st-form-field st-form-field--half">
-                <label className="st-field-label">
-                  <Icons.User style={{ marginRight: 4, fontSize: 13, verticalAlign: -1 }} />
-                  Agent
-                </label>
-                <Select
-                  {...(agentId ? { value: agentId } : {})}
-                  onChange={(v) => setAgentId(v as string)}
-                  placeholder="选择执行 Agent"
-                  allowClear
-                  showSearch
-                  filterOption={(input: string, option: any) =>
-                    (option?.props?.children ?? '').toLowerCase().includes(input.toLowerCase())
-                  }
-                  options={agentOptions}
-                  size="middle"
-                  notFoundContent="暂无可用 Agent"
-                />
+            <div className="st-form-subject-row">
+              <div className="st-form-field-row">
+                <div className="st-form-field st-form-field--half">
+                  <label className="st-field-label">
+                    <Icons.User style={{ marginRight: 4, fontSize: 13, verticalAlign: -1 }} />
+                    Agent
+                  </label>
+                  <Select
+                    {...(agentId ? { value: agentId } : {})}
+                    onChange={handleAgentChange}
+                    placeholder="选择执行 Agent"
+                    allowClear
+                    showSearch
+                    disabled={teamId !== ''}
+                    filterOption={(input: string, option: any) =>
+                      (option?.props?.children ?? '').toLowerCase().includes(input.toLowerCase())
+                    }
+                    options={agentOptions}
+                    size="middle"
+                    notFoundContent="暂无可用 Agent"
+                  />
+                </div>
+                <div className="st-form-field st-form-field--half">
+                  <label className="st-field-label">
+                    <Icons.Users style={{ marginRight: 4, fontSize: 13, verticalAlign: -1 }} />
+                    Team
+                  </label>
+                  <Select
+                    {...(teamId ? { value: teamId } : {})}
+                    onChange={handleTeamChange}
+                    placeholder="选择团队"
+                    allowClear
+                    showSearch
+                    disabled={agentId !== ''}
+                    filterOption={(input: string, option: any) =>
+                      (option?.props?.children ?? '').toLowerCase().includes(input.toLowerCase())
+                    }
+                    options={teamOptions}
+                    size="middle"
+                    notFoundContent="暂无可用团队"
+                  />
+                </div>
               </div>
-              <div className="st-form-field st-form-field--half">
-                <label className="st-field-label">
-                  <Icons.Users style={{ marginRight: 4, fontSize: 13, verticalAlign: -1 }} />
-                  Team
-                </label>
-                <Select
-                  {...(teamId ? { value: teamId } : {})}
-                  onChange={(v) => setTeamId(v as string)}
-                  placeholder="选择团队"
-                  allowClear
-                  showSearch
-                  filterOption={(input: string, option: any) =>
-                    (option?.props?.children ?? '').toLowerCase().includes(input.toLowerCase())
-                  }
-                  options={teamOptions}
-                  size="middle"
-                  notFoundContent="暂无可用团队"
-                />
-              </div>
+              <div className="st-form-hint">{subjectHint}</div>
             </div>
 
             <div className="st-form-field-row">
