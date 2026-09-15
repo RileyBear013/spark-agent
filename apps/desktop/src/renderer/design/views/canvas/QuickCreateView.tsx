@@ -17,9 +17,16 @@ import type {
   CanvasMediaTaskStreamPayload,
   CanvasTextTaskCreateResponse,
   CanvasTextTaskStreamPayload,
-  MediaCapabilityId,
   ProviderProfile,
 } from '@spark/protocol'
+import {
+  IMAGE_CAPABILITIES,
+  VIDEO_CAPABILITIES,
+  capabilityFor,
+  operationFor,
+  operationForSubmission,
+  type QuickCreateInput,
+} from './quickCreateCapability'
 import { Icons } from '../../Icons'
 import { SidebarExpandButton } from '../../SidebarExpandButton'
 import { useApp } from '../../AppContext'
@@ -49,7 +56,6 @@ import {
   partitionParameterFields,
   type CanvasParameterPresentation,
 } from './canvasParameterPresentation'
-import type { CanvasOperationType } from './canvas.types'
 import {
   canvasParameterHistoryScope,
   readCanvasParameterHistory,
@@ -93,11 +99,8 @@ import {
 } from './quickCreateTaskStreamSync'
 import './QuickCreateView.less'
 
-type QuickInput = CanvasMediaTaskInputFile & {
-  id: string
-  name: string
-  previewUrl: string
-}
+/** 快速创作表单输入素材，类型与能力选择模块共用。 */
+type QuickInput = QuickCreateInput
 
 const QUICK_CREATE_MAX_INPUT_BYTES = 72 * 1024 * 1024
 
@@ -542,14 +545,6 @@ function QuickCreateParameterPanel({
   )
 }
 
-const IMAGE_CAPABILITIES: MediaCapabilityId[] = ['image.generate', 'image.edit']
-const VIDEO_CAPABILITIES: MediaCapabilityId[] = [
-  'video.generate',
-  'video.image_to_video',
-  'video.reference_to_video',
-  'video.edit',
-]
-
 function now(): string {
   return new Date().toISOString()
 }
@@ -621,34 +616,6 @@ const REVERSE_BASE_INSTRUCTION =
 function buildReversePrompt(extraInstruction: string): string {
   const extra = extraInstruction.trim()
   return extra ? `${REVERSE_BASE_INSTRUCTION}\n用户补充要求：${extra}` : REVERSE_BASE_INSTRUCTION
-}
-
-function operationFor(mode: QuickCreateMode, inputs: readonly QuickInput[]): CanvasOperationType {
-  if (mode === 'reverse') return 'image_prompt_reverse'
-  if (mode === 'image') return inputs.length > 0 ? 'image_edit' : 'text_to_image'
-  if (inputs.some((input) => input.type === 'video')) return 'video_edit'
-  return inputs.length > 0 ? 'image_to_video' : 'text_to_video'
-}
-
-function capabilityFor(
-  mode: QuickCreateMode,
-  inputs: readonly QuickInput[],
-  model?: CanvasMediaModelSummary,
-): MediaCapabilityId | undefined {
-  if (mode === 'reverse') return undefined
-  const candidates: MediaCapabilityId[] =
-    mode === 'image'
-      ? inputs.length > 0
-        ? ['image.edit']
-        : IMAGE_CAPABILITIES
-      : inputs.some((input) => input.type === 'video')
-        ? ['video.edit']
-        : inputs.length > 0
-          ? ['video.image_to_video', 'video.reference_to_video', 'video.generate']
-          : ['video.generate', 'video.reference_to_video']
-  return (
-    candidates.find((id) => model?.capabilities.some((item) => item.id === id)) ?? candidates[0]
-  )
 }
 
 function quickInputFromTaskFile(file: CanvasMediaTaskInputFile, index: number): QuickInput {
@@ -978,14 +945,18 @@ export function QuickCreateView() {
         message.warning('图片反推仅支持一张输入图片')
         return
       }
+      const limit = mode === 'reverse' ? 1 : 6
       try {
         const prepared = await Promise.all(
           selectedPaths
-            .slice(0, mode === 'reverse' ? 1 : 6)
+            .slice(0, limit)
             .map((filePath) => prepareInputFile(filePath, quickInputKindForPath(filePath))),
         )
         invalidateFocusedTask()
-        setInputs(mode === 'reverse' ? prepared.slice(0, 1) : prepared)
+        setInputs((current) =>
+          mode === 'reverse' ? prepared.slice(0, 1) : [...current, ...prepared].slice(0, limit),
+        )
+        if (mode !== 'reverse') message.success(`已添加 ${prepared.length} 个素材`)
       } catch (error) {
         message.error(error instanceof Error ? error.message : '读取输入素材失败')
       }
@@ -1232,7 +1203,14 @@ export function QuickCreateView() {
       const taskPrompt = source?.prompt ?? prompt.trim()
       const taskInputs: Array<QuickInput | CanvasMediaTaskInputFile> =
         source?.inputFiles ?? requestInputs
-      const taskOperation = source?.operation ?? operationFor(taskMode, taskInputs as QuickInput[])
+      const taskCapability = source?.operation
+        ? undefined
+        : capabilityFor(taskMode, taskInputs as QuickInput[], selectedModel)
+      // operation 需与能力一致（参考视频生视频记为 text_to_video），否则历史重试会按
+      // video_edit 重新推导出 video.edit，导致仅支持参考能力的模型重试时无可路由能力。
+      const taskOperation =
+        source?.operation ??
+        operationForSubmission(taskMode, taskInputs as QuickInput[], taskCapability)
       if (taskMode === 'reverse' && taskInputs.length !== 1) {
         message.warning('图片反推需要先选择一张图片')
         return
@@ -1242,9 +1220,6 @@ export function QuickCreateView() {
         return
       }
       const taskModel = source?.modelId ? undefined : selectedModel
-      const taskCapability = source?.operation
-        ? undefined
-        : capabilityFor(taskMode, taskInputs as QuickInput[], selectedModel)
       const params = source?.modelParams ?? buildModelParams(fields, modelParamDraft)
       const providerProfileId =
         source?.providerProfileId ??
