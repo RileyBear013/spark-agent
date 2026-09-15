@@ -34,6 +34,7 @@ import { countExistingRefs, resolveExistingRefs } from './agent-config-counts'
 import { CODEX_PERMISSION_MODE_OPTIONS as SHARED_CODEX_PERMISSION_MODE_OPTIONS } from '../utils/permission-options'
 import { SPARK_PERMISSION_MODE_OPTIONS as SHARED_SPARK_PERMISSION_MODE_OPTIONS } from '../utils/permission-options'
 import { filterProvidersForVisibleUi } from '../utils/auto-router-ui'
+import { isMediaProviderProfile } from '../utils/provider-model-kind'
 import { NO_PROJECT_WORKSPACE_NAME, useSessionSidebar } from '../SessionSidebarContext'
 import {
   getDefaultAgentModelForProvider,
@@ -2241,19 +2242,6 @@ function getAgentModelOptions(
     )
     .map((model) => ({ label: model.name, value: model.id }))
   return [...providerModels, ...routeModels]
-}
-
-/**
- * Agent 是文本对话场景，不应该绑定到图像/语音/视频类多媒体生成模型
- * （多媒体生成由画布/内置工具承担）。
- *
- * 判定沿用会话模型选择器（ComposerV2 ProviderModelPicker）与画布文本节点
- * （CanvasOperationPanel isTextProviderProfile）的现成约定：只看 provider 的
- * modelType，modelType 为 image/voice/video 的整个 provider 排除。
- */
-function isMediaProviderProfile(provider: ProviderProfile): boolean {
-  const modelType = (provider as ProviderProfile & { modelType?: string }).modelType
-  return modelType === 'image' || modelType === 'voice' || modelType === 'video'
 }
 
 function isRoutingModelCard(model: ModelProfile): boolean {
