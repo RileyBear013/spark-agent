@@ -12,19 +12,14 @@
  *   - 401 由主进程 EduServerClient 自动处理，渲染端不用感知
  */
 
-import React, {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type {
   AuthBootstrapResponse,
   AuthCapabilities,
   AuthCaptchaResponse,
   AuthClientConfigResponse,
+  AuthDesktopLoginPhase,
+  AuthDesktopLoginStartResponse,
   AuthLoginMode,
   AuthLoginSmsResponse,
   AuthMeResponse,
@@ -33,6 +28,23 @@ import type {
 } from '@spark/protocol'
 
 export type AuthFlow = 'login' | 'register'
+
+/** 浏览器登录 UI 状态：idle 表示未发起（含发起失败后回到表单） */
+export type DesktopLoginUiPhase = AuthDesktopLoginPhase | 'idle'
+
+export interface DesktopLoginController {
+  phase: DesktopLoginUiPhase
+  /** 主进程推送的失败/超时说明 */
+  message?: string
+  /** 已拉起的网页登录地址（等待态展示，便于用户确认浏览器是否打开正确） */
+  webLoginUrl?: string
+  /** 发起请求在途 */
+  starting: boolean
+  /** 发起失败原因（未打开浏览器等），仅在表单内联展示 */
+  startError?: string
+  start: () => Promise<void>
+  cancel: () => Promise<void>
+}
 
 export interface AuthContextValue {
   /** 是否已登录（token + userId 都有）*/
@@ -93,6 +105,8 @@ export interface AuthContextValue {
   }) => Promise<{ expire_in: number }>
   /** 手机号 + 短信验证码登录（首次自动注册，POST /auth/login-sms）*/
   loginBySms: (params: { phone: string; smsCode: string }) => Promise<AuthLoginSmsResponse>
+  /** 浏览器登录（系统浏览器 + deep link 回跳）：状态与操作入口 */
+  desktopLogin: DesktopLoginController
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -115,6 +129,21 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   const [flow, setFlow] = useState<AuthFlow>('login')
   const [keytarAvailable, setKeytarAvailable] = useState<boolean | null>(null)
   const [authCapabilities, setAuthCapabilities] = useState<AuthCapabilities | null>(null)
+  // ─── 浏览器登录状态（等待 / 超时 / 失败 / 取消，由主进程 stream 驱动）───
+  const [desktopLoginPhase, setDesktopLoginPhase] = useState<DesktopLoginUiPhase>('idle')
+  const [desktopLoginMessage, setDesktopLoginMessage] = useState<string | undefined>(undefined)
+  const [desktopLoginWebUrl, setDesktopLoginWebUrl] = useState<string | undefined>(undefined)
+  const [desktopLoginStarting, setDesktopLoginStarting] = useState(false)
+  const [desktopLoginStartError, setDesktopLoginStartError] = useState<string | undefined>(
+    undefined,
+  )
+
+  const resetDesktopLoginUi = useCallback(() => {
+    setDesktopLoginPhase('idle')
+    setDesktopLoginMessage(undefined)
+    setDesktopLoginWebUrl(undefined)
+    setDesktopLoginStartError(undefined)
+  }, [])
 
   // ─── 启动时 bootstrap ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -178,6 +207,8 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       if (!payload.isAuthenticated) {
         setUser(null)
         setFlow('login')
+        // 退出/会话过期后必须回到干净状态，否则下次进入登录页会残留上一次授权结果
+        resetDesktopLoginUi()
       } else if (payload.userId) {
         // 状态变化但有 userId，主动拉一次 /me
         void window.spark
@@ -191,13 +222,20 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       setIsAuthenticated(false)
       setUser(null)
       setFlow('login')
+      resetDesktopLoginUi()
+    })
+
+    const unsubDesktopLogin = spark.on('stream:auth:desktop-login-status', (payload) => {
+      setDesktopLoginPhase(payload.status)
+      setDesktopLoginMessage(payload.message)
     })
 
     return () => {
       unsubState()
       unsubExpired()
+      unsubDesktopLogin()
     }
-  }, [])
+  }, [resetDesktopLoginUi])
 
   // ─── 业务方法 ───────────────────────────────────────────────────────────────
 
@@ -208,11 +246,47 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
   }, [])
 
   const sendCode = useCallback(
-    async (params: { account: string; type: AuthSendCodeType; captchaId: string; captchaText: string }) => {
+    async (params: {
+      account: string
+      type: AuthSendCodeType
+      captchaId: string
+      captchaText: string
+    }) => {
       return (await window.spark!.invoke('auth:send-code', params)) as { expire_in: number }
     },
     [],
   )
+
+  const startBrowserLogin = useCallback(async () => {
+    setDesktopLoginStarting(true)
+    setDesktopLoginStartError(undefined)
+    // 清掉上一次授权留下的失败/超时说明，避免新一轮等待期展示过期原因
+    setDesktopLoginMessage(undefined)
+    try {
+      const res = (await window.spark!.invoke(
+        'auth:desktop-login-start',
+        {},
+      )) as AuthDesktopLoginStartResponse
+      setDesktopLoginWebUrl(res.webLoginUrl)
+    } catch (error) {
+      // 未打开浏览器等前置失败：不进入等待态，直接在表单内提示
+      setDesktopLoginPhase('idle')
+      setDesktopLoginStartError(
+        error instanceof Error ? error.message : '无法打开浏览器，请稍后重试',
+      )
+    } finally {
+      setDesktopLoginStarting(false)
+    }
+  }, [])
+
+  const cancelBrowserLogin = useCallback(async () => {
+    try {
+      await window.spark!.invoke('auth:desktop-login-cancel', {})
+    } catch {
+      // 取消失败也要让 UI 能回到表单，主进程侧状态最终由 stream 收敛
+    }
+    resetDesktopLoginUi()
+  }, [resetDesktopLoginUi])
 
   const login = useCallback(async (params: Parameters<AuthContextValue['login']>[0]) => {
     const session = (await window.spark!.invoke('auth:login', params)) as AuthSession
@@ -270,7 +344,10 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
         ...(mimeType !== undefined ? { mimeType } : {}),
       })) as { avatarUrl: string }
       // 上传成功后刷新本地用户信息（avatarUrl 已落库）
-      await window.spark!.invoke('auth:me', {}).then((me) => setUser(me as AuthMeResponse)).catch(() => undefined)
+      await window
+        .spark!.invoke('auth:me', {})
+        .then((me) => setUser(me as AuthMeResponse))
+        .catch(() => undefined)
       return res
     },
     [],
@@ -313,6 +390,15 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       authCapabilities,
       sendSmsCode,
       loginBySms,
+      desktopLogin: {
+        phase: desktopLoginPhase,
+        ...(desktopLoginMessage !== undefined ? { message: desktopLoginMessage } : {}),
+        ...(desktopLoginWebUrl !== undefined ? { webLoginUrl: desktopLoginWebUrl } : {}),
+        starting: desktopLoginStarting,
+        ...(desktopLoginStartError !== undefined ? { startError: desktopLoginStartError } : {}),
+        start: startBrowserLogin,
+        cancel: cancelBrowserLogin,
+      },
     }),
     [
       isAuthenticated,
@@ -333,6 +419,13 @@ export function AuthProvider({ children }: AuthProviderProps): React.ReactElemen
       authCapabilities,
       sendSmsCode,
       loginBySms,
+      desktopLoginPhase,
+      desktopLoginMessage,
+      desktopLoginWebUrl,
+      desktopLoginStarting,
+      desktopLoginStartError,
+      startBrowserLogin,
+      cancelBrowserLogin,
     ],
   )
 

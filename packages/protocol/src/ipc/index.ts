@@ -7720,6 +7720,10 @@ export interface IpcChannelMap
   'auth:login-sms': [AuthLoginSmsRequest, AuthLoginSmsResponse]
   /** 拉取客户端公开配置（含认证能力开关 smsEnabled/wechatEnabled）— GET /client-config */
   'auth:client-config': [AuthClientConfigRequest, AuthClientConfigResponse]
+  /** 发起「使用浏览器登录」：主进程生成 state + PKCE verifier 并拉起系统浏览器 */
+  'auth:desktop-login-start': [AuthDesktopLoginStartRequest, AuthDesktopLoginStartResponse]
+  /** 取消浏览器登录：停止轮询并作废本次 state */
+  'auth:desktop-login-cancel': [AuthDesktopLoginCancelRequest, AuthDesktopLoginCancelResponse]
 
   // ─── Canvas Agent Bridge ─────────────────────────────────────────────────
   /** 渲染端声明：本 session 绑定到当前画布项目，主进程可以把工具调用打回来 */
@@ -7959,6 +7963,8 @@ export interface IpcStreamChannelMap {
     isAuthenticated: boolean
     userId?: string
   }
+  /** 浏览器登录流程状态（主进程推送，渲染端据此展示等待/超时/取消）*/
+  'stream:auth:desktop-login-status': AuthDesktopLoginStatusEvent
   /** SDK 完整性自检结果（启动时自动推送）*/
   'stream:sdk:integrity': SdkIntegrityCheckResponse
   /** SDK / managed runtime 安装进度 */
@@ -8290,5 +8296,35 @@ export interface AuthCapabilities {
 /** 客户端公开配置响应（仅保留与认证相关字段，其余忽略）*/
 export interface AuthClientConfigResponse {
   authCapabilities?: AuthCapabilities
+  /** 桌面端「使用浏览器登录」目标地址（服务端按 SITE_BASE_URL 下发）；未配置为 null */
+  webLoginUrl?: string | null
+}
+
+/** 发起浏览器登录请求（无需参数，state / verifier 全部在主进程生成）*/
+export interface AuthDesktopLoginStartRequest {}
+/** 发起结果：已拉起系统浏览器打开 webLoginUrl */
+export interface AuthDesktopLoginStartResponse {
+  webLoginUrl: string
+}
+/** 取消浏览器登录 */
+export interface AuthDesktopLoginCancelRequest {}
+export interface AuthDesktopLoginCancelResponse {
+  ok: true
+}
+
+/**
+ * 浏览器登录流程状态。
+ * - waiting：已拉起浏览器，等待用户完成登录（桌面端同时轮询兜底）
+ * - success：已换取 token 并完成登录态初始化
+ * - expired：300s 授权窗口超时
+ * - failed：换取凭证失败（条目已消费/网络异常等），需重新发起
+ * - cancelled：用户主动取消
+ */
+export type AuthDesktopLoginPhase = 'waiting' | 'success' | 'expired' | 'failed' | 'cancelled'
+
+export interface AuthDesktopLoginStatusEvent {
+  status: AuthDesktopLoginPhase
+  /** 失败/超时时的可读说明 */
+  message?: string
 }
 export type IpcStreamPayload<C extends IpcStreamChannel> = IpcStreamChannelMap[C]

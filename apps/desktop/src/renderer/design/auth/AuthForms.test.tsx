@@ -31,6 +31,15 @@ const mocks = vi.hoisted(() => ({
   toast: { success: vi.fn(), error: vi.fn() },
   smsEnabled: true,
   captchaRefresh: vi.fn(),
+  desktopLogin: {
+    phase: 'idle' as 'idle' | 'waiting' | 'expired' | 'failed' | 'cancelled' | 'success',
+    message: undefined as string | undefined,
+    webLoginUrl: undefined as string | undefined,
+    startError: undefined as string | undefined,
+    starting: false,
+    start: vi.fn(),
+    cancel: vi.fn(),
+  },
 }))
 
 vi.mock('./AuthContext', () => ({
@@ -41,6 +50,7 @@ vi.mock('./AuthContext', () => ({
     sendCode: mocks.sendCode,
     sendSmsCode: mocks.sendSmsCode,
     loginBySms: mocks.loginBySms,
+    desktopLogin: mocks.desktopLogin,
   }),
 }))
 
@@ -93,6 +103,13 @@ function inputByPlaceholder(container: HTMLElement, placeholder: string): HTMLIn
   return input
 }
 
+function inputByPlaceholderSafe(
+  container: HTMLElement,
+  placeholder: string,
+): HTMLInputElement | null {
+  return container.querySelector<HTMLInputElement>(`input[placeholder="${placeholder}"]`)
+}
+
 async function flush(): Promise<void> {
   await act(async () => {
     await Promise.resolve()
@@ -113,6 +130,13 @@ describe('authentication forms', () => {
     mocks.sendSmsCode.mockReset().mockResolvedValue({ expire_in: 60 })
     mocks.loginBySms.mockReset().mockResolvedValue({ isNew: false })
     mocks.captchaRefresh.mockReset()
+    mocks.desktopLogin.phase = 'idle'
+    mocks.desktopLogin.message = undefined
+    mocks.desktopLogin.webLoginUrl = undefined
+    mocks.desktopLogin.startError = undefined
+    mocks.desktopLogin.starting = false
+    mocks.desktopLogin.start.mockReset()
+    mocks.desktopLogin.cancel.mockReset()
   })
 
   afterEach(() => {
@@ -393,6 +417,70 @@ describe('authentication forms', () => {
     await flush()
 
     expect(mocks.captchaRefresh).toHaveBeenCalledOnce()
+  })
+
+  it('offers browser login and reports start failures inline', async () => {
+    mocks.desktopLogin.startError = '无法打开系统浏览器，请检查默认浏览器设置后重试'
+    act(() => {
+      root = createRoot(container)
+      root.render(<LoginForm />)
+    })
+    await flush()
+
+    const browserButton = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '使用浏览器登录',
+    )
+    expect(browserButton).toBeTruthy()
+    expect(container.textContent).toContain('无法打开系统浏览器')
+
+    act(() => browserButton?.click())
+    expect(mocks.desktopLogin.start).toHaveBeenCalledOnce()
+  })
+
+  it('replaces the whole form with a waiting state while the browser authorizes', async () => {
+    mocks.desktopLogin.phase = 'waiting'
+    mocks.desktopLogin.webLoginUrl = 'https://web.example/login?desktop=1'
+    act(() => {
+      root = createRoot(container)
+      root.render(<LoginForm />)
+    })
+    await flush()
+
+    expect(container.textContent).toContain('请在浏览器中完成登录')
+    expect(container.textContent).toContain('web.example')
+    expect(inputByPlaceholderSafe(container, '邮箱或手机号')).toBeNull()
+
+    const cancel = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === '取消，改用其他方式登录',
+    )
+    act(() => cancel?.click())
+    expect(mocks.desktopLogin.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces why a browser login attempt ended without a session', async () => {
+    mocks.desktopLogin.phase = 'expired'
+    mocks.desktopLogin.message = '授权已超时，请重新发起登录'
+    act(() => {
+      root = createRoot(container)
+      root.render(<LoginForm />)
+    })
+    await flush()
+
+    // 表单恢复可见，且必须说明上一次授权为何失败（否则用户只看到表单悄悄重现）
+    expect(inputByPlaceholder(container, '邮箱或手机号')).toBeTruthy()
+    expect(container.textContent).toContain('授权已超时，请重新发起登录')
+  })
+
+  it('falls back to a generic notice when the main process sends no message', async () => {
+    mocks.desktopLogin.phase = 'failed'
+    mocks.desktopLogin.message = undefined
+    act(() => {
+      root = createRoot(container)
+      root.render(<LoginForm />)
+    })
+    await flush()
+
+    expect(container.textContent).toContain('浏览器授权未完成，请重新发起')
   })
 
   it('invalidates a sent code when the account changes', async () => {

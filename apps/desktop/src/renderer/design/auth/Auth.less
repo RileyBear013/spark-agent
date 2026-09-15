@@ -945,3 +945,227 @@
 .auth-switch-flow-link:hover {
   text-decoration: underline;
 }
+
+// ─── 浏览器登录（入口 + 等待态） ────────────────────────────────────────────────
+
+.auth-browser-entry {
+  margin-top: var(--pad-lg);
+}
+
+// 用两侧伪元素画分隔线，避免依赖父容器背景色做遮挡
+.auth-browser-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-sm);
+  margin-bottom: var(--pad-md);
+  color: var(--text-faint);
+  font-size: var(--font-xs);
+
+  &::before,
+  &::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+}
+
+.auth-browser-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: var(--pad-sm);
+  width: 100%;
+  height: 40px;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: var(--r-md) !important;
+  background: transparent !important;
+  color: var(--text-strong) !important;
+  font-size: var(--font-base) !important;
+  font-weight: 500 !important;
+  box-shadow: none !important;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease !important;
+
+  .ant-btn-icon {
+    display: inline-flex;
+    color: var(--text-muted);
+  }
+}
+
+.auth-browser-btn:not(:disabled):hover {
+  background: var(--hover) !important;
+  border-color: var(--primary) !important;
+  color: var(--primary) !important;
+
+  .ant-btn-icon {
+    color: var(--primary);
+  }
+}
+
+.auth-browser-btn:disabled {
+  opacity: 0.7;
+}
+
+.auth-browser-hint {
+  margin: var(--pad-sm) 0 0;
+  font-size: var(--font-xs);
+  line-height: 1.6;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.auth-browser-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--pad-xs);
+  margin: var(--pad-sm) 0 0;
+  font-size: var(--font-sm);
+  line-height: 1.55;
+  color: var(--danger);
+  text-align: left;
+
+  svg {
+    flex: none;
+    margin-top: 2px;
+  }
+}
+
+// 上一次授权未走完（超时 / 换取凭证失败）的说明：中性偏警示，避免与错误态抢视觉
+.auth-browser-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--pad-xs);
+  margin: var(--pad-sm) 0 0;
+  font-size: var(--font-sm);
+  line-height: 1.55;
+  color: var(--warning);
+  text-align: left;
+
+  svg {
+    flex: none;
+    margin-top: 2px;
+  }
+}
+
+.auth-browser-waiting {
+  align-items: center;
+  text-align: center;
+}
+
+.auth-browser-waiting-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--pad-md);
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.auth-browser-steps {
+  align-self: stretch;
+  margin: var(--pad-lg) 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: browser-step;
+
+  li {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--pad-sm);
+    padding: var(--pad-sm) var(--pad-md);
+    font-size: var(--font-sm);
+    line-height: 1.6;
+    color: var(--text-muted);
+    text-align: left;
+    background: var(--bg-sunken);
+    border-radius: var(--r-sm);
+    counter-increment: browser-step;
+
+    & + li {
+      margin-top: var(--pad-xs);
+    }
+
+    &::before {
+      content: counter(browser-step);
+      flex: none;
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      font-size: var(--font-xs);
+      line-height: 18px;
+      color: var(--primary);
+      text-align: center;
+      background: var(--primary-soft);
+      border-radius: 50%;
+    }
+  }
+}
+
+.auth-browser-waiting-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--pad-lg);
+}
+
+.auth-browser-waiting-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: auth-browser-pulse 1.2s ease-in-out infinite;
+
+  &:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  &:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+}
+
+@keyframes auth-browser-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.auth-browser-meta {
+  margin: var(--pad-sm) 0 0;
+  font-size: var(--font-xs);
+  color: var(--text-faint);
+}
+
+.auth-browser-cancel {
+  margin-top: var(--pad-md);
+  padding: 0;
+  color: var(--primary) !important;
+  font-size: var(--font-sm);
+}
+
+.auth-browser-cancel:hover {
+  background: transparent !important;
+  color: var(--primary-hover) !important;
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-browser-waiting-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}

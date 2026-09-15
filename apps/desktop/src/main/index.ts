@@ -162,9 +162,10 @@ import { startSparkCliBridge, type SparkCliBridge } from './services/SparkCliBri
 import { initAuthService, getAuthService } from './services/Auth/AuthService.js'
 import { getPlatformModelService } from './services/PlatformModel/index.js'
 import {
-  findPlatformModelRedeemCode,
-  parsePlatformModelRedeemDeepLink,
-} from './services/PlatformModel/PlatformModelDeepLink.js'
+  findDeepLinkRoute,
+  parseDeepLinkRoute,
+  type DeepLinkRoute,
+} from './services/DeepLinkRoute.js'
 import {
   createAppShutdownCoordinator,
   registerAppShutdownCleanup,
@@ -296,18 +297,55 @@ function showPreferredAppWindow(): void {
 }
 
 const pendingRedeemCodes = new Set<string>()
-let platformRedeemReady = false
+let cloudAuthReady = false
 
-function queuePlatformRedeemDeepLink(value: string): void {
-  const code = parsePlatformModelRedeemDeepLink(value)
-  if (!code) return
+function queuePlatformRedeemCode(code: string): void {
   pendingRedeemCodes.add(code)
   if (app.isReady()) showMainWindow()
-  if (platformRedeemReady) void processPendingPlatformRedeemCodes()
+  if (cloudAuthReady) void processPendingPlatformRedeemCodes()
+}
+
+/**
+ * 浏览器登录回跳（`spark-agent://auth-callback?state=xxx`）。
+ *
+ * deep link 只是「更快收到通知」的路径，真正的凭证交换在 AuthService 内完成：
+ * 命中当前等待中的流程才交换，未命中的链接（过期 / 伪造 / 冷启动）静默忽略。
+ * 轮询兜底不依赖本函数，因此这里失败不影响登录闭环。
+ */
+async function handleDesktopAuthCallbackDeepLink(state: string): Promise<void> {
+  if (app.isReady()) showMainWindow()
+  if (!cloudAuthReady) {
+    // 冷启动场景：verifier 只存在于上一次进程的内存中，无法完成交换
+    log.warn('desktop auth callback ignored: auth service is not ready yet')
+    return
+  }
+  try {
+    if (await getAuthService().handleDesktopAuthCallback(state)) {
+      log.info('desktop browser login completed via deep link')
+      showMainWindow()
+    }
+  } catch (error) {
+    log.warn(
+      `desktop auth callback failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+}
+
+function dispatchDeepLinkRoute(route: DeepLinkRoute): void {
+  if (route.kind === 'redeem') {
+    queuePlatformRedeemCode(route.code)
+    return
+  }
+  void handleDesktopAuthCallbackDeepLink(route.state)
+}
+
+function routeDeepLink(value: string): void {
+  const route = parseDeepLinkRoute(value)
+  if (route) dispatchDeepLinkRoute(route)
 }
 
 async function processPendingPlatformRedeemCodes(): Promise<void> {
-  if (!platformRedeemReady || !getAuthService().getCurrentUserId()) return
+  if (!cloudAuthReady || !getAuthService().getCurrentUserId()) return
   for (const code of [...pendingRedeemCodes]) {
     pendingRedeemCodes.delete(code)
     try {
@@ -336,22 +374,27 @@ if (shouldRegisterDefaultProtocolClient(process.env)) {
 
 app.on('open-url', (event, value) => {
   event.preventDefault()
-  queuePlatformRedeemDeepLink(value)
+  routeDeepLink(value)
 })
 
 const ownsSingleInstanceLock = installSingleInstanceLock(
   app,
   showMainWindow,
   (commandLine) => {
-    const code = findPlatformModelRedeemCode(commandLine)
-    if (code) queuePlatformRedeemDeepLink(`spark-agent://redeem?code=${encodeURIComponent(code)}`)
+    const route = findDeepLinkRoute(commandLine)
+    if (route) dispatchDeepLinkRoute(route)
   },
   shouldEnableSingleInstanceLock(is.dev, process.env),
   () => requestApplicationQuit('single-instance-lock-not-owned'),
 )
 
-const initialRedeemCode = findPlatformModelRedeemCode(process.argv)
-if (initialRedeemCode) pendingRedeemCodes.add(initialRedeemCode)
+const initialDeepLinkRoute = findDeepLinkRoute(process.argv)
+if (initialDeepLinkRoute?.kind === 'redeem') {
+  pendingRedeemCodes.add(initialDeepLinkRoute.code)
+} else if (initialDeepLinkRoute?.kind === 'auth-callback') {
+  // 冷启动时 verifier 已随上一个进程消失，无法交换；用户回桌面端重新发起即可
+  log.warn('desktop auth callback received during cold start, ignored')
+}
 
 function isAppZoomShortcut(input: Electron.Input): 'in' | 'out' | 'reset' | null {
   const hasModifier = process.platform === 'darwin' ? input.meta : input.control
@@ -1164,6 +1207,16 @@ async function initializeApp(): Promise<void> {
                 run: () => sparkCliBridge?.stop() ?? Promise.resolve(),
               },
               {
+                name: 'desktop browser login',
+                run: () => {
+                  try {
+                    getAuthService().shutdownDesktopLogin()
+                  } catch {
+                    // 认证服务未初始化时无需清理
+                  }
+                },
+              },
+              {
                 name: 'custom tools runtime',
                 run: () => customToolsRuntime?.stop() ?? Promise.resolve(),
               },
@@ -1242,7 +1295,7 @@ async function initializeApp(): Promise<void> {
     })
     getPlatformModelService()
     getAuthService().addLoginHook(async () => processPendingPlatformRedeemCodes())
-    platformRedeemReady = true
+    cloudAuthReady = true
     await processPendingPlatformRedeemCodes()
     clearPersistedEduServerBaseUrl()
     log.info('Cloud auth service started')

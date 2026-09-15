@@ -48,11 +48,11 @@ function configuredSecretRefs(): KeystoreRef[] {
   const database = getDatabase()
   const providerRefs = new ProviderProfileRepository(database)
     .listAll()
-    .map(row => row.keystore_ref)
+    .map((row) => row.keystore_ref)
     .filter((ref): ref is string => typeof ref === 'string' && ref.length > 0)
   const connectorRefs = new ConnectorConnectionRepository(database)
     .listAll()
-    .map(row => row.keystore_ref)
+    .map((row) => row.keystore_ref)
     .filter((ref): ref is string => typeof ref === 'string' && ref.length > 0)
   return [...new Set([...providerRefs, ...connectorRefs])] as KeystoreRef[]
 }
@@ -129,9 +129,11 @@ export function registerAuthIpc(): void {
 
   typedIpcHandle('auth:client-config', async () => auth().getClientConfig())
 
-  typedIpcHandle('auth:update-me', async (req) =>
-    auth().updateMe({ nickname: req.nickname }),
-  )
+  typedIpcHandle('auth:desktop-login-start', async () => auth().desktopLoginStart())
+
+  typedIpcHandle('auth:desktop-login-cancel', async () => auth().desktopLoginCancel())
+
+  typedIpcHandle('auth:update-me', async (req) => auth().updateMe({ nickname: req.nickname }))
 
   typedIpcHandle('auth:upload-avatar', async (req) =>
     auth().uploadAvatar({
@@ -173,7 +175,9 @@ export function registerAuthIpc(): void {
       if (willReadSecrets) await preloadSecrets(refs)
     } catch (error) {
       // 用户可以拒绝 macOS Keychain 授权；本地 DB/系统凭证库暂不可用也不应阻断 Spark 登录。
-      log.warn(`credential startup preparation skipped: ${error instanceof Error ? error.message : String(error)}`)
+      log.warn(
+        `credential startup preparation skipped: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
     return auth().bootstrap()
   })

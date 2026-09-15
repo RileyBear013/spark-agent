@@ -1,10 +1,11 @@
 /**
- * LoginForm - 邮箱密码登录 + 邮箱验证码登录 + 手机号短信登录
+ * LoginForm - 邮箱密码登录 + 邮箱验证码登录 + 手机号短信登录 + 浏览器登录
  *
  * 字段：
  *   - 账号（邮箱）- password / code 模式
  *   - 密码（password 模式） / 邮箱验证码（code 模式）
  *   - 手机号 + 图片验证码 + 短信验证码（sms 模式，受 authCapabilities.smsEnabled 控制）
+ *   - 浏览器登录（默认推荐入口，覆盖含微信扫码在内的全部方式）：发起后整卡切换为等待态
  *
  * 扁平化重设计：登录方式从顶部 Tab 改为内联文字链；输入框用底线样式，
  * 压缩纵向层级。图片验证码复用 CaptchaField 封装组件（挂载拉图/点击刷新/失败换图）。
@@ -15,6 +16,7 @@ import { Button, Form, Input } from 'antd'
 import { useAuth } from './AuthContext'
 import { useToast } from '../components/Toast'
 import { CaptchaField, type CaptchaFieldHandle } from './CaptchaField'
+import { BrowserLoginEntry, BrowserLoginWaiting } from './BrowserLoginPanel'
 import { rememberEmail } from './recentEmails'
 import { matchFieldError } from './errorMapping'
 import { EMAIL_RE, inferIdentifierKind, normalizeVerificationTarget, PHONE_RE } from './identifier'
@@ -307,6 +309,23 @@ export function LoginForm({ flowSwitch }: { flowSwitch?: React.ReactNode }): Rea
     }
   }
 
+  // 上一次授权未走完（超时 / 换取凭证失败）后的说明：
+  // 主进程推送的 message 必须落地展示，否则用户只会看到表单悄悄恢复而不知原因
+  const desktopLoginNotice =
+    auth.desktopLogin.phase === 'expired' || auth.desktopLogin.phase === 'failed'
+      ? (auth.desktopLogin.message ?? '浏览器授权未完成，请重新发起')
+      : undefined
+
+  // 等待浏览器授权时整卡切换（成功由主进程登录态事件驱动，无需额外跳转）
+  if (auth.desktopLogin.phase === 'waiting') {
+    return (
+      <BrowserLoginWaiting
+        webLoginUrl={auth.desktopLogin.webLoginUrl}
+        onCancel={() => void auth.desktopLogin.cancel()}
+      />
+    )
+  }
+
   const methodItems: Array<{ key: LoginTab; label: string; visible: boolean }> = [
     { key: 'password', label: '密码', visible: true },
     { key: 'code', label: '验证码', visible: true },
@@ -423,6 +442,13 @@ export function LoginForm({ flowSwitch }: { flowSwitch?: React.ReactNode }): Rea
             {!submitting && <Icons.ArrowRight size={18} />}
           </Button>
         </Form.Item>
+
+        <BrowserLoginEntry
+          starting={auth.desktopLogin.starting}
+          error={auth.desktopLogin.startError}
+          notice={desktopLoginNotice}
+          onStart={() => void auth.desktopLogin.start()}
+        />
 
         <div className={`auth-footer-row ${flowSwitch ? 'auth-footer-row--split' : ''}`}>
           <div className="auth-foot-line">

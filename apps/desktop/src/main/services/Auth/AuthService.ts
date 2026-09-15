@@ -32,14 +32,25 @@ import type {
   AuthUpdateMeResponse,
   AuthLoginSmsResponse,
   AuthClientConfigResponse,
+  AuthDesktopLoginStartResponse,
+  AuthDesktopLoginCancelResponse,
 } from '@spark/protocol'
 import { EduServerClient } from './EduServerClient'
+import { DesktopBrowserLogin } from './DesktopBrowserLogin'
+import { openExternalUrlSafely } from '../ExternalUrlPolicy.js'
 import { TokenStore } from './TokenStore'
 import type { AuthServiceConfig, BaseUrlSource } from './types'
 import type { IpcStreamChannel, IpcStreamPayload } from '@spark/protocol'
 import { sendToMainWindow } from '../../windows/index.js'
 
 const log = createLogger('auth:service')
+
+/**
+ * 「使用浏览器登录」的兜底网页地址。
+ * 正常路径由服务端 client-config 下发（随环境自动切换）；这里只作为
+ * 服务端未升级/未配置时的保底值，避免入口直接不可用。
+ */
+const DEFAULT_WEB_LOGIN_URL = 'https://www.yiqibyte.com/login'
 
 export class AuthService {
   private readonly tokenStore: TokenStore
@@ -51,6 +62,7 @@ export class AuthService {
   private readonly loginHookInflight = new Map<string, Promise<void>>()
   private loginHookUserId: string | null = null
   private sessionExpiryCleanup: Promise<void> | null = null
+  private readonly desktopLogin: DesktopBrowserLogin
 
   constructor(config: AuthServiceConfig) {
     this.config = config
@@ -63,6 +75,13 @@ export class AuthService {
         : {}),
       onSessionExpired: () => this.handleSessionExpired(),
       onTokenRefreshed: (session) => this.handleTokenRefreshed(session),
+    })
+    this.desktopLogin = new DesktopBrowserLogin({
+      resolveWebLoginUrl: () => this.resolveWebLoginUrl(),
+      openExternal: (url) => this.openInSystemBrowser(url),
+      pollBinding: (state) => this.pollDesktopLoginBinding(state),
+      exchange: (state, codeVerifier) => this.exchangeDesktopLogin(state, codeVerifier),
+      emitStatus: (event) => this.emitStream('stream:auth:desktop-login-status', event),
     })
   }
 
@@ -323,6 +342,36 @@ export class AuthService {
     return result
   }
 
+  // ─── 浏览器登录（system browser + deep link 回跳） ──────────────────────────
+
+  /**
+   * 发起「使用浏览器登录」：生成 state + PKCE verifier 后拉起系统浏览器，
+   * 同时启动 2s 轮询兜底。授权结果由 `stream:auth:desktop-login-status` 推送。
+   */
+  desktopLoginStart = async (): Promise<AuthDesktopLoginStartResponse> => {
+    return this.desktopLogin.start()
+  }
+
+  /** 取消浏览器登录（停止轮询并作废本次 state） */
+  desktopLoginCancel = (): AuthDesktopLoginCancelResponse => {
+    this.desktopLogin.cancel()
+    return { ok: true }
+  }
+
+  /**
+   * deep link 回调入口（`spark-agent://auth-callback?state=xxx`）。
+   *
+   * @returns 是否命中当前等待中的授权流程；未命中说明链接已失效，调用方无需提示
+   */
+  handleDesktopAuthCallback = async (state: string): Promise<boolean> => {
+    return this.desktopLogin.handleCallback(state)
+  }
+
+  /** 进程退出时清理轮询定时器 */
+  shutdownDesktopLogin = (): void => {
+    this.desktopLogin.shutdown()
+  }
+
   // ─── Base URL 管理 ───────────────────────────────────────────────────────────
 
   /**
@@ -360,6 +409,49 @@ export class AuthService {
   }
 
   // ─── 内部 ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * 网页登录地址优先级：显式环境变量（本地联调）→ 服务端 client-config → 内置兜底。
+   * 服务端为唯一事实源，环境切换（dev/prod）无需改桌面端。
+   */
+  private async resolveWebLoginUrl(): Promise<string | null> {
+    const override = process.env.SPARK_WEB_LOGIN_URL?.trim()
+    if (override) return override
+    try {
+      const config = await this.getClientConfig()
+      const fromServer = config.webLoginUrl?.trim()
+      if (fromServer) return fromServer
+      log.warn('client-config 未下发 webLoginUrl，回退到内置默认网页登录地址')
+    } catch (error) {
+      log.warn(`拉取 client-config 失败：${(error as Error).message}`)
+    }
+    return DEFAULT_WEB_LOGIN_URL
+  }
+
+  /** 用系统默认浏览器打开（复用统一的外部 URL 安全策略） */
+  private async openInSystemBrowser(url: string): Promise<boolean> {
+    const { shell } = await import('electron')
+    return openExternalUrlSafely(url, (target) => shell.openExternal(target))
+  }
+
+  /** 轮询服务端是否已完成绑定（只读、非消费、不返回凭证） */
+  private async pollDesktopLoginBinding(state: string): Promise<'pending' | 'bound' | 'expired'> {
+    const result = await this.client.get<{ status: 'pending' | 'bound' | 'expired' }>(
+      `/auth/desktop/poll?state=${encodeURIComponent(state)}`,
+      { skipAuth: true },
+    )
+    return result.status
+  }
+
+  /** 一次性交换：state + verifier 换回独立 token 对并完成登录态初始化 */
+  private async exchangeDesktopLogin(state: string, codeVerifier: string): Promise<void> {
+    const session = await this.client.post<AuthSession>(
+      '/auth/desktop/exchange',
+      { state, codeVerifier },
+      { skipAuth: true },
+    )
+    await this.afterLoginSuccess(session)
+  }
 
   private async afterLoginSuccess(session: AuthSession): Promise<void> {
     if (this.sessionExpiryCleanup) await this.sessionExpiryCleanup

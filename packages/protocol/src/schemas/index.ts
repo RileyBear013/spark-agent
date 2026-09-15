@@ -1927,6 +1927,8 @@ export const IpcSchemaRegistry = {
     smsCode: z.string().regex(/^\d{6}$/),
   }),
   'auth:client-config': z.object({}),
+  'auth:desktop-login-start': z.object({}),
+  'auth:desktop-login-cancel': z.object({}),
   'auth:wechat-qr': z.object({}),
   'auth:wechat-poll': z.object({
     state: z.string().min(1).max(200),
