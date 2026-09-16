@@ -711,8 +711,10 @@ export function SessionSidebarProvider({
 
   // 主进程路径创建的会话（如工作流试跑）不经渲染端创建流程，
   // 订阅主进程通知立即刷新，避免试跑运行期间侧栏任务列表空白。
+  // 用 invalidate 而非 run：刷新在途时 run 会复用在途 Promise（事件被消费但新数据没刷到）；
+  // invalidate 通过版本号让当前请求完成后必再刷一次（与 stream:session:created 处理一致）。
   useIpcStream('stream:session:list-changed', () => {
-    refreshData().catch(console.error)
+    void refreshCoordinator.invalidate().catch(console.error)
   })
 
   useEffect(() => {
