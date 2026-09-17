@@ -137,6 +137,114 @@ describe('SessionSidebarContext', () => {
     })
   })
 
+  it('refreshes session list when main process reports session list changed', async () => {
+    let listChangedHandler: ((event: Record<string, unknown>) => void) | null = null
+    let sessionListCount = 0
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'workspace:list') return { workspaces: [], total: 0 }
+      if (channel === 'session:list') {
+        sessionListCount += 1
+        return { sessions: [], total: 0 }
+      }
+      if (channel === 'workspace:get-current') return { workspace: null }
+      if (channel === 'provider:list') return { profiles: [] }
+      if (channel === 'agent:list') return { agents: [] }
+      if (channel === 'terminal:list-active') return { sessions: [] }
+      if (channel === 'scheduled-task:list') return { tasks: [] }
+      return {}
+    })
+    vi.stubGlobal('spark', {
+      invoke,
+      on: vi.fn((channel: string, handler: (event: Record<string, unknown>) => void) => {
+        if (channel === 'stream:session:list-changed') listChangedHandler = handler
+        return vi.fn()
+      }),
+    })
+    function CaptureContext() {
+      useSessionSidebar()
+      return null
+    }
+
+    await act(async () => {
+      root = createRoot(container)
+      root.render(
+        <ToastProvider>
+          <SessionSidebarProvider>
+            <CaptureContext />
+          </SessionSidebarProvider>
+        </ToastProvider>,
+      )
+    })
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 30)))
+    const before = sessionListCount
+    expect(listChangedHandler).not.toBeNull()
+
+    await act(async () => {
+      listChangedHandler?.({ source: 'workflow-test-run', sessionId: 'sess-1' })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    })
+    expect(sessionListCount).toBeGreaterThan(before)
+  })
+
+  it('re-runs the in-flight refresh when a list-changed event arrives mid-flight', async () => {
+    // 回归：review 指出的竞态 —— 刷新在途时 run() 复用同一 Promise，事件被消费但新数据没刷到。
+    // invalidate() 语义 = 在途完成后必再刷一次（session:list 共调 ≥2 次）。
+    let listChangedHandler: ((event: Record<string, unknown>) => void) | null = null
+    let sessionListCount = 0
+    let resolveInFlight: (() => void) | null = null
+    const invoke = vi.fn(async (channel: string) => {
+      if (channel === 'workspace:list') return { workspaces: [], total: 0 }
+      if (channel === 'session:list') {
+        sessionListCount += 1
+        if (sessionListCount === 1) {
+          await new Promise<void>((resolve) => {
+            resolveInFlight = resolve
+          })
+        }
+        return { sessions: [], total: 0 }
+      }
+      if (channel === 'workspace:get-current') return { workspace: null }
+      if (channel === 'provider:list') return { profiles: [] }
+      if (channel === 'agent:list') return { agents: [] }
+      if (channel === 'terminal:list-active') return { sessions: [] }
+      if (channel === 'scheduled-task:list') return { tasks: [] }
+      return {}
+    })
+    vi.stubGlobal('spark', {
+      invoke,
+      on: vi.fn((channel: string, handler: (event: Record<string, unknown>) => void) => {
+        if (channel === 'stream:session:list-changed') listChangedHandler = handler
+        return vi.fn()
+      }),
+    })
+    function CaptureContext() {
+      useSessionSidebar()
+      return null
+    }
+
+    await act(async () => {
+      root = createRoot(container)
+      root.render(
+        <ToastProvider>
+          <SessionSidebarProvider>
+            <CaptureContext />
+          </SessionSidebarProvider>
+        </ToastProvider>,
+      )
+    })
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)))
+    expect(sessionListCount).toBe(1)
+    expect(resolveInFlight).not.toBeNull()
+    expect(listChangedHandler).not.toBeNull()
+
+    await act(async () => {
+      listChangedHandler?.({ source: 'workflow-test-run', sessionId: 'sess-1' })
+      resolveInFlight?.()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    })
+    expect(sessionListCount).toBeGreaterThanOrEqual(2)
+  })
+
   it('reports no actively viewed session while the main app is outside chat', async () => {
     appContextMock.view = 'settings'
     localStorage.setItem('spark-agent:last-active-session', 'session-1')
