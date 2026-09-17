@@ -87,8 +87,11 @@ async function selectTargetWithChurnRetry(
       // Only the bound-app-vanished branch (previous != null) is a jitter candidate; an
       // unbound session with an empty desktop usually reflects a genuinely minimalized
       // desktop, and retrying that would just delay an honest failure.
+      // Alias the nullable option first so TS's aliased-condition narrowing carries the
+      // non-null guarantee from `transientJitter` into the log fields below.
+      const previous = options.previous
       const transientJitter =
-        options.previous != null &&
+        previous != null &&
         error instanceof ComputerUseBrokerError &&
         error.code === 'focus_mismatch'
       if (!transientJitter || attempt >= WINDOW_CHURN_RETRY_MAX_ATTEMPTS) throw error
@@ -96,8 +99,8 @@ async function selectTargetWithChurnRetry(
         'Computer window inventory transiently missing the bound app; re-listing after a short settle',
         {
           attempt,
-          boundAppId: options.previous.appId,
-          boundWindowId: options.previous.windowId,
+          boundAppId: previous.appId,
+          boundWindowId: previous.windowId,
           liveWindows: summarizeWindowInventory(windows),
         },
       )
@@ -400,11 +403,12 @@ export class NativeHostComputerUseBackend
         async (connection) => {
           const previous = this.observationSessions.get(input.computerSessionId)
           const targetBinding = this.targetBindings.get(input.computerSessionId)
+          const previousDescriptor =
+            previous == null
+              ? targetBinding
+              : { appId: previous.appId, windowId: previous.windowId }
           const target = await selectTargetWithChurnRetry(connection, {
-            previous:
-              previous == null
-                ? targetBinding
-                : { appId: previous.appId, windowId: previous.windowId },
+            ...(previousDescriptor != null ? { previous: previousDescriptor } : {}),
             requireExactTarget: targetBinding != null,
             signal: input.signal,
           })

@@ -413,7 +413,13 @@ describe('MessageBuilder', () => {
       dispatchId: 'dispatch-1',
       hostAgentId: 'host-agent',
       memberAgentId: 'member-agent',
-      task: 'Continue the response',
+      task: {
+        taskId: 'task-1',
+        hostAgentId: 'host-agent',
+        memberAgentId: 'member-agent',
+        rootTurnId: 'turn-1',
+        instruction: 'Continue the response',
+      },
     })
     builder.processEvent({
       ...baseEvent('runtime_signal'),
