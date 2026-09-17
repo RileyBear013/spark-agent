@@ -32,7 +32,7 @@ tags: [spark, workflow, generator, sparkflow, 工作流, agent-orchestration, js
 | `templates/*.json` | 4 个内置模板（线性/条件路由/迭代循环/审批+MCP） |
 | `scripts/validate.mjs` | 离线结构校验器（三层校验，错误码对齐 preflight） |
 
-**适配版本**：spark-agent 0.11.68（2026-09-14 冻结）；0.11.69 官方安装版全链路实测通过（2026-09-15：导入+试跑闭环，见 RUN_VERIFICATION.md）。生成前若目标 Spark 版本更新，先按 schema-freeze.md §7 核对漂移。
+**适配版本**：spark-agent 0.11.68（2026-09-14 冻结）；0.11.69 官方安装版全链路实测通过（2026-09-15：导入+试跑闭环）。生成前若目标 Spark 版本更新，先按 schema-freeze.md §7 核对漂移。
 
 ## 核心流程（5 阶段）
 

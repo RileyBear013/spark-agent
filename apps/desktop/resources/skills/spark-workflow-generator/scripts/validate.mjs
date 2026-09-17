@@ -4,7 +4,8 @@
  * Spark L3 WorkflowGraph 离线结构校验器（三层校验，错误码对齐 Spark preflight 命名）。
  *
  * 用法：node validate.mjs <workflow.json> [--json]
- *   输入支持两种形态：① 模板外壳 { name, graph: {nodes, edges} }；② 裸 graph {nodes, edges}
+ *   输入支持三种形态：① 模板外壳 { name, graph: {nodes, edges} }；② 裸 graph {nodes, edges}；
+ *   ③ UI 导入包裹 { workflows: [{name, graph}, ...] }（逐个解包校验）
  *   --json 输出机器可读报告；缺省输出人类可读报告
  *   退出码：0 = 无 error；1 = 存在 error；2 = 输入不可解析
  *
@@ -106,8 +107,7 @@ function checkAcyclic(graph, scope) {
   }
 }
 
-function checkReachability(graph, scope) {
-  const isRoot = scope === '主图'
+function checkReachability(graph, scope, isRoot) {
   const inputs = graph.nodes.filter((n) => n.kind === 'input')
   // 子图（loop body）无 input 属官方设计（官方模板 body 仅含工作节点），仅主图要求 input
   if (inputs.length === 0 && isRoot) { warn('missing_input', { scope }); return }
@@ -199,7 +199,8 @@ function checkLoopNodes(graph, scope, outerIds) {
     }
     const mi = n.config?.maxIterations
     if (mi != null && (!Number.isFinite(mi) || mi > MAX_ITERATIONS_HARD_LIMIT)) {
-      warn('max_iterations_exceeds_limit', { nodeId: n.id, params: { limit: MAX_ITERATIONS_HARD_LIMIT, scope } })
+      // 运行时硬上限 50（executor WORKFLOW_LOOP_HARD_CAP），文档口径为硬限制 → error
+      err('max_iterations_exceeds_limit', { nodeId: n.id, params: { limit: MAX_ITERATIONS_HARD_LIMIT, scope } })
     }
     const bc = n.config?.breakCondition
     if (bc != null) {
@@ -208,7 +209,7 @@ function checkLoopNodes(graph, scope, outerIds) {
         warn('break_condition_key_unresolved', { nodeId: n.id, params: { key: bc.key, scope } })
       }
     }
-    validateGraph(body, `${scope} › ${n.title ?? n.id} 循环体`, new Set([...outerIds, ...graph.nodes.map((x) => x.id)]))
+    validateGraph(body, `${scope} › ${n.title ?? n.id} 循环体`, new Set([...outerIds, ...graph.nodes.map((x) => x.id)]), false)
   }
 }
 
@@ -247,7 +248,7 @@ function checkGraphConventions(graph, scope) {
 
 // ─── 主校验入口（递归处理 loop body） ────────────────────────────────────────
 
-function validateGraph(graph, scope = '主图', outerIds = new Set()) {
+function validateGraph(graph, scope = '主图', outerIds = new Set(), isRoot = scope === '主图') {
   if (!isObj(graph) || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
     err(scope === '主图' ? 'invalid_graph_shape' : 'invalid_loop_body', { params: { scope } })
     return
@@ -262,13 +263,13 @@ function validateGraph(graph, scope = '主图', outerIds = new Set()) {
   // L2
   checkEdges(graph, scope, nodeIds, outputKeys)
   checkAcyclic(graph, scope)
-  checkReachability(graph, scope)
+  checkReachability(graph, scope, isRoot)
   // L3
   checkBranchMerge(graph, scope)
   checkRouteNodes(graph, scope)
   checkLoopNodes(graph, scope, outerIds)
   checkToolNodes(graph, scope)
-  if (scope === '主图') checkGraphConventions(graph, scope)
+  if (isRoot) checkGraphConventions(graph, scope)
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -288,9 +289,20 @@ function main() {
     console.error(`JSON 解析失败: ${e.message}`)
     process.exit(2)
   }
-  // 支持模板外壳 {graph:{...}} 或裸 graph {nodes,edges}
-  const graph = isObj(raw?.graph) ? raw.graph : raw
-  validateGraph(graph)
+  // 支持模板外壳 {graph:{...}}、裸 graph {nodes,edges}、UI 导入包裹 {workflows:[...]}
+  if (Array.isArray(raw?.workflows)) {
+    if (raw.workflows.length === 0) {
+      console.error('包裹内没有可校验的工作流（workflows 为空数组）')
+      process.exit(2)
+    }
+    raw.workflows.forEach((entry, index) => {
+      const name = isStr(entry?.name) ? entry.name : `workflow-${index + 1}`
+      validateGraph(isObj(entry?.graph) ? entry.graph : entry, `「${name}」主图`, new Set(), true)
+    })
+  } else {
+    const graph = isObj(raw?.graph) ? raw.graph : raw
+    validateGraph(graph)
+  }
 
   const ok = errors.length === 0
   if (asJson) {

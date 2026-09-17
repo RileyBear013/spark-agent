@@ -40,6 +40,8 @@
         "x": 860,
         "y": 160,
         "config": {
+          "toolSource": "mcp",
+          "toolServerId": null,
           "toolName": "REPLACE_WITH_MCP_TOOL_NAME",
           "toolArgs": { "query": "{{objective}}" },
           "outputKey": "external_data"

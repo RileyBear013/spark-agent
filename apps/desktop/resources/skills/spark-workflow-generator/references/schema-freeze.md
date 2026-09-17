@@ -146,7 +146,7 @@
 
 ## 8. 待补项（诚实记录）
 
-- [x] ~~运行时行为验证~~ —— **2026-09-14 已完成**：harness 直调真执行器 + DeepSeek 实跑 demo-code-review，双向分流实证（见 RUN_VERIFICATION.md）；
+- [x] ~~运行时行为验证~~ —— **2026-09-14 已完成**：harness 直调真执行器 + DeepSeek 实跑 demo-code-review，双向分流实证；
 - [ ] `WORKFLOW_RESTRICTABLE_TOOL_NAMES` 白名单具体内容（grep protocol/src 未直接命中定义，下次从 `@spark/protocol` 导出链或 agent-runtime 引用处反查）；
 - [ ] 13 个官方模板中其余 10 个的完整 graph（已精读 3 个：standard-dev / conditional-routing / iterative-polish-loop）；
 - [ ] `workflow_run_snapshot_invalid` 的触发场景（preflight 服务内未见使用，应在 run-coordinator/binding 层）；
