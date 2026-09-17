@@ -144,6 +144,8 @@ describe('MessageBuilder · Goal iteration divider', () => {
     expect(dividers).toHaveLength(1)
     expect(dividers[0]?.state).toBe('stopped_by_budget')
     expect(dividers[0]?.resultSummary).toBe('达到最大迭代次数 5')
+    // 停机 ≠ 目标结束：快照保留 stopped_by_budget，Git 环境面板才有「继续/完成/清除」入口。
+    expect(b.getActiveGoal()?.status).toBe('stopped_by_budget')
   })
 
   it('goal_cleared 把悬挂的 running 分割线收敛为 result，不再旋转', () => {
@@ -164,6 +166,8 @@ describe('MessageBuilder · Goal iteration divider', () => {
     expect(dividers).toHaveLength(1)
     expect(dividers[0]?.state).toBe('result')
     expect(dividers[0]?.resultSummary).toBeUndefined()
+    // 显式清除才是目标快照真正下线的路径。
+    expect(b.getActiveGoal()).toBeNull()
   })
 
   it('老事件（无 progressKind）按 Started iteration 前缀回退：start 落块、轮末回填', () => {

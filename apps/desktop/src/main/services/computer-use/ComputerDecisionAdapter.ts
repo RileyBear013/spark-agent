@@ -11,6 +11,7 @@ import {
   type ComputerAction,
   type ComputerObservation,
   type VerificationSpec,
+  describeComputerActionForLog,
 } from '@spark/protocol'
 import { createLogger } from '@spark/shared'
 import { ComputerUseBrokerError } from './ComputerUseBrokerError.js'
@@ -132,6 +133,20 @@ export class GenericComputerDecisionAdapter {
     let lastError: unknown
     const screenshotMime = input.screenshotMime ?? 'image/png'
     const attempts = decisionAttemptPlan(this.model, input.screenshot.length > 0)
+    const startedAt = Date.now()
+    // Per-step request profile: prompt sizes drive decision latency, and the attempt
+    // plan explains which provider path (vision vs accessibility-only) actually served
+    // the step — the first place to look when every step feels uniformly slow.
+    log.info('Computer decision request started', {
+      stepIndex: input.stepIndex,
+      attemptPlan: attempts.map(
+        (candidate) =>
+          `${candidate.model.model}:${candidate.includeScreenshot ? 'vision' : 'ax'}`,
+      ),
+      screenshotBytes: input.screenshot.length,
+      treeChars: input.observation.tree.text.length,
+      elementCount: input.observation.tree.elementCount,
+    })
     for (const [attempt, candidate] of attempts.entries()) {
       try {
         const result = await this.generate({
@@ -146,7 +161,11 @@ export class GenericComputerDecisionAdapter {
           temperature: 0,
           responseFormat: candidate.responseFormat,
           system: buildDecisionSystemPrompt(this.platform, input.allowBatch === true),
+          // Objective/criteria stay identical across every step of a task; splitting them into a
+          // stable cached prefix avoids re-prefilling the whole prompt on every decision round.
+          stablePrompt: buildDecisionStablePrompt(input),
           prompt: buildDecisionPrompt(input, attempt),
+          promptCache: true,
           ...(!candidate.includeScreenshot
             ? {}
             : {
@@ -158,7 +177,7 @@ export class GenericComputerDecisionAdapter {
                 ],
               }),
         })
-        return parseDecision(result.text)
+        return this.logDecisionOutcome(input, candidate, attempt, parseDecision(result.text), startedAt)
       } catch (error) {
         lastError = error
         log.warn('Computer decision attempt failed; trying the next compatible path', {
@@ -190,6 +209,29 @@ export class GenericComputerDecisionAdapter {
         },
       },
     )
+  }
+
+  private logDecisionOutcome(
+    input: ComputerDecisionInput,
+    candidate: ComputerDecisionAttempt,
+    attempt: number,
+    decision: ComputerDecision,
+    startedAt: number,
+  ): ComputerDecision {
+    log.info('Computer decision model responded', {
+      stepIndex: input.stepIndex,
+      durationMs: Date.now() - startedAt,
+      attempt: attempt + 1,
+      model: candidate.model.model,
+      mode: candidate.includeScreenshot ? 'vision' : 'accessibility_only',
+      decisionType: decision.type,
+      ...(decision.type === 'action'
+        ? { action: describeComputerActionForLog(decision.action) }
+        : decision.type === 'actions'
+          ? { actionCount: decision.actions.length }
+          : {}),
+    })
+    return decision
   }
 }
 
@@ -315,11 +357,21 @@ function buildDecisionSystemPrompt(platform: NodeJS.Platform, allowBatch: boolea
   return `${base}\nCurrent desktop platform: ${platformName}.`
 }
 
-function buildDecisionPrompt(input: ComputerDecisionInput, attempt: number): string {
-  const tree = input.observation.tree.text.slice(0, MAX_TREE_PROMPT_CHARS)
+/**
+ * Task-stable prefix (objective + success criteria). Sent separately from the per-step
+ * prompt so the decision request can cache it across steps instead of re-prefilling
+ * the full prompt on every round-trip.
+ */
+function buildDecisionStablePrompt(input: ComputerDecisionInput): string {
   return [
     `Objective: ${input.objective}`,
     `Success criteria: ${JSON.stringify(input.successCriteria)}`,
+  ].join('\n\n')
+}
+
+function buildDecisionPrompt(input: ComputerDecisionInput, attempt: number): string {
+  const tree = input.observation.tree.text.slice(0, MAX_TREE_PROMPT_CHARS)
+  return [
     `Step index: ${input.stepIndex}`,
     `Foreground application: ${JSON.stringify(input.observation.foreground)}`,
     `Tree version: ${input.observation.treeVersion}`,

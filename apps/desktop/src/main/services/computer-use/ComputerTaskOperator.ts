@@ -10,6 +10,7 @@ import type {
   ComputerUseErrorCode,
   NativeWindowDescriptor,
 } from '@spark/protocol'
+import { describeComputerActionForLog } from '@spark/protocol'
 import { ComputerUseBrokerError } from './ComputerUseBrokerError.js'
 import type {
   ComputerActionFailureContext,
@@ -170,6 +171,12 @@ export class ComputerTaskOperator {
     const failedStrategies = new Set<ComputerInteractionStrategy>()
     const abortSignal = this.getAbortSignal?.(input.session.id)
     const startedAt = this.now()
+    log.info('Computer task started', {
+      computerSessionId: input.session.id,
+      maxSteps: input.session.taskContract.maxSteps,
+      maxRuntimeMs: input.session.taskContract.maxRuntimeMs,
+      objective: truncateLogText(input.session.taskContract.objective, 160),
+    })
     try {
       observation = await this.observeWithRecovery(
         input.session.id,
@@ -186,6 +193,12 @@ export class ComputerTaskOperator {
           const verification = await this.verifyCurrentState(input.session, observation, false)
           if (verification.passed) {
             this.sessions.completeVerified(input.session.id)
+            log.info('Computer task completed (auto-verified)', {
+              computerSessionId: input.session.id,
+              durationMs: Math.round(this.now() - startedAt),
+              successfulActions,
+              attemptedActions,
+            })
             return { status: 'completed' }
           }
         }
@@ -194,6 +207,7 @@ export class ComputerTaskOperator {
         const screenshot = decisionEvidence.screenshot
         this.sessions.setPhase(input.session.id, 'planning')
         let decision: ComputerDecision
+        const decisionStartedAt = this.now()
         try {
           decision = await input.adapter.decide({
             objective: input.session.taskContract.objective,
@@ -208,7 +222,30 @@ export class ComputerTaskOperator {
             ...(recentActions.length === 0 ? {} : { recentActions: [...recentActions] }),
           })
           consecutiveTransientFailures = 0
+          log.info('Computer decision completed', {
+            computerSessionId: input.session.id,
+            stepIndex,
+            durationMs: Math.round(this.now() - decisionStartedAt),
+            decisionType: decision.type,
+            ...(decision.type === 'actions'
+              ? { actionCount: decision.actions.length }
+              : decision.type === 'action'
+                ? { action: describeComputerActionForLog(decision.action) }
+                : {}),
+            ...(decision.type === 'ready_for_verification'
+              ? { reason: truncateLogText(decision.reason, 120) }
+              : { intent: truncateLogText(decision.intent, 120) }),
+          })
         } catch (error) {
+          log.warn('Computer decision failed; will re-observe and retry', {
+            computerSessionId: input.session.id,
+            stepIndex,
+            consecutiveTransientFailures: consecutiveTransientFailures + 1,
+            ...(error instanceof ComputerUseBrokerError
+              ? { code: error.code }
+              : {}),
+            error: error instanceof Error ? error.message : String(error),
+          })
           if (
             error instanceof ComputerUseBrokerError &&
             error.code === 'decision_model_error' &&
@@ -241,6 +278,12 @@ export class ComputerTaskOperator {
           const verification = await this.verifyCurrentState(input.session, observation, true)
           if (!verification.passed) {
             previousVerificationFailure = verificationFailureContext(verification)
+            log.warn('Computer verification failed; returning control to the model', {
+              computerSessionId: input.session.id,
+              stepIndex,
+              successfulActions,
+              ...previousVerificationFailure,
+            })
             observation = await this.observeWithRecovery(
               input.session.id,
               shouldRequestFullDecisionTree(),
@@ -249,6 +292,12 @@ export class ComputerTaskOperator {
           }
           previousVerificationFailure = undefined
           this.sessions.completeVerified(input.session.id)
+          log.info('Computer task completed (model requested verification)', {
+            computerSessionId: input.session.id,
+            durationMs: Math.round(this.now() - startedAt),
+            successfulActions,
+            attemptedActions,
+          })
           return { status: 'completed' }
         }
 
@@ -260,7 +309,7 @@ export class ComputerTaskOperator {
           // never collide with a different element. Any step failure stops the batch and lets
           // the outer loop re-observe + re-plan against fresh state.
           let stopped = false
-          for (const action of decision.actions) {
+          for (const [batchIndex, action] of decision.actions.entries()) {
             if (abortSignal?.aborted) {
               return { status: 'failed', reason: 'session_canceled' }
             }
@@ -278,6 +327,7 @@ export class ComputerTaskOperator {
               stepDecision,
               this.createId(),
             )
+            const batchDispatchStartedAt = this.now()
             try {
               const stepResult = await this.dispatchDirectly(stepEnvelope)
               consecutiveNoops = 0
@@ -287,6 +337,17 @@ export class ComputerTaskOperator {
               previousVerificationFailure = undefined
               failedStrategies.clear()
               observation = stepResult.observation
+              log.info('Computer batch action executed', {
+                computerSessionId: input.session.id,
+                stepIndex,
+                batchIndex,
+                action: describeComputerActionForLog(action),
+                durationMs: Math.round(this.now() - batchDispatchStartedAt),
+                noop: stepResult.noop,
+                ...(stepResult.executionChannel == null
+                  ? {}
+                  : { channel: stepResult.executionChannel }),
+              })
               rememberRecentAction(
                 recentActions,
                 action,
@@ -300,6 +361,16 @@ export class ComputerTaskOperator {
               if (!(error instanceof ComputerUseBrokerError)) throw error
               if (error.code === 'session_canceled' || error.code === 'handoff_required')
                 throw error
+              log.warn('Computer batch action failed', {
+                computerSessionId: input.session.id,
+                stepIndex,
+                batchIndex,
+                action: describeComputerActionForLog(action),
+                code: error.code,
+                message: error.message,
+                consecutiveNoops,
+                consecutiveTransientFailures,
+              })
               rememberRecentAction(
                 recentActions,
                 action,
@@ -383,6 +454,7 @@ export class ComputerTaskOperator {
         this.assertActionBudget(input.session, attemptedActions)
         attemptedActions += 1
         const envelope = createEnvelope(input.session, observation, decision, this.createId())
+        const dispatchStartedAt = this.now()
         try {
           const result = await this.dispatchDirectly(envelope)
           consecutiveNoops = 0
@@ -392,6 +464,14 @@ export class ComputerTaskOperator {
           previousVerificationFailure = undefined
           failedStrategies.clear()
           observation = result.observation
+          log.info('Computer action executed', {
+            computerSessionId: input.session.id,
+            stepIndex,
+            action: describeComputerActionForLog(decision.action),
+            durationMs: Math.round(this.now() - dispatchStartedAt),
+            noop: result.noop,
+            ...(result.executionChannel == null ? {} : { channel: result.executionChannel }),
+          })
           rememberRecentAction(
             recentActions,
             decision.action,
@@ -406,6 +486,15 @@ export class ComputerTaskOperator {
             throw error
           }
           if (error.code === 'session_canceled' || error.code === 'handoff_required') throw error
+          log.warn('Computer action failed', {
+            computerSessionId: input.session.id,
+            stepIndex,
+            action: describeComputerActionForLog(decision.action),
+            code: error.code,
+            message: error.message,
+            consecutiveNoops,
+            consecutiveTransientFailures,
+          })
           rememberRecentAction(
             recentActions,
             decision.action,
@@ -463,6 +552,12 @@ export class ComputerTaskOperator {
       // The loop is bounded by the session runtime and action budgets above.
     } catch (error) {
       if (error instanceof ComputerUseBrokerError && error.code === 'handoff_required') {
+        log.warn('Computer task paused for user takeover', {
+          computerSessionId: input.session.id,
+          durationMs: Math.round(this.now() - startedAt),
+          successfulActions,
+          attemptedActions,
+        })
         this.sessions.setPhase(input.session.id, 'handoff_required')
         this.timeline?.record({
           type: 'computer_handoff_required',
@@ -477,8 +572,24 @@ export class ComputerTaskOperator {
       // settled the session; do not re-mark it failed. Surface it with a distinct reason so the
       // caller can present "canceled" rather than a generic operator failure.
       if (error instanceof ComputerUseBrokerError && error.code === 'session_canceled') {
+        log.warn('Computer task canceled', {
+          computerSessionId: input.session.id,
+          durationMs: Math.round(this.now() - startedAt),
+          successfulActions,
+          attemptedActions,
+        })
         return { status: 'failed', reason: 'session_canceled' }
       }
+      log.error('Computer task failed', {
+        computerSessionId: input.session.id,
+        durationMs: Math.round(this.now() - startedAt),
+        successfulActions,
+        attemptedActions,
+        ...(error instanceof ComputerUseBrokerError
+          ? { code: error.code, message: error.message }
+          : {}),
+        error: error instanceof Error ? error.message : String(error),
+      })
       try {
         this.sessions.fail(
           input.session.id,
@@ -575,6 +686,12 @@ export class ComputerTaskOperator {
         ) {
           throw error
         }
+        log.warn('Computer observation failed; retrying', {
+          computerSessionId,
+          attempt: attempt + 1,
+          code: error.code,
+          message: error.message,
+        })
         await this.wait(recoveryDelay(attempt + 1))
       }
     }
@@ -646,6 +763,12 @@ export class ComputerTaskOperator {
       observation.foreground.app.id !== envelope.targetAppId ||
       observation.foreground.window.id !== envelope.targetWindowId
     ) {
+      log.warn('Computer stale frame relocation aborted; foreground window changed', {
+        computerSessionId: envelope.computerSessionId,
+        action: describeComputerActionForLog(envelope.action),
+        envelopeTarget: `${envelope.targetAppId}/${envelope.targetWindowId}`,
+        foreground: `${observation.foreground.app.id}/${observation.foreground.window.id}`,
+      })
       return null
     }
     const refreshedEnvelope: ComputerActionEnvelope = {
@@ -653,6 +776,11 @@ export class ComputerTaskOperator {
       observedFrameId: observation.frameId,
       observedTreeVersion: observation.treeVersion,
     }
+    log.info('Computer stale frame relocated; retrying the same action once', {
+      computerSessionId: envelope.computerSessionId,
+      action: describeComputerActionForLog(envelope.action),
+      refreshedFrameId: observation.frameId,
+    })
     return this.broker.dispatch(refreshedEnvelope)
   }
 }
@@ -727,6 +855,12 @@ function interactionStrategyFor(action: ComputerAction): ComputerInteractionStra
 
 function recoveryDelay(attempt: number): number {
   return Math.min(2_000, 150 * 2 ** Math.max(0, attempt - 1))
+}
+
+/** Bounds free-text fields (objective / intent / model reasons) inside structured logs. */
+function truncateLogText(value: string, max: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized
 }
 
 const MAX_RECENT_ACTIONS = 12

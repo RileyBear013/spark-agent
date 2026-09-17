@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { SparkDatabase } from './database.js'
+import { inspectPendingMigrations, SparkDatabase } from './database.js'
 import { BaseRepository } from './repository.js'
 import { CustomToolRepository } from './repositories/custom-tool.repository.js'
 import { join } from 'path'
@@ -162,6 +162,84 @@ describe('SparkDatabase', () => {
       .prepare('SELECT id FROM agents WHERE id = ?')
       .get('93785cf1-d570-4a2a-8919-108fbf7f39c3')
     expect(removedFullstackAgent).toBeUndefined()
+  })
+
+  it('inspects pending migrations without changing the existing schema', () => {
+    const dbPath = join(testDir, 'test.db')
+    const migrationsDir = join(testDir, 'migrations')
+    mkdirSync(migrationsDir)
+    writeFileSync(join(migrationsDir, '001_first.sql'), 'CREATE TABLE first_table (id TEXT);')
+    writeFileSync(join(migrationsDir, '002_second.sql'), 'CREATE TABLE second_table (id TEXT);')
+
+    db = new SparkDatabase(dbPath)
+    db.raw.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO schema_migrations (version, name) VALUES (1, '001_first.sql');
+    `)
+    db.close()
+
+    const plan = inspectPendingMigrations(dbPath, migrationsDir)
+
+    expect(plan).toEqual({
+      totalMigrations: 2,
+      appliedMigrations: 1,
+      pendingMigrations: [{ version: 2, name: '002_second.sql' }],
+    })
+    const readonlyDb = new SparkDatabase(dbPath)
+    expect(
+      readonlyDb.raw
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'second_table'")
+        .get(),
+    ).toBeUndefined()
+    readonlyDb.close()
+  })
+
+  it('reports the exact migration item before and after applying it', () => {
+    const dbPath = join(testDir, 'test.db')
+    const migrationsDir = join(testDir, 'migrations')
+    mkdirSync(migrationsDir)
+    writeFileSync(join(migrationsDir, '001_first.sql'), 'CREATE TABLE first_table (id TEXT);')
+    writeFileSync(join(migrationsDir, '002_second.sql'), 'CREATE TABLE second_table (id TEXT);')
+    const progress: string[] = []
+
+    db = new SparkDatabase(dbPath)
+    db.runMigrations(migrationsDir, {
+      onProgress: ({ phase, current, total, migration }) => {
+        progress.push(`${phase}:${current}/${total}:${migration.name}`)
+      },
+    })
+
+    expect(progress).toEqual([
+      'applying:1/2:001_first.sql',
+      'applied:1/2:001_first.sql',
+      'applying:2/2:002_second.sql',
+      'applied:2/2:002_second.sql',
+    ])
+  })
+
+  it('does not let a progress observer interrupt migrations', () => {
+    const dbPath = join(testDir, 'test.db')
+    const migrationsDir = join(testDir, 'migrations')
+    mkdirSync(migrationsDir)
+    writeFileSync(join(migrationsDir, '001_first.sql'), 'CREATE TABLE first_table (id TEXT);')
+
+    db = new SparkDatabase(dbPath)
+    expect(() =>
+      db.runMigrations(migrationsDir, {
+        onProgress: () => {
+          throw new Error('renderer unavailable')
+        },
+      }),
+    ).not.toThrow()
+    expect(
+      db.raw
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'first_table'")
+        .get(),
+    ).toEqual({ name: 'first_table' })
   })
 
   it('should migrate fullstack agent references into Spark助手', () => {

@@ -29,21 +29,24 @@ export function SparkExecutorSwitch({
     <>
       <label className="pv_form_label">
         执行引擎
-        <span className="pv_form_sub">开启后该渠道会话默认使用自研 Spark 执行器执行任务</span>
       </label>
-      <div className="pv_form_control_inline">
+      <div className="pv_form_control_inline pv_spark_executor_control">
         <Switch
           size="middle"
           checked={checked && !disabled}
           disabled={disabled}
           onChange={(next: boolean) => onChange(next)}
         />
+        {disabled && (
+          <div
+            className="pv_spark_executor_hint"
+            role="note"
+            title={SPARK_EXECUTOR_UNAVAILABLE_HINTS[availability.reason]}
+          >
+            {SPARK_EXECUTOR_UNAVAILABLE_HINTS[availability.reason]}
+          </div>
+        )}
       </div>
-      {disabled && (
-        <div className="pv_spark_executor_hint" role="note">
-          {SPARK_EXECUTOR_UNAVAILABLE_HINTS[availability.reason]}
-        </div>
-      )}
     </>
   )
 }

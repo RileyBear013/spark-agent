@@ -6491,6 +6491,22 @@ export interface CanvasMediaTaskRepollResponse extends CanvasMediaTaskCreateResp
   repollUnavailableReason?: string
 }
 
+export interface CanvasMediaTaskGetRequest {
+  /** Persisted media runtime task id returned by the original submit response. */
+  runtimeTaskId: string
+}
+
+/**
+ * 只读查询持久化媒体任务的真实状态；不触发轮询、不做归属校验。
+ * 用于视图重新挂载时对账「渲染端事件丢失导致停在 running」的任务记录。
+ */
+export interface CanvasMediaTaskGetResponse extends CanvasMediaTaskCreateResponse {
+  /** Whether the runtime still holds a persisted record for this task id. */
+  found: boolean
+  /** Human-readable reason when the record cannot be returned. */
+  getUnavailableReason?: string
+}
+
 export interface CanvasDepthModelStatusRequest {}
 export interface CanvasDepthModelStatusResponse {
   state: 'missing' | 'installing' | 'ready' | 'error'
@@ -7476,6 +7492,7 @@ export interface IpcChannelMap
   ]
   'canvas:task:create-media': [CanvasMediaTaskCreateRequest, CanvasMediaTaskCreateResponse]
   'canvas:task:repoll-media': [CanvasMediaTaskRepollRequest, CanvasMediaTaskRepollResponse]
+  'canvas:task:get-media': [CanvasMediaTaskGetRequest, CanvasMediaTaskGetResponse]
   'canvas:depth-model:status': [CanvasDepthModelStatusRequest, CanvasDepthModelStatusResponse]
   'canvas:depth-model:install': [CanvasDepthModelInstallRequest, CanvasDepthModelInstallResponse]
   'canvas:task:create-depth-video': [

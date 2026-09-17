@@ -702,13 +702,15 @@ export const SESSION_HISTORY_SYSTEM_PROMPT = [
 ].join('\n')
 
 export const QUICK_REPLIES_SYSTEM_PROMPT = [
-  '## Optional quick replies',
-  'You may call `mcp__spark_ui__suggest_replies` immediately before your final response when a few short, ordinary-text replies would make it easier for the user to answer.',
-  'When you ask the user for a simple confirmation, such as whether to approve a proposed fix, prefer offering quick replies so they can answer with one click.',
-  'You decide whether the tool is useful. Do not call it on every turn, for rhetorical questions, or when the task is already complete and no response is needed.',
+  '## Quick replies for lightweight decisions',
+  'Immediately before your final response, call `mcp__spark_ui__suggest_replies` whenever your response asks the user to make a simple, ordinary-text decision or gives them a small set of next-step choices.',
+  'This applies to every task type, not only software development: ask whether to confirm, agree, start, continue, adopt a proposal, revise it, pause, or choose a lightweight option.',
+  'Typical triggers include questions such as “确认按此方案开始吗？”, “是否同意这样处理？”, “要现在开始吗？”, “是否继续？”, and “需要调整方案吗？”.',
+  'Treat this as a strong default for explicit confirmation or choice questions. Do not use it for rhetorical questions, when the task is already complete and no response is needed, or when a native permission or structured question flow is required.',
+  'Generate 1-4 distinct replies that cover the main decision branches, for example “确认，开始执行”, “需要调整方案”, and “暂不执行”.',
   'Provide 1-4 distinct, self-contained user messages. Each reply must be at most 40 characters and will be displayed verbatim on its button.',
   'When clicked, the reply is sent as ordinary user text. If the composer already contains a text draft, the client appends that draft under `用户补充：` in the same user message.',
-  'Use it for simple confirmation or direction choices such as whether to proceed, revise, pause, or choose one lightweight next step.',
+  'Use it for simple confirmation or direction choices across work, research, writing, design, planning, and development, such as whether to proceed, revise, pause, or choose one lightweight next step.',
   'The quick-reply tool and structured question tools are mutually exclusive: if you call AskUserQuestion or request_user_input in a turn, do not call suggest_replies, and vice versa.',
   'Never use quick replies to request filesystem, command, network, account, payment, deletion, or other security-sensitive approval; use the native permission or structured question flow instead.',
   'The tool is non-blocking. After calling it, write the matching question or invitation in your final response and end the turn so the user can answer.',

@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, TurnRuntimeMetrics } from '@spark/protocol'
-import { estimateTokens, resolveModelContextWindow, resolveSoftContextLimit } from '@spark/shared'
+import {
+  estimateTokens,
+  resolveModelContextWindow,
+  resolveSoftContextLimit,
+  resolveSoftContextLimitForWindow,
+} from '@spark/shared'
 import { extractCodexCompactionEvent } from '../codex-compaction-event.js'
 import {
   appendCodexReasoningSummaryDelta,
@@ -63,6 +68,7 @@ import {
   CodexAppServerRuntimeSupervisor,
   type CodexRuntimeLease,
 } from './codex-runtime-supervisor.js'
+import { withCodexModelCatalog } from '../codex-model-catalog.js'
 
 /**
  * codex 引擎的 app-server 载具（流式修复主路径）。
@@ -232,11 +238,12 @@ export class CodexAppServerExecutor
     config: SDKExecutorConfig,
   ): Promise<void> {
     this.cancelRequested = false
-    const skillIsolation = resolveCodexSkillIsolation(config.workspaceRootPath)
+    const effectiveConfig = await withCodexModelCatalog(config)
+    const skillIsolation = resolveCodexSkillIsolation(effectiveConfig.workspaceRootPath)
     // 图片附件走 Sdk 载具：app-server 的 UserInput 图片变体（url）与 exec 的
     // local_image（本地路径）语义不同，Phase 1 不冒险，文本 turn 才走流式新路径。
-    if (turnHasImageAttachments(config.attachments)) {
-      await this.runViaFallback(sessionId, turnId, userMessage, config)
+    if (turnHasImageAttachments(effectiveConfig.attachments)) {
+      await this.runViaFallback(sessionId, turnId, userMessage, effectiveConfig)
       return
     }
 
@@ -248,13 +255,13 @@ export class CodexAppServerExecutor
       resumedThread: boolean
     } | null = null
     try {
-      prepared = await this.prepareSession(sessionId, config, skillIsolation)
+      prepared = await this.prepareSession(sessionId, effectiveConfig, skillIsolation)
     } catch {
       // turn/start 前的准备错误统一交给 Sdk fallback；fallback 自己负责生成
       // 可操作的 agent_error（包括 CODEX_RUNTIME_NOT_INSTALLED）。
     }
     if (prepared == null) {
-      await this.runViaFallback(sessionId, turnId, userMessage, config)
+      await this.runViaFallback(sessionId, turnId, userMessage, effectiveConfig)
       return
     }
     if (this.cancelRequested) {
@@ -266,7 +273,7 @@ export class CodexAppServerExecutor
     const { client, router, threadId, resumedThread } = prepared
     this.activeSessionId = sessionId
     this.activeSparkTurnId = turnId
-    this.activeConfig = config
+    this.activeConfig = effectiveConfig
     this.activeClient = client
     this.activeThreadId = threadId
     const state: AppServerStreamState = {
@@ -290,7 +297,9 @@ export class CodexAppServerExecutor
       seq: 0,
     })
 
-    const promptConfig = resumedThread ? config : withResumeFallbackSystemPrompt(config)
+    const promptConfig = resumedThread
+      ? effectiveConfig
+      : withResumeFallbackSystemPrompt(effectiveConfig)
     const prompt = buildCodexSdkPrompt(
       buildCodexGoalPrompt(userMessage, promptConfig),
       promptConfig,
@@ -299,9 +308,9 @@ export class CodexAppServerExecutor
       ...makeBase(),
       type: 'user_message',
       content: userMessage,
-      ...(config.attachments != null && config.attachments.length > 0
+      ...(effectiveConfig.attachments != null && effectiveConfig.attachments.length > 0
         ? {
-            attachments: config.attachments.map((attachment) => ({
+            attachments: effectiveConfig.attachments.map((attachment) => ({
               type: attachment.type,
               path: attachment.path,
               name: attachment.name,
@@ -319,8 +328,12 @@ export class CodexAppServerExecutor
       ...makeBase(),
       type: 'context_usage',
       estimatedTokens: estimateTokens(prompt),
-      softLimitTokens: resolveSoftContextLimit(config.model),
-      contextWindowTokens: config.contextWindowTokens ?? resolveModelContextWindow(config.model),
+      softLimitTokens:
+        effectiveConfig.contextWindowTokens != null && effectiveConfig.contextWindowTokens > 0
+          ? resolveSoftContextLimitForWindow(effectiveConfig.contextWindowTokens)
+          : resolveSoftContextLimit(effectiveConfig.model),
+      contextWindowTokens:
+        effectiveConfig.contextWindowTokens ?? resolveModelContextWindow(effectiveConfig.model),
       compacted: false,
     })
     this.emitSkillIsolationWarning(skillIsolation, makeBase)
@@ -349,22 +362,22 @@ export class CodexAppServerExecutor
       route = router.registerThread(threadId, {
         onNotification: (method, params) => this.dispatchNotification(method, params),
         onServerRequest: (method, params, respond, reject) => {
-          this.handleServerRequest(method, params, respond, reject, config)
+          this.handleServerRequest(method, params, respond, reject, effectiveConfig)
         },
         onTransportFailure: (error) => this.processFailureResolver?.(error),
       })
       const turnParams: AppServerTurnStartParams = {
         threadId,
-        ...(config.clientUserMessageId != null
-          ? { clientUserMessageId: config.clientUserMessageId }
+        ...(effectiveConfig.clientUserMessageId != null
+          ? { clientUserMessageId: effectiveConfig.clientUserMessageId }
           : {}),
         input: [{ type: 'text', text: prompt }],
-        ...buildAppServerTurnPermissionParams(config),
-        serviceTier: config.fastMode === true ? 'fast' : null,
+        ...buildAppServerTurnPermissionParams(effectiveConfig),
+        serviceTier: effectiveConfig.fastMode === true ? 'fast' : null,
       }
-      const effort = toCodexReasoningEffort(config.reasoningEffort)
+      const effort = toCodexReasoningEffort(effectiveConfig.reasoningEffort)
       if (effort != null) turnParams.effort = effort
-      config.invocationObserver?.({
+      effectiveConfig.invocationObserver?.({
         transport: 'codex-app-server',
         request: {
           threadId,
@@ -385,7 +398,7 @@ export class CodexAppServerExecutor
       } finally {
         const turnStartMs = roundedElapsed(turnStartAt)
         this.options.runtimeSupervisor?.recordTurnStart(turnStartMs, prepared.lease.warm)
-        config.runtimeMetricsObserver?.({
+        effectiveConfig.runtimeMetricsObserver?.({
           appServerTurnStartMs: turnStartMs,
         })
       }
@@ -538,9 +551,10 @@ export class CodexAppServerExecutor
       pathDirs = bundled.pathDirs
     }
     const env = this.options.env ?? buildAppServerEnv(config, pathDirs)
+    const runtimeArgs = buildCodexAppServerArgs(this.options.args, config.codexModelCatalogPath)
     const runtimeFingerprint = createCodexAppServerRuntimeFingerprint({
       executablePath,
-      args: this.options.args,
+      args: runtimeArgs,
       env,
     })
     let lease: CodexRuntimeLease | null = null
@@ -548,7 +562,7 @@ export class CodexAppServerExecutor
       const createRuntime = () =>
         CodexAppServerRuntime.start({
           executablePath,
-          args: this.options.args,
+          args: runtimeArgs,
           env,
           clientInfo: APP_SERVER_CLIENT_INFO,
           handshakeTimeoutMs: this.options.handshakeTimeoutMs,
@@ -1317,6 +1331,23 @@ function buildAppServerThreadParams(
     ...(policy.approvalsReviewer == null ? {} : { approvalsReviewer: policy.approvalsReviewer }),
     config: configOverrides,
   }
+}
+
+export function buildCodexAppServerArgs(
+  args: readonly string[] | undefined,
+  modelCatalogPath: string | undefined,
+): string[] | undefined {
+  if (modelCatalogPath == null || modelCatalogPath.trim().length === 0) {
+    return args == null ? undefined : [...args]
+  }
+  // 测试替身和受管调用方可能传入自定义 argv；只有 Codex 的 app-server
+  // 入口接受 `-c`，不要把配置参数误追加到其他可执行文件的参数中。
+  if (args != null && args[0] !== 'app-server') return [...args]
+  return [
+    ...(args == null ? ['app-server'] : args),
+    '-c',
+    `model_catalog_json=${JSON.stringify(modelCatalogPath)}`,
+  ]
 }
 
 /**

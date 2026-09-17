@@ -190,6 +190,58 @@ describe('QuickCreateTaskHistory', () => {
     expect(onRowActivate).toHaveBeenCalledWith(IMAGE_TASK)
   })
 
+  it('列表操作列使用纯图标按钮并调用现有任务操作', async () => {
+    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const onRowActivate = vi.fn()
+    const onRetry = vi.fn()
+    const onReuse = vi.fn()
+    const onSavePrompt = vi.fn()
+    const onOpenOutput = vi.fn()
+    renderHistory(root, { onRowActivate, onRetry, onReuse, onSavePrompt, onOpenOutput })
+
+    const actions = document.querySelector('.quick-create-list-actions')
+    expect(actions).not.toBeNull()
+    expect(actions?.querySelectorAll('button')).toHaveLength(5)
+    expect(actions?.textContent).toBe('')
+
+    await act(async () =>
+      actions?.querySelector<HTMLButtonElement>('[aria-label="复制提示词"]')?.click(),
+    )
+    act(() => actions?.querySelector<HTMLButtonElement>('[aria-label="重新生成"]')?.click())
+    act(() => actions?.querySelector<HTMLButtonElement>('[aria-label="复用配置"]')?.click())
+    act(() => actions?.querySelector<HTMLButtonElement>('[aria-label="存入提示词库"]')?.click())
+    act(() => actions?.querySelector<HTMLButtonElement>('[aria-label="打开产物"]')?.click())
+
+    expect(writeText).toHaveBeenCalledWith(IMAGE_TASK.prompt)
+    expect(onRetry).toHaveBeenCalledWith(IMAGE_TASK)
+    expect(onReuse).toHaveBeenCalledWith(IMAGE_TASK)
+    expect(onSavePrompt).toHaveBeenCalledWith(IMAGE_TASK)
+    expect(onOpenOutput).toHaveBeenCalledWith(IMAGE_TASK.assets[0])
+    expect(onRowActivate).not.toHaveBeenCalled()
+  })
+
+  it('运行中任务的列表操作列不显示重试和打开产物', () => {
+    renderHistory(root, { tasks: [RUNNING_TASK] })
+
+    const actions = document.querySelector('.quick-create-list-actions')
+    expect(actions?.querySelector('[aria-label="重试"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="重新生成"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="打开产物"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="复用配置"]')).not.toBeNull()
+  })
+
+  it('展开行详情使用差异色详情区块', () => {
+    renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
+
+    expect(
+      document.querySelector('.quick-create-task.is-expanded .quick-create-task-detail'),
+    ).not.toBeNull()
+  })
+
   it('在任务详情操作区保存提示词到提示词库', () => {
     const onSavePrompt = vi.fn()
     renderHistory(root, { onSavePrompt, expandedTaskId: IMAGE_TASK.id })
@@ -211,7 +263,9 @@ describe('QuickCreateTaskHistory', () => {
     })
     renderHistory(root, { expandedTaskId: IMAGE_TASK.id })
 
-    const copyButton = document.querySelector<HTMLButtonElement>('[aria-label="复制提示词"]')
+    const copyButton = document.querySelector<HTMLButtonElement>(
+      '.quick-create-detail-prompt [aria-label="复制提示词"]',
+    )
     expect(copyButton).not.toBeNull()
 
     await act(async () => copyButton?.click())
@@ -228,7 +282,9 @@ describe('QuickCreateTaskHistory', () => {
     }
     renderHistory(root, { tasks: [reverseTask], expandedTaskId: reverseTask.id })
 
-    expect(document.querySelector('[aria-label="复制提示词"]')).toBeNull()
+    expect(
+      document.querySelector('.quick-create-detail-prompt [aria-label="复制提示词"]'),
+    ).toBeNull()
     expect(document.body.textContent).toContain('图片反推任务')
   })
 

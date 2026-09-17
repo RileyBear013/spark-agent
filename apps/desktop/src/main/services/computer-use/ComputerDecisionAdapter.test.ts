@@ -69,6 +69,42 @@ describe('GenericComputerDecisionAdapter', () => {
     })
   })
 
+  it('splits objective and success criteria into a cached stable prompt prefix', async () => {
+    const generate = vi.fn(async (_params: GenerateCanvasTextParams) => ({
+      text: JSON.stringify({
+        type: 'action',
+        intent: 'Save the document',
+        action: { type: 'invoke_element', elementId: 'button-1', action: 'invoke' },
+      }),
+    }))
+    const adapter = new GenericComputerDecisionAdapter({
+      model: {
+        providerProfileId: 'provider-1',
+        providerType: 'anthropic',
+        apiKey: 'secret',
+        model: 'vision-model',
+      },
+      generate,
+    })
+
+    await adapter.decide({
+      objective: 'Save this document',
+      successCriteria: [],
+      observation: OBSERVATION,
+      screenshot: Buffer.from('png'),
+      stepIndex: 3,
+    })
+
+    const params = generate.mock.calls[0]?.[0]
+    expect(params?.promptCache).toBe(true)
+    expect(params?.stablePrompt).toContain('Objective: Save this document')
+    expect(params?.stablePrompt).toContain('Success criteria:')
+    // The per-step prompt starts at the volatile content and never duplicates the stable prefix.
+    expect(params?.prompt.startsWith('Step index: 3')).toBe(true)
+    expect(params?.prompt).not.toContain('Objective:')
+    expect(params?.system).toContain('decision component')
+  })
+
   it('falls back from combined visual planning to accessibility-only planning', async () => {
     const generate = vi
       .fn()

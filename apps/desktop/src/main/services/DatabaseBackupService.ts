@@ -1,15 +1,20 @@
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
+import { createRequire } from 'node:module'
+import { createLogger } from '@spark/shared'
 
 const DATABASE_SUFFIXES = ['', '-wal', '-shm'] as const
 const BACKUP_PREFIX = 'pre-migration-v'
-/** 每个版本首次启动做一次全量备份，单份约等于数据库体积；2 份 = 当前版本 + 上一版本 */
+/** 每个版本首次执行数据库 migration 前做一次全量备份；2 份 = 当前版本 + 上一版本 */
 export const DEFAULT_MAX_DATABASE_BACKUPS = 2
 /** 备份保留天数：迁移问题一般在升级后短时间内暴露，超期即回收 */
 export const DEFAULT_BACKUP_MAX_AGE_DAYS = 14
 /** 崩溃残留的 .tmp- 目录回收下限；更近的可能属于并发启动实例 */
 const STALE_TMP_DIRECTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000
+/** 每个异步 step 复制约 8 MiB（按常见 4 KiB 页），兼顾吞吐与主进程响应。 */
+const SQLITE_BACKUP_PAGES_PER_STEP = 2_048
+const log = createLogger('database-backup')
 
 export interface DatabaseBackupSnapshot {
   directory: string
@@ -20,6 +25,19 @@ export interface DatabaseBackupSnapshot {
   createdThisStartup: boolean
 }
 
+export interface DatabaseBackupProgress {
+  totalPages: number
+  completedPages: number
+  remainingPages: number
+  percent: number
+}
+
+type BackupDatabase = (
+  sourcePath: string,
+  destinationPath: string,
+  onProgress?: (progress: DatabaseBackupProgress) => void,
+) => Promise<void>
+
 interface EnsureDatabaseBackupOptions {
   databasePath: string
   backupRoot: string
@@ -27,6 +45,9 @@ interface EnsureDatabaseBackupOptions {
   maxBackups?: number
   maxAgeDays?: number
   now?: Date
+  onProgress?: (progress: DatabaseBackupProgress) => void
+  /** 单测可注入文件复制替身，避免在 Node ABI 环境加载 Electron 原生模块。 */
+  backupDatabase?: BackupDatabase
 }
 
 interface PruneDatabaseBackupsOptions {
@@ -48,13 +69,16 @@ async function readSnapshot(
   createdThisStartup: boolean,
 ): Promise<DatabaseBackupSnapshot | null> {
   try {
-    const raw = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as Partial<DatabaseBackupSnapshot>
+    const raw = JSON.parse(
+      await readFile(join(directory, 'manifest.json'), 'utf8'),
+    ) as Partial<DatabaseBackupSnapshot>
     if (
       typeof raw.databasePath !== 'string' ||
       typeof raw.appVersion !== 'string' ||
       typeof raw.createdAt !== 'string' ||
       !Array.isArray(raw.files)
-    ) return null
+    )
+      return null
     return {
       directory,
       databasePath: raw.databasePath,
@@ -86,20 +110,17 @@ export async function ensurePreMigrationBackup(
   await mkdir(temporaryDirectory, { recursive: true })
 
   try {
-    const files: string[] = []
-    for (const suffix of DATABASE_SUFFIXES) {
-      const source = `${options.databasePath}${suffix}`
-      if (!existsSync(source)) continue
-      const targetName = basename(source)
-      await copyFile(source, join(temporaryDirectory, targetName))
-      files.push(targetName)
-    }
+    // SQLite Online Backup 将主库与 WAL 合并成单个一致性快照，并能提供真实页数进度。
+    // 不再分别复制 db/-wal/-shm，避免三个文件落在不同时间点。
+    const targetName = basename(options.databasePath)
+    const backup = options.backupDatabase ?? backupViaSqlite
+    await backup(options.databasePath, join(temporaryDirectory, targetName), options.onProgress)
     const snapshot: DatabaseBackupSnapshot = {
       directory,
       databasePath: options.databasePath,
       appVersion: options.appVersion,
       createdAt: (options.now ?? new Date()).toISOString(),
-      files,
+      files: [targetName],
       createdThisStartup: true,
     }
     await writeFile(
@@ -116,6 +137,60 @@ export async function ensurePreMigrationBackup(
     const raced = await readSnapshot(directory, false)
     if (raced != null) return raced
     throw error
+  }
+}
+
+async function backupViaSqlite(
+  sourcePath: string,
+  destinationPath: string,
+  onProgress?: (progress: DatabaseBackupProgress) => void,
+): Promise<void> {
+  const require_ = createRequire(import.meta.url)
+  const Database = require_('better-sqlite3') as new (
+    filePath: string,
+    options?: { readonly?: boolean; fileMustExist?: boolean },
+  ) => {
+    backup: (
+      destination: string,
+      options: { progress: (metadata: { totalPages: number; remainingPages: number }) => number },
+    ) => Promise<{ totalPages: number; remainingPages: number }>
+    close: () => void
+  }
+  const source = new Database(sourcePath, { readonly: true, fileMustExist: true })
+  let lastReportedPercent = -1
+  let lastTotalPages = 0
+  const report = (totalPages: number, remainingPages: number, completed = false): void => {
+    lastTotalPages = Math.max(lastTotalPages, totalPages)
+    const percent = completed
+      ? 100
+      : totalPages > 0
+        ? Math.max(0, Math.min(99, Math.floor(((totalPages - remainingPages) / totalPages) * 100)))
+        : 0
+    if (percent === lastReportedPercent) return
+    lastReportedPercent = percent
+    try {
+      onProgress?.({
+        totalPages,
+        completedPages: Math.max(0, totalPages - remainingPages),
+        remainingPages: Math.max(0, remainingPages),
+        percent,
+      })
+    } catch (error) {
+      // UI 进度属于旁路观察者，异常不能破坏升级恢复点。
+      log.warn(`Database backup progress observer failed: ${String(error)}`)
+    }
+  }
+
+  try {
+    await source.backup(destinationPath, {
+      progress: ({ totalPages, remainingPages }) => {
+        report(totalPages, remainingPages)
+        return SQLITE_BACKUP_PAGES_PER_STEP
+      },
+    })
+    report(lastTotalPages, 0, true)
+  } finally {
+    source.close()
   }
 }
 
@@ -141,7 +216,7 @@ export async function pruneDatabaseBackups(
   options: PruneDatabaseBackupsOptions,
 ): Promise<void> {
   const { maxBackups, maxAgeDays, now } = options
-  if (maxBackups < 1) return
+  if (maxBackups < 1 || !existsSync(backupRoot)) return
   const entries = await readdir(backupRoot, { withFileTypes: true })
   const tmpDirectories: Array<{ path: string; mtimeMs: number }> = []
   const candidates: Array<{ path: string; mtimeMs: number }> = []
@@ -159,7 +234,8 @@ export async function pruneDatabaseBackups(
 
   const staleTmpCutoff = now.getTime() - STALE_TMP_DIRECTORY_MAX_AGE_MS
   // maxAgeDays < 1 视为不限期，避免误传 0 时把刚创建的备份也按超龄回收
-  const ageCutoff = maxAgeDays >= 1 ? now.getTime() - maxAgeDays * 24 * 60 * 60 * 1000 : Number.NEGATIVE_INFINITY
+  const ageCutoff =
+    maxAgeDays >= 1 ? now.getTime() - maxAgeDays * 24 * 60 * 60 * 1000 : Number.NEGATIVE_INFINITY
   const toDelete = tmpDirectories.filter((entry) => entry.mtimeMs < staleTmpCutoff)
   toDelete.push(...candidates.filter((entry) => entry.mtimeMs < ageCutoff))
 

@@ -4,7 +4,10 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentEvent } from '@spark/protocol'
-import { CodexAppServerExecutor } from '../../sdk/codex-app-server/codex-app-server-executor.js'
+import {
+  buildCodexAppServerArgs,
+  CodexAppServerExecutor,
+} from '../../sdk/codex-app-server/codex-app-server-executor.js'
 import type { CodexAppServerExecutorOptions } from '../../sdk/codex-app-server/codex-app-server-executor.js'
 import { CodexAppServerRuntimeSupervisor } from '../../sdk/codex-app-server/codex-runtime-supervisor.js'
 import { CodexRuntimeNotInstalledError } from '../../sdk/codex-sdk-executor.js'
@@ -153,6 +156,24 @@ describe('CodexAppServerExecutor', () => {
   it('编译期 conformance：实现 EngineExecutor 接口', () => {
     const executor: EngineExecutor = new CodexAppServerExecutor()
     expect(executor.engine).toBe('codex')
+  })
+
+  it('只给 Codex app-server 入口追加 model_catalog_json 启动参数', () => {
+    const catalogPath = '/tmp/spark-model-catalog.json'
+    expect(buildCodexAppServerArgs(undefined, catalogPath)).toEqual([
+      'app-server',
+      '-c',
+      `model_catalog_json=${JSON.stringify(catalogPath)}`,
+    ])
+    expect(buildCodexAppServerArgs(['app-server'], catalogPath)).toEqual([
+      'app-server',
+      '-c',
+      `model_catalog_json=${JSON.stringify(catalogPath)}`,
+    ])
+    expect(buildCodexAppServerArgs([FIXTURE, 'scenario.json'], catalogPath)).toEqual([
+      FIXTURE,
+      'scenario.json',
+    ])
   })
 
   it('token 级流式：delta 逐条投递，segmentId 沿用 codex-sdk 约定，终态齐全', async () => {

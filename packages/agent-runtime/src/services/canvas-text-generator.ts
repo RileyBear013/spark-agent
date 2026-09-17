@@ -81,6 +81,17 @@ export interface GenerateCanvasTextParams {
   /** 用户提示词 / 待处理文本 */
   prompt: string
   /**
+   * 跨请求稳定的前缀文本（如目标/成功标准）。仅在 promptCache 为 true 时生效：
+   * Anthropic 通道拆成独立 text block 并打 cache_control；OpenAI 兼容通道拆成
+   * 独立 user 消息，保证前缀逐字节相同以命中自动前缀缓存。
+   */
+  stablePrompt?: string | undefined
+  /**
+   * 对同一任务内跨步复用的稳定内容启用 provider 侧 prompt caching
+   * （Anthropic cache_control / OpenAI 自动前缀缓存）。缺省关闭，不影响既有调用方。
+   */
+  promptCache?: boolean | undefined
+  /**
    * 上游图片输入（vision）。非空时随用户消息一并发送，使「请分析输入图片的视觉风格」
    * 之类的提示词真正看到图片。模型需具备多模态能力，否则 provider 会报错。
    */
@@ -98,6 +109,10 @@ export interface CanvasTextTokenUsage {
   promptTokens?: number
   completionTokens?: number
   totalTokens?: number
+  /** 缓存命中的输入 token（Anthropic cache_read_input_tokens / OpenAI cached_tokens）。 */
+  cachedPromptTokens?: number
+  /** 本次写入缓存的输入 token（Anthropic cache_creation_input_tokens，仅首次请求产生）。 */
+  cacheWriteTokens?: number
 }
 
 export interface GenerateCanvasTextResult {
@@ -113,9 +128,16 @@ export async function generateCanvasText(
 ): Promise<GenerateCanvasTextResult> {
   const prompt = params.prompt.trim()
   if (prompt.length === 0) throw new Error('prompt is empty')
+  // promptCache 关闭或 stablePrompt 为空时归一化为 undefined，保证关闭路径与旧行为一致。
+  const effective: GenerateCanvasTextParams =
+    params.promptCache === true &&
+    typeof params.stablePrompt === 'string' &&
+    params.stablePrompt.trim().length > 0
+      ? params
+      : { ...params, stablePrompt: undefined }
   const result = isAnthropic(params.providerType)
-    ? await callAnthropic(params, prompt)
-    : await callOpenAICompatible(params, prompt)
+    ? await callAnthropic(effective, prompt)
+    : await callOpenAICompatible(effective, prompt)
   const text = (result.text ?? '').trim()
   if (text.length === 0) throw new Error('empty completion')
   return {
@@ -146,7 +168,17 @@ type AnthropicImageBlock = {
   type: 'image'
   source: { type: 'url'; url: string } | { type: 'base64'; media_type: string; data: string }
 }
-type AnthropicContentBlock = { type: 'text'; text: string } | AnthropicImageBlock
+type AnthropicTextBlock = {
+  type: 'text'
+  text: string
+  cache_control?: { type: 'ephemeral' }
+}
+type AnthropicContentBlock = AnthropicTextBlock | AnthropicImageBlock
+
+/** Anthropic 默认 5 分钟 ephemeral 缓存标记；computer use 步进间隔远小于 TTL，命中率高。 */
+const ANTHROPIC_CACHE_CONTROL = { type: 'ephemeral' } as const
+/** 严格校验请求体的第三方 Anthropic 兼容网关可能拒绝 cache_control 字段时的降级状态码。 */
+const ANTHROPIC_CACHE_DEGRADE_STATUSES = new Set([400, 404, 422])
 
 /** 把图片输入转成 Anthropic image block；优先公网 URL，其次 base64 dataUrl。 */
 function toAnthropicImageBlock(image: CanvasTextImageInput): AnthropicImageBlock | null {
@@ -189,31 +221,60 @@ async function callAnthropic(
   const imageBlocks = (params.images ?? [])
     .map(toAnthropicImageBlock)
     .filter((block): block is AnthropicImageBlock => block !== null)
-  // Anthropic 建议图片放在文本之前。无图时退回纯字符串 content。
-  const userContent: string | AnthropicContentBlock[] =
-    imageBlocks.length > 0 ? [...imageBlocks, { type: 'text', text: prompt }] : prompt
-  const body: Record<string, unknown> = {
-    model: params.model,
-    max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
-    messages: [{ role: 'user', content: userContent }],
-    ...(params.system ? { system: params.system } : {}),
-    ...(params.temperature != null ? { temperature: params.temperature } : {}),
+  const cacheEnabled = params.promptCache === true
+  const buildBody = (withCache: boolean): Record<string, unknown> => {
+    // 缓存开启时 system 用 block 数组并打 cache_control：系统提示词跨任务稳定，命中率最高。
+    const system: string | AnthropicTextBlock[] =
+      withCache && params.system
+        ? [{ type: 'text', text: params.system, cache_control: ANTHROPIC_CACHE_CONTROL }]
+        : (params.system ?? '')
+    // 稳定前缀（目标/成功标准）必须排在每步变化的截图与观测文本之前，才能作为缓存前缀；
+    // 因此缓存模式下图片排在稳定文本之后（放弃旧的“图片在前”建议以换取前缀缓存命中）。
+    const userContent: string | AnthropicContentBlock[] =
+      withCache && params.stablePrompt
+        ? [
+            { type: 'text', text: params.stablePrompt, cache_control: ANTHROPIC_CACHE_CONTROL },
+            ...imageBlocks,
+            { type: 'text', text: prompt },
+          ]
+        : imageBlocks.length > 0
+          ? [...imageBlocks, { type: 'text', text: prompt }]
+          : prompt
+    return {
+      model: params.model,
+      max_tokens: params.maxTokens ?? DEFAULT_MAX_TOKENS,
+      messages: [{ role: 'user', content: userContent }],
+      ...(params.system ? { system } : {}),
+      ...(params.temperature != null ? { temperature: params.temperature } : {}),
+    }
   }
-  const requestCall = buildRequestCall('POST', url, body)
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': params.apiKey,
-        'anthropic-version': '2023-06-01',
+  const requestCall = buildRequestCall('POST', url, buildBody(cacheEnabled))
+  const sendOnce = (body: Record<string, unknown>): Promise<Response> =>
+    fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': params.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    },
-    params.timeoutMs,
-    requestCall,
-  )
+      params.timeoutMs,
+      requestCall,
+    )
+  let res = await sendOnce(buildBody(cacheEnabled))
+  if (cacheEnabled && ANTHROPIC_CACHE_DEGRADE_STATUSES.has(res.status)) {
+    // 网关不认 cache_control 时降级为无缓存标记重发一次，避免缓存优化阻断整条链路。
+    const rejectedDetail = await safeText(res)
+    log.warn(
+      `Anthropic prompt-cache request rejected (HTTP ${res.status}); retrying without cache_control: ${rejectedDetail}`,
+    )
+    const fallbackBody = buildBody(false)
+    requestCall.body = sanitizeRequestBody(fallbackBody)
+    res = await sendOnce(fallbackBody)
+  }
   attachResponseMetadata(requestCall, res)
   if (!res.ok) {
     const detail = await safeText(res)
@@ -228,6 +289,8 @@ async function callAnthropic(
       input_tokens?: number
       output_tokens?: number
       total_tokens?: number
+      cache_read_input_tokens?: number
+      cache_creation_input_tokens?: number
     }
   }
   const text = data.content
@@ -247,6 +310,8 @@ async function callAnthropic(
       usage?.promptTokens != null ? `promptTokens=${usage.promptTokens}` : null,
       usage?.completionTokens != null ? `completionTokens=${usage.completionTokens}` : null,
       usage?.totalTokens != null ? `totalTokens=${usage.totalTokens}` : null,
+      usage?.cachedPromptTokens != null ? `cachedPromptTokens=${usage.cachedPromptTokens}` : null,
+      usage?.cacheWriteTokens != null ? `cacheWriteTokens=${usage.cacheWriteTokens}` : null,
     ]
       .filter((part): part is string => part != null)
       .join(' '),
@@ -289,6 +354,9 @@ async function callOpenAIChatCompletions(
       : prompt
   const messages: Array<{ role: string; content: string | OpenAiContentPart[] }> = []
   if (params.system) messages.push({ role: 'system', content: params.system })
+  // 稳定前缀独立成消息且排在变化内容之前：跨步逐字节相同的前缀命中 provider 自动前缀缓存
+  // （DeepSeek/Qwen/Kimi 等对 ≥1024 token 前缀自动生效，无需显式标记）。
+  if (params.stablePrompt) messages.push({ role: 'user', content: params.stablePrompt })
   messages.push({ role: 'user', content: userContent })
   const body = {
     model: params.model,
@@ -330,6 +398,7 @@ async function callOpenAIChatCompletions(
       prompt_tokens?: number
       completion_tokens?: number
       total_tokens?: number
+      prompt_tokens_details?: { cached_tokens?: number }
     }
   }
   const choice = data.choices?.[0]
@@ -354,7 +423,7 @@ async function callOpenAIResponses(
   const reasoningEffort = toOpenAIResponsesReasoningEffort(params.reasoningEffort)
   const body: Record<string, unknown> = {
     model: params.model,
-    input: buildResponsesInput(prompt, params.images),
+    input: buildResponsesInput(prompt, params.images, params.stablePrompt),
     stream: false,
     ...(params.system ? { instructions: params.system } : {}),
     ...(params.maxTokens != null
@@ -396,6 +465,7 @@ async function callOpenAIResponses(
       input_tokens?: number
       output_tokens?: number
       total_tokens?: number
+      input_tokens_details?: { cached_tokens?: number }
     }
   }
   return {
@@ -405,20 +475,28 @@ async function callOpenAIResponses(
   }
 }
 
-function buildResponsesInput(prompt: string, images: CanvasTextImageInput[] | undefined): unknown {
+function buildResponsesInput(
+  prompt: string,
+  images: CanvasTextImageInput[] | undefined,
+  stablePrompt: string | undefined,
+): unknown {
   const imageUrls = (images ?? [])
     .map(toOpenAiImageUrl)
     .filter((value): value is string => value !== null)
-  if (imageUrls.length === 0) return prompt
-  return [
-    {
+  const variableItems: Array<{ role: string; content: unknown }> = []
+  if (imageUrls.length > 0) {
+    variableItems.push({
       role: 'user',
       content: [
         { type: 'input_text', text: prompt },
         ...imageUrls.map((url) => ({ type: 'input_image', image_url: url })),
       ],
-    },
-  ]
+    })
+  }
+  // 无稳定前缀时保持旧行为：无图为纯字符串，有图为单条 user 输入。
+  if (!stablePrompt) return imageUrls.length > 0 ? variableItems : prompt
+  // 稳定前缀独立成首条 user 输入，保证跨步前缀相同以命中 Responses API 自动缓存。
+  return [{ role: 'user', content: stablePrompt }, ...variableItems]
 }
 
 function extractResponsesText(data: {
@@ -570,13 +648,16 @@ function normalizeTokenUsage(usage: {
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
 }): CanvasTextTokenUsage {
+  const cachedTokens = usage.prompt_tokens_details?.cached_tokens
   return {
     ...(typeof usage.prompt_tokens === 'number' ? { promptTokens: usage.prompt_tokens } : {}),
     ...(typeof usage.completion_tokens === 'number'
       ? { completionTokens: usage.completion_tokens }
       : {}),
     ...(typeof usage.total_tokens === 'number' ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof cachedTokens === 'number' ? { cachedPromptTokens: cachedTokens } : {}),
   }
 }
 
@@ -584,11 +665,19 @@ function normalizeAnthropicUsage(usage: {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
 }): CanvasTextTokenUsage {
   return {
     ...(typeof usage.input_tokens === 'number' ? { promptTokens: usage.input_tokens } : {}),
     ...(typeof usage.output_tokens === 'number' ? { completionTokens: usage.output_tokens } : {}),
     ...(typeof usage.total_tokens === 'number' ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof usage.cache_read_input_tokens === 'number'
+      ? { cachedPromptTokens: usage.cache_read_input_tokens }
+      : {}),
+    ...(typeof usage.cache_creation_input_tokens === 'number'
+      ? { cacheWriteTokens: usage.cache_creation_input_tokens }
+      : {}),
   }
 }
 
@@ -596,10 +685,13 @@ function normalizeResponsesUsage(usage: {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
+  input_tokens_details?: { cached_tokens?: number }
 }): CanvasTextTokenUsage {
+  const cachedTokens = usage.input_tokens_details?.cached_tokens
   return {
     ...(typeof usage.input_tokens === 'number' ? { promptTokens: usage.input_tokens } : {}),
     ...(typeof usage.output_tokens === 'number' ? { completionTokens: usage.output_tokens } : {}),
     ...(typeof usage.total_tokens === 'number' ? { totalTokens: usage.total_tokens } : {}),
+    ...(typeof cachedTokens === 'number' ? { cachedPromptTokens: cachedTokens } : {}),
   }
 }

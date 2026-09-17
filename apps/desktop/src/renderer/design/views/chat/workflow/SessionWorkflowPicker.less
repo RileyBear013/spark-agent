@@ -63,44 +63,61 @@
   isolation: isolate;
 }
 
-.session-workflow-menu-head,
-.session-workflow-section-label {
+/* 标题与分组标题的水平内边距都取 8px，跟 .session-workflow-option 的文字内缩对齐。
+ * 旧值 2px 会让标题比条目少缩进 6px，整块菜单看起来向右错位。 */
+.session-workflow-menu-head {
   display: flex;
   gap: 8px;
+  align-items: baseline;
   justify-content: space-between;
   min-width: 0;
-  padding: 4px 2px 6px;
+  padding: 6px 8px 8px;
   color: var(--text-faint);
   font-size: var(--font-sm);
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
-.session-workflow-menu-head > span,
-.session-workflow-section-label > span {
+.session-workflow-section-label {
+  padding: 4px 8px;
+  /* 分组标题比菜单标题轻一档：中文小字号再叠加重字重会糊在一起，
+   * 这里用字重而不是字号表达层级。 */
+  color: var(--text-faint);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.session-workflow-menu-head > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 右侧执行方式（运行时接管 / 不执行）：降一档字号与字重，避免与左侧标题抢层级。 */
 .session-workflow-menu-head > span:last-child {
   flex: 0 0 auto;
-  font-weight: 450;
+  font-size: var(--font-xs);
+  font-weight: 500;
 }
 
 .session-workflow-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   min-width: 0;
   min-height: 34px;
-  padding: 7px 8px;
+  padding: 6px 8px;
   border: 0;
   border-radius: var(--r-sm);
   color: inherit;
   background: transparent;
+  /* button 不继承 body 字号，不显式声明会落到 UA 默认 13.33px，比菜单标题还大。 */
+  font-size: var(--font-sm);
+  line-height: 1.35;
   text-align: left;
   cursor: pointer;
   transition:
@@ -110,7 +127,12 @@
 
 .session-workflow-option:hover:not(:disabled),
 .session-workflow-option.is-active {
-  background: color-mix(in srgb, var(--text) 5%, transparent);
+  background: var(--hover);
+}
+
+.session-workflow-option:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
 }
 
 .session-workflow-option-check {
@@ -132,22 +154,23 @@
   white-space: nowrap;
 }
 
+/* 版本号是次要信息：单独一档字号 + 定宽右对齐，避免长名称把它挤成两行。 */
 .session-workflow-option-description {
   flex: 0 0 auto;
   max-width: 84px;
   overflow: hidden;
   color: var(--text-faint);
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-workflow-option small {
-  color: var(--text-faint);
-}
-
+/* 分割线上下留白：略多于“标题到条目”，让分组标题归属下方列表而不是贴着线。 */
 .session-workflow-divider {
   height: 1px;
-  margin: 5px 8px;
+  margin: 6px 8px 10px;
   background: var(--border);
 }
 
@@ -215,7 +238,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .session-workflow-trigger {
+  .session-workflow-trigger,
+  .session-workflow-option {
     transition: none;
   }
 }

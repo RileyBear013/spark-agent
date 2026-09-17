@@ -53,6 +53,27 @@ export function describeComputerAction(action: ComputerAction): string {
   }
 }
 
+/**
+ * Log-facing variant of {@link describeComputerAction}. Identical wording except that
+ * free-text payloads (typed / pasted / set / selected text) are reduced to their length:
+ * the unified main.log may be exported for diagnostics and must never carry credentials
+ * the user typed into a form, while the on-screen activity log stays value-inclusive.
+ */
+export function describeComputerActionForLog(action: ComputerAction): string {
+  switch (action.type) {
+    case 'type_text':
+      return `输入文本（长度 ${action.text.length}）`
+    case 'paste_text':
+      return `粘贴文本（长度 ${action.text.length}）`
+    case 'set_value':
+      return `设置 [${action.elementId}] 的值（长度 ${action.value.length}）`
+    case 'select_text':
+      return `在 [${action.elementId}] 中选取文本（长度 ${action.text.length}）`
+    default:
+      return describeComputerAction(action)
+  }
+}
+
 function describeTarget(action: { elementId?: string; point?: { x: number; y: number } }): string {
   if (action.elementId != null) return `元素 [${action.elementId}]`
   if (action.point != null) return describePoint(action.point)

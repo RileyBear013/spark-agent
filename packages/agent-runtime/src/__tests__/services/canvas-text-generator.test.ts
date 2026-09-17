@@ -320,3 +320,172 @@ describe('generateCanvasText multimodal', () => {
     })
   })
 })
+
+describe('generateCanvasText prompt caching', () => {
+  const CACHE_PARAMS = {
+    providerType: 'anthropic',
+    apiKey: 'sk-ant',
+    model: 'claude-sonnet-5',
+    system: 'You are a desktop operator.',
+    stablePrompt: 'Objective: Save the document\n\nSuccess criteria: []',
+    prompt: 'Step index: 2\n\nAccessibility tree:\nbutton "Save" [1]',
+    promptCache: true as const,
+    images: [{ dataUrl: PNG_DATA_URL, mimeType: 'image/png' }],
+  }
+
+  it('Anthropic: system 与稳定前缀打 cache_control，截图排在稳定前缀之后', async () => {
+    const captured = stubFetch({ content: [{ type: 'text', text: 'ok' }] })
+    await generateCanvasText({ ...CACHE_PARAMS })
+    const body = captured.lastBody()
+    const system = body.system as Array<Record<string, unknown>>
+    expect(Array.isArray(system)).toBe(true)
+    expect(system[0]).toEqual({
+      type: 'text',
+      text: 'You are a desktop operator.',
+      cache_control: { type: 'ephemeral' },
+    })
+    const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>
+    const blocks = messages[0]!.content
+    expect(blocks[0]).toEqual({
+      type: 'text',
+      text: 'Objective: Save the document\n\nSuccess criteria: []',
+      cache_control: { type: 'ephemeral' },
+    })
+    expect(blocks[1]?.type).toBe('image')
+    expect(blocks[2]).toEqual({
+      type: 'text',
+      text: 'Step index: 2\n\nAccessibility tree:\nbutton "Save" [1]',
+    })
+  })
+
+  it('Anthropic: 网关拒绝 cache_control 时降级为无缓存标记重发一次', async () => {
+    const calls: Array<Record<string, unknown>> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, requestInit?: RequestInit) => {
+        calls.push(JSON.parse(String(requestInit?.body ?? '{}')) as Record<string, unknown>)
+        if (calls.length === 1) {
+          return new Response(JSON.stringify({ error: 'cache_control is not supported' }), {
+            status: 400,
+          })
+        }
+        return new Response(JSON.stringify({ content: [{ type: 'text', text: 'ok' }] }), {
+          status: 200,
+        })
+      }),
+    )
+    const result = await generateCanvasText({ ...CACHE_PARAMS })
+    expect(result.text).toBe('ok')
+    expect(calls).toHaveLength(2)
+    expect(calls[0]?.system).toEqual([
+      expect.objectContaining({ cache_control: { type: 'ephemeral' } }),
+    ])
+    expect(calls[1]?.system).toBe('You are a desktop operator.')
+    const retryBlocks = (calls[1]?.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]
+      ?.content
+    expect(retryBlocks?.[0]).toEqual({
+      type: 'image',
+      source: { type: 'base64', media_type: 'image/png', data: expect.any(String) },
+    })
+    expect(retryBlocks?.[1]).toEqual({
+      type: 'text',
+      text: 'Step index: 2\n\nAccessibility tree:\nbutton "Save" [1]',
+    })
+  })
+
+  it('Anthropic: usage 返回缓存命中与写入 token，便于确认缓存生效', async () => {
+    stubFetch({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: {
+        input_tokens: 2000,
+        output_tokens: 64,
+        total_tokens: 2064,
+        cache_read_input_tokens: 1536,
+        cache_creation_input_tokens: 320,
+      },
+    })
+    const result = await generateCanvasText({ ...CACHE_PARAMS })
+    expect(result.usage).toEqual({
+      promptTokens: 2000,
+      completionTokens: 64,
+      totalTokens: 2064,
+      cachedPromptTokens: 1536,
+      cacheWriteTokens: 320,
+    })
+  })
+
+  it('OpenAI-compatible: 稳定前缀拆分为独立 user 消息并透传 cached_tokens', async () => {
+    const captured = stubFetch({
+      choices: [{ message: { content: 'ok' } }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        total_tokens: 105,
+        prompt_tokens_details: { cached_tokens: 64 },
+      },
+    })
+    const result = await generateCanvasText({
+      providerType: 'openai',
+      apiKey: 'sk-x',
+      model: 'vision-model',
+      system: 'sys',
+      stablePrompt: 'stable objective',
+      prompt: 'Step index: 1',
+      promptCache: true,
+      images: [{ url: 'https://cdn/ref.png' }],
+    })
+    const messages = captured.lastBody().messages as Array<{ role: string; content: unknown }>
+    expect(messages).toHaveLength(3)
+    expect(messages[0]).toEqual({ role: 'system', content: 'sys' })
+    expect(messages[1]).toEqual({ role: 'user', content: 'stable objective' })
+    const variableParts = messages[2]!.content as Array<Record<string, unknown>>
+    expect(variableParts[0]).toEqual({ type: 'text', text: 'Step index: 1' })
+    expect(variableParts[1]).toEqual({ type: 'image_url', image_url: { url: 'https://cdn/ref.png' } })
+    expect(result.usage).toEqual({
+      promptTokens: 100,
+      completionTokens: 5,
+      totalTokens: 105,
+      cachedPromptTokens: 64,
+    })
+  })
+
+  it('OpenAI Responses API: 稳定前缀作为首条输入项', async () => {
+    const captured = stubFetch({ output_text: 'ok' })
+    await generateCanvasText({
+      providerType: 'openai',
+      apiKind: 'responses',
+      apiKey: 'sk-x',
+      model: 'gpt-5.4',
+      stablePrompt: 'stable objective',
+      prompt: 'Step index: 1',
+      promptCache: true,
+      images: [{ url: 'https://cdn/ref.png' }],
+    })
+    const input = captured.lastBody().input as Array<{ role: string; content: unknown }>
+    expect(input[0]).toEqual({ role: 'user', content: 'stable objective' })
+    const variableParts = input[1]!.content as Array<Record<string, unknown>>
+    expect(variableParts[0]).toEqual({ type: 'input_text', text: 'Step index: 1' })
+    expect(variableParts[1]).toEqual({ type: 'input_image', image_url: 'https://cdn/ref.png' })
+  })
+
+  it('未启用 promptCache 时保持旧行为：system 为字符串且单条 user 消息', async () => {
+    const captured = stubFetch({ content: [{ type: 'text', text: 'ok' }] })
+    await generateCanvasText({
+      providerType: 'anthropic',
+      apiKey: 'sk-ant',
+      model: 'claude-sonnet-5',
+      system: 'sys prompt',
+      stablePrompt: 'stable objective',
+      prompt: 'variable prompt',
+      images: [{ url: 'https://cdn/ref.png' }],
+    })
+    const body = captured.lastBody()
+    expect(body.system).toBe('sys prompt')
+    const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>
+    expect(messages[0]!.content[0]).toEqual({
+      type: 'image',
+      source: { type: 'url', url: 'https://cdn/ref.png' },
+    })
+    expect(messages[0]!.content[1]).toEqual({ type: 'text', text: 'variable prompt' })
+  })
+})

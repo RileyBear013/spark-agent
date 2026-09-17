@@ -1,0 +1,75 @@
+import type {
+  CanvasMediaModelSummary,
+  CanvasMediaTaskInputFile,
+  CanvasOperationType,
+  MediaCapabilityId,
+} from '@spark/protocol'
+import type { QuickCreateMode } from './quickCreateTaskStore'
+
+/** 快速创作表单中的输入素材（在画布输入文件基础上补充本地展示所需字段）。 */
+export type QuickCreateInput = CanvasMediaTaskInputFile & {
+  id: string
+  name: string
+  previewUrl: string
+}
+
+export const IMAGE_CAPABILITIES: MediaCapabilityId[] = ['image.generate', 'image.edit']
+export const VIDEO_CAPABILITIES: MediaCapabilityId[] = [
+  'video.generate',
+  'video.image_to_video',
+  'video.reference_to_video',
+  'video.edit',
+]
+
+/** 按模式与输入素材推导画布 operation（不含模型上下文）。 */
+export function operationFor(
+  mode: QuickCreateMode,
+  inputs: readonly QuickCreateInput[],
+): CanvasOperationType {
+  if (mode === 'reverse') return 'image_prompt_reverse'
+  if (mode === 'image') return inputs.length > 0 ? 'image_edit' : 'text_to_image'
+  if (inputs.some((input) => input.type === 'video')) return 'video_edit'
+  return inputs.length > 0 ? 'image_to_video' : 'text_to_video'
+}
+
+/**
+ * 按模式、输入素材与具体模型解析媒体能力候选：取模型声明支持的第一个候选能力；
+ * 模型未声明任何候选时回退到候选首项（由兼容模型过滤在提交前剔除不支持的模型）。
+ *
+ * 视频输入走「参考视频生视频」时不能只盯 video.edit——仅支持 reference_to_video 的模型
+ * （如自建 MiniMax H3）会因此被过滤掉，导致选了参考视频后无模型可选。
+ */
+export function capabilityFor(
+  mode: QuickCreateMode,
+  inputs: readonly QuickCreateInput[],
+  model?: CanvasMediaModelSummary,
+): MediaCapabilityId | undefined {
+  if (mode === 'reverse') return undefined
+  const candidates: MediaCapabilityId[] =
+    mode === 'image'
+      ? inputs.length > 0
+        ? ['image.edit']
+        : IMAGE_CAPABILITIES
+      : inputs.some((input) => input.type === 'video')
+        ? ['video.reference_to_video', 'video.edit']
+        : inputs.length > 0
+          ? ['video.image_to_video', 'video.reference_to_video', 'video.generate']
+          : ['video.generate', 'video.reference_to_video']
+  return (
+    candidates.find((id) => model?.capabilities.some((item) => item.id === id)) ?? candidates[0]
+  )
+}
+
+/**
+ * 提交时按已解析能力推导 operation：视频输入走 reference_to_video（参考视频生视频）时
+ * 记为 text_to_video，与后端 router 的偏好能力推导保持一致，保证历史重试能还原能力；
+ * 其余情况沿用 operationFor 的既有推导。
+ */
+export function operationForSubmission(
+  mode: QuickCreateMode,
+  inputs: readonly QuickCreateInput[],
+  capability: MediaCapabilityId | undefined,
+): CanvasOperationType {
+  if (capability === 'video.reference_to_video') return 'text_to_video'
+  return operationFor(mode, inputs)
+}

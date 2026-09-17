@@ -15,8 +15,14 @@
  */
 
 // 数据库核心
-export { SparkDatabase, createDatabase } from './database.js'
-export type { SqliteDatabase } from './database.js'
+export { SparkDatabase, createDatabase, inspectPendingMigrations } from './database.js'
+export type {
+  SqliteDatabase,
+  DatabaseMigration,
+  DatabaseMigrationPlan,
+  DatabaseMigrationProgress,
+  RunMigrationsOptions,
+} from './database.js'
 export {
   SubAppPackageService,
   validatePackageFiles,

@@ -727,6 +727,8 @@ export interface SDKExecutorConfig {
    */
   sparkSessionIdObserver?: ((sparkSessionId: string) => void | Promise<void>) | undefined
   codexCliProvider?: CodexCliModelProviderConfig | undefined
+  /** Spark-managed model catalog path used to prevent Codex fallback metadata for custom models. */
+  codexModelCatalogPath?: string | undefined
   systemPrompt?: string | undefined
   /**
    * Standby history used when a planned native resume becomes a fresh attempt

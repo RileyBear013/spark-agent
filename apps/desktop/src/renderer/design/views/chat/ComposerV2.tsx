@@ -3638,6 +3638,7 @@ export function ComposerV2({
     setDraftPermissionMode(nextPermissionMode)
     setSelectedProviderId(providerId)
     const nextModel = getProviderDefaultModel(provider, provider.modelIds[0])
+    if (isBuiltInLocalCliProvider(provider)) rememberCliSparkOverride(provider.id, null)
     const previousModel = effectiveModelId.trim()
     setDraftModelId(nextModel)
     writeComposerPrefs({
@@ -3673,6 +3674,7 @@ export function ComposerV2({
       modelId === getProviderDefaultModel(provider, provider.modelIds[0])
     const clearCliSparkOverride =
       cliSparkOverride != null && (!keepCliSparkOverride || isHostCliModel)
+    if (isHostCliModel) rememberCliSparkOverride(provider.id, null)
     if (clearCliSparkOverride) setCliSparkOverride(null)
     const nextAdapter = getProviderAdapterKind(provider)
     const nextPermissionMode =
@@ -3767,6 +3769,9 @@ export function ComposerV2({
   }
 
   const handleCliSparkClear = async () => {
+    if (selectedProvider != null && isBuiltInLocalCliProvider(selectedProvider)) {
+      rememberCliSparkOverride(selectedProvider.id, null)
+    }
     if (cliSparkOverride == null) return
     setCliSparkOverride(null)
     await persistRuntimePatch({ cliSparkOverride: null })

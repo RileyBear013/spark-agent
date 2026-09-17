@@ -1725,7 +1725,12 @@ describe('ProviderEditPanel spark executor switch', () => {
     const sparkSwitch = findSparkSwitch()
     expect(sparkSwitch).not.toBeNull()
     expect(sparkSwitch?.hasAttribute('disabled')).toBe(true)
-    expect(container.textContent).toContain('Spark 执行器暂不支持 Chat Completions API 渠道')
+    expect(container.textContent).toContain(
+      'Chat Completions 不支持 Spark 执行器，请切换至 Responses API',
+    )
+    const hint = container.querySelector('.pv_spark_executor_hint')
+    expect(hint?.parentElement?.classList.contains('pv_spark_executor_control')).toBe(true)
+    expect(hint?.parentElement?.nextElementSibling?.textContent?.includes('API Key')).toBe(true)
 
     await act(async () => {
       saveButton?.click()
@@ -1772,5 +1777,158 @@ describe('ProviderEditPanel spark executor switch', () => {
     expect(updateProvider.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({ useSparkExecutor: true }),
     )
+  })
+})
+
+describe('ProvidersView 卡片筛选缓存', () => {
+  let container: HTMLDivElement
+  let root: Root | null = null
+
+  /** 仅覆盖卡片渲染 + 筛选所需字段：默认模型 / 模型列表 / 媒体字段缺一不可（渲染期会直接取用）。 */
+  const cardProfiles = [
+    {
+      id: 'provider-alpha',
+      name: 'Alpha Chat',
+      provider: 'openai',
+      defaultModel: 'gpt-5',
+      modelIds: [],
+      mediaModelRefs: [],
+      modelType: 'multimodal',
+      enabled: true,
+    },
+    {
+      id: 'provider-beta',
+      name: 'Beta Image',
+      provider: 'openai',
+      defaultModel: 'gpt-image-1',
+      modelIds: [],
+      mediaModelRefs: [],
+      modelType: 'image',
+      enabled: true,
+    },
+  ]
+
+  beforeEach(() => {
+    mocks.invokers.clear()
+    window.localStorage.clear()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    mocks.invokers.set(
+      'provider:list',
+      vi.fn(async () => ({ profiles: cardProfiles })),
+    )
+    mocks.invokers.set(
+      'model:list',
+      vi.fn(async () => ({ models: [] })),
+    )
+  })
+
+  afterEach(() => {
+    if (root) act(() => root?.unmount())
+    root = null
+    container.remove()
+    window.localStorage.clear()
+  })
+
+  /**
+   * 挂载视图并拉一次列表。
+   * 初始加载由 usePlatformModelCatalogRefresh 触发，而它在测试里被 mock 成空实现，
+   * 所以这里显式点击「刷新」按钮把 provider:list 结果灌进视图。
+   */
+  const mountView = async () => {
+    await act(async () => {
+      root = createRoot(container)
+      root.render(<ProvidersView />)
+    })
+    const refreshButton = container.querySelector('button[aria-label="刷新"]')
+    await act(async () => {
+      refreshButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
+    })
+  }
+
+  const unmountView = async () => {
+    if (root) await act(async () => root?.unmount())
+    root = null
+  }
+
+  const findSelectByOptionLabel = (label: string): HTMLSelectElement | null =>
+    Array.from(container.querySelectorAll('select')).find((select) =>
+      Array.from(select.options).some((option) => option.textContent?.trim() === label),
+    ) ?? null
+
+  const setNativeValue = (element: HTMLInputElement | HTMLSelectElement, value: string) => {
+    const prototype =
+      element instanceof HTMLSelectElement
+        ? HTMLSelectElement.prototype
+        : HTMLInputElement.prototype
+    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+    setter?.call(element, value)
+  }
+
+  it('搜索 / 筛选 / 排序选择会被缓存，重新进入页面时恢复', async () => {
+    await mountView()
+
+    expect(container.querySelectorAll('.pv_card')).toHaveLength(2)
+    const enabledSelect = findSelectByOptionLabel('已启用')
+    const sortSelect = findSelectByOptionLabel('名称 A→Z')
+    expect(container.querySelector('.pv_filters_search')).not.toBeNull()
+    expect(enabledSelect).not.toBeNull()
+    expect(sortSelect).not.toBeNull()
+
+    await act(async () => {
+      const searchInput = container.querySelector<HTMLInputElement>('.pv_filters_search')
+      if (searchInput) {
+        setNativeValue(searchInput, 'alpha')
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+      }
+      if (enabledSelect) {
+        setNativeValue(enabledSelect, 'disabled')
+        enabledSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+      if (sortSelect) {
+        setNativeValue(sortSelect, 'nameAsc')
+        sortSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      }
+    })
+
+    expect(container.querySelector<HTMLInputElement>('.pv_filters_search')?.value).toBe('alpha')
+    // 两张卡都是启用状态，「已禁用」筛选命中 0 张
+    expect(container.querySelectorAll('.pv_card')).toHaveLength(0)
+    expect(
+      JSON.parse(window.localStorage.getItem('spark-agent:provider-card-filters') ?? '{}'),
+    ).toEqual({ search: 'alpha', kind: 'all', enabled: 'disabled', sortBy: 'nameAsc' })
+
+    // 模拟切换导航后回到 Providers 页面：组件卸载后重新挂载
+    await unmountView()
+    await mountView()
+
+    expect(container.querySelector<HTMLInputElement>('.pv_filters_search')?.value).toBe('alpha')
+    expect(findSelectByOptionLabel('已启用')?.value).toBe('disabled')
+    expect(findSelectByOptionLabel('名称 A→Z')?.value).toBe('nameAsc')
+    expect(container.querySelectorAll('.pv_card')).toHaveLength(0)
+  })
+
+  it('清空筛选关键字后缓存同步回落默认值', async () => {
+    await mountView()
+
+    const typeIntoSearch = async (value: string) => {
+      await act(async () => {
+        const searchInput = container.querySelector<HTMLInputElement>('.pv_filters_search')
+        if (searchInput) {
+          setNativeValue(searchInput, value)
+          searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+      })
+    }
+
+    await typeIntoSearch('alpha')
+    expect(container.querySelectorAll('.pv_card')).toHaveLength(1)
+
+    await typeIntoSearch('')
+    expect(container.querySelectorAll('.pv_card')).toHaveLength(2)
+    expect(
+      JSON.parse(window.localStorage.getItem('spark-agent:provider-card-filters') ?? '{}'),
+    ).toEqual({ search: '', kind: 'all', enabled: 'all', sortBy: 'default' })
   })
 })

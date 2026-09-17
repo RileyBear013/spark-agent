@@ -1623,6 +1623,7 @@ export class MessageBuilder {
             event.type === 'goal_completed' ? 'completed' : 'failed',
             event.id,
           )
+          this.activeGoal = null
         } else if (event.type === 'goal_budget_stopped') {
           // 预算停止发生在新迭代启动前：最后一条 divider 可能仍是 running 态，回填停止原因。
           this.finalizeGoalIterationDividers(
@@ -1631,12 +1632,26 @@ export class MessageBuilder {
             event.id,
             event.summary,
           )
+          // 停机 ≠ 目标结束：后端 getCurrent 仍把 stopped_by_budget 当当前目标，用户可
+          //「继续」（开启新预算周期）或完成/清除。保留快照，面板才会有这些操作入口；
+          // 之前这里置空，导致预算停机的目标彻底消失、只能重建。
+          const budget = (event.budget ?? {}) as { maxIterations?: unknown }
+          const maxIterations =
+            typeof budget.maxIterations === 'number' ? budget.maxIterations : undefined
+          this.activeGoal = {
+            goalId: event.goalId,
+            objective: event.objective,
+            status: event.status,
+            iteration: event.iteration,
+            ...(maxIterations != null ? { maxIterations } : {}),
+            summary: event.summary,
+          }
         } else {
           // goal_cleared：目标被显式清除，把悬挂的 running divider 收敛为 result（无小结），
           // 避免 spinner 永久旋转。
           this.finalizeGoalIterationDividers(event.goalId, 'result', event.id)
+          this.activeGoal = null
         }
-        this.activeGoal = null
         break
       }
 

@@ -114,6 +114,12 @@ import type {
 } from '@spark/protocol'
 import MultiSelectToolbar from './provider-import-export/MultiSelectToolbar'
 import { canHealthCheckProviderCardKind, type ProviderCardKind } from './provider-card-actions'
+import {
+  useProviderCardFilters,
+  type ProviderCardEnabledFilter,
+  type ProviderCardKindFilter,
+  type ProviderCardSortBy,
+} from './provider/providerCardFilterPrefs'
 import { limitProviderCardModelIds, resolveProviderCardModelIds } from './provider-card-models'
 import ImportPreviewModal from './provider-import-export/ImportPreviewModal'
 import { ProviderManifestContractEditor } from '../components/ProviderManifestContractEditor'
@@ -945,11 +951,14 @@ function ProvidersView() {
   /** 从预设创建时，传递给 ProviderEditPanel 的初始 presetId */
   const [initialPresetId, setInitialPresetId] = useState<string | null>(null)
 
-  // ─── 卡片筛选 / 排序 状态 ───────────────────────────────────────────────
-  const [cardSearch, setCardSearch] = useState('')
-  const [cardKindFilter, setCardKindFilter] = useState<'all' | ProviderCardKind>('all')
-  const [cardEnabledFilter, setCardEnabledFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
-  const [cardSortBy, setCardSortBy] = useState<'default' | 'nameAsc' | 'nameDesc'>('default')
+  // ─── 卡片筛选 / 排序 状态（本地缓存，切换导航回到页面时恢复上次选择） ────
+  const { filters: cardFilters, updateFilters: updateCardFilters } = useProviderCardFilters()
+  const {
+    search: cardSearch,
+    kind: cardKindFilter,
+    enabled: cardEnabledFilter,
+    sortBy: cardSortBy,
+  } = cardFilters
 
   // ─── 多选 / 导入 / 导出 状态 ─────────────────────────────────────────────
   const [multiSelect, setMultiSelect] = useState(false)
@@ -1411,7 +1420,7 @@ function ProvidersView() {
               size="middle"
               placeholder="搜索 Provider 名称…"
               value={cardSearch}
-              onChange={(e) => setCardSearch(e.target.value)}
+              onChange={(e) => updateCardFilters({ search: e.target.value })}
               prefix={<Icons.Search size={14} />}
               allowClear
             />
@@ -1419,14 +1428,14 @@ function ProvidersView() {
               className="pv_filters_select"
               size="middle"
               value={cardKindFilter}
-              onChange={(v) => setCardKindFilter(v as 'all' | ProviderCardKind)}
+              onChange={(v) => updateCardFilters({ kind: v as ProviderCardKindFilter })}
               options={[{ value: 'all', label: '全部类型' }, ...CARD_KIND_FILTER_OPTIONS]}
             />
             <Select
               className="pv_filters_select"
               size="middle"
               value={cardEnabledFilter}
-              onChange={(v) => setCardEnabledFilter(v as 'all' | 'enabled' | 'disabled')}
+              onChange={(v) => updateCardFilters({ enabled: v as ProviderCardEnabledFilter })}
               options={[
                 { value: 'all', label: '全部状态' },
                 { value: 'enabled', label: '已启用' },
@@ -1437,7 +1446,7 @@ function ProvidersView() {
               className="pv_filters_select"
               size="middle"
               value={cardSortBy}
-              onChange={(v) => setCardSortBy(v as 'default' | 'nameAsc' | 'nameDesc')}
+              onChange={(v) => updateCardFilters({ sortBy: v as ProviderCardSortBy })}
               options={[
                 { value: 'default', label: '默认排序' },
                 { value: 'nameAsc', label: '名称 A→Z' },
@@ -3894,7 +3903,6 @@ export function ProviderEditPanel({
 
               <label className="pv_form_label">
                 模型配置图标
-                <span className="pv_form_sub">找不到心仪图标时可选择“通用模型”</span>
               </label>
               <button
                 type="button"

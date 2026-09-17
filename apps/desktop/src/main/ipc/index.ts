@@ -236,6 +236,7 @@ import type {
   VideoProcessResponse,
   VideoProcessProgress,
   CanvasMediaPreviewTemplateInvocationResponse,
+  CanvasMediaTaskGetResponse,
   MediaCapabilityId,
   SessionId,
   RemoteConnectionConfig,
@@ -6101,6 +6102,32 @@ export function registerAllIpcHandlers(): void {
       cancelled: record.status === 'cancelled',
       status: record.status,
     }
+  })
+
+  // 只读查询持久化媒体任务状态：视图重新挂载时对账「事件丢失停在 running」的记录，
+  // 不触发轮询恢复（那是 repoll-media 的职责），也不做画布归属校验（渲染端仅凭 runtimeTaskId 查询）。
+  typedIpcHandle('canvas:task:get-media', async (req) => {
+    const record = getMediaTaskRuntimeService().inquire(req.runtimeTaskId)
+    if (!record) {
+      canvasTaskLogger.info(`event=get-failed runtimeTaskId=${req.runtimeTaskId} code=task_not_found`)
+      return {
+        runtimeTaskId: req.runtimeTaskId,
+        found: false,
+        status: 'failed',
+        providerProfileId: '',
+        provider: '',
+        model: '',
+        mode: 'sync',
+        assets: [],
+        pollingAvailable: false,
+        getUnavailableReason: '任务记录不存在或已被清理',
+        error: {
+          code: 'task_not_found',
+          message: `Media task not found: ${req.runtimeTaskId}`,
+        },
+      } satisfies CanvasMediaTaskGetResponse
+    }
+    return { found: true, ...(await canvasResponseFromMediaTaskRecord(record)) }
   })
 
   // ─── Canvas 持久化 Handlers（SQLite-backed 生产存储） ─────────────────────
