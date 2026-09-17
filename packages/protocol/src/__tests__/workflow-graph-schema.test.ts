@@ -181,6 +181,107 @@ describe('WorkflowGraphSchema', () => {
     expectIssue(baseGraph([{ ...node('input'), id: '' }]), { path: 'id' })
   })
 
+  it('accepts runtime override fields on agent nodes (review: whitelist missed runtime readers)', () => {
+    // 白名单证据必须覆盖运行时读取方：session-workflow-helpers 对这三个字段防御式
+    // 读取并回退 member 值，导入/手写 JSON 可携带——只查 UI 必漏，漏了就误杀存量。
+    const result = parse(
+      baseGraph([
+        node('agent', {
+          agentId: 'agent-1',
+          agentAdapter: 'claude-sdk',
+          reasoningEffort: 'high',
+          disabledSkillIds: ['builtin:canvas-studio'],
+        }),
+      ]),
+    )
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts input structured-parsing fields objective/constraint', () => {
+    // buildWorkflowInputStructuredInstruction 读取 input 节点的 objective（string）
+    // 与 constraint（string 或 string[]）参与 LLM 结构化拆解。
+    const result = parse(
+      baseGraph([
+        node('input', {
+          objective: '产出可执行的验收清单',
+          constraint: ['不超过 10 条', '中文输出'],
+        }),
+        node('input', { objective: '备选形态', constraint: '单条字符串约束' }),
+      ]),
+    )
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts non-string value variants — runtime tolerates any JSON value', () => {
+    // review 指正 value 类型过窄：运行时对 string 直接采用，number/boolean String()、
+    // 其余 JSON.stringify 兜底（session-workflow-helpers L359-360/L896-898）。
+    const result = parse(
+      baseGraph([
+        node('input', { value: 42 }),
+        node('input', { value: true }),
+        node('input', { value: null }),
+        node('input', { value: { a: 1, nested: ['x'] } }),
+        node('input', { value: [1, 'two', false] }),
+      ]),
+    )
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects wrong-typed runtime fields', () => {
+    expectIssue(baseGraph([node('agent', { agentAdapter: 42 })]), { path: 'config.agentAdapter' })
+    expectIssue(baseGraph([node('agent', { disabledSkillIds: 'builtin:x' })]), {
+      path: 'config.disabledSkillIds',
+    })
+    expectIssue(baseGraph([node('input', { objective: ['列表不是字符串'] })]), {
+      path: 'config.objective',
+    })
+    expectIssue(baseGraph([node('input', { constraint: { bogus: true } })]), {
+      path: 'config.constraint',
+    })
+  })
+
+  it('replays a legacy graph with runtime fields, value variants and nested loop', () => {
+    // 存量兼容回归（review 点名）：真实保存数据混合 UI 字段、运行时覆盖字段与多层
+    // loop——必须整体通过，闸门不允许误杀存量。
+    const legacy = {
+      nodes: [
+        node('input', {
+          prompt: '读取需求',
+          value: '固定输入',
+          objective: '结构化拆解目标',
+          constraint: ['约束 A'],
+          outputKey: 'requirement',
+        }),
+        node('agent', {
+          prompt: '实现',
+          agentAdapter: 'codex',
+          reasoningEffort: 'medium',
+          disabledSkillIds: [],
+          outputKey: 'impl',
+        }),
+        node('loop', {
+          maxIterations: 3,
+          breakCondition: { op: 'equals', key: 'verdict', value: 'pass' },
+          body: {
+            nodes: [
+              node('loop', {
+                maxIterations: 2,
+                body: baseGraph([node('review', { prompt: '内层复核', outputKey: 'inner' })]),
+              }),
+            ],
+            edges: [],
+          },
+        }),
+      ],
+      edges: [
+        { id: 'e1', from: 'n-input', to: 'n-agent' },
+        { id: 'e2', from: 'n-agent', to: 'n-loop' },
+      ],
+      orientation: 'vertical',
+    }
+    expect(parse(legacy).success).toBe(true)
+  })
+
   it('formats issues as readable path: message text', () => {
     const result = parse(baseGraph([node('loop', { maxIteration: 5 })]))
     expect(result.success).toBe(false)

@@ -19,6 +19,7 @@ import { registerTeamOutcomeIpc } from './registerTeamOutcomeIpc.js'
 import { createWorkspaceInfoMapper } from './workspace-info.js'
 import { resolveSessionScopedWorkspaceRoot } from './sessionWorkspaceRoot.js'
 import { readTextFileForRenderer } from './file-read.js'
+import { assertWorkflowGraphSchema, assertWorkflowGraphValid } from './workflow-graph-gate.js'
 import {
   buildCanvasMediaProviderPrompt,
   buildCanvasRuntimeRequest,
@@ -173,11 +174,6 @@ import {
   EmbeddingService,
   ensureSessionWorkspaceRootPath,
   NO_PROJECT_WORKSPACE_NAME,
-  detectWorkflowConditionReferenceErrors,
-  detectWorkflowGraphCycles,
-  formatWorkflowConditionReferenceError,
-  formatWorkflowCycleError,
-  normalizeWorkflowGraph,
   SCHEDULED_TASK_SESSION_TITLE_PREFIX,
   HookLegacyMigrationService,
 } from '@spark/agent-runtime'
@@ -253,8 +249,6 @@ import type {
 } from '@spark/protocol'
 import {
   MediaModelManifestSchema,
-  WorkflowGraphSchema,
-  formatWorkflowGraphIssues,
   isAutoRouterProvider,
   migrateMediaModelManifestToV2,
   createScheduledTaskTurnPresentation,
@@ -8492,30 +8486,8 @@ export function registerAllIpcHandlers(): void {
     return { workflow: workflow != null ? toWorkflowItem(workflow) : null }
   })
 
-  // 保存前形状校验（M1 第 0 步）：kind 枚举 / config 字段白名单（strict）/ 边条件结构 /
-  // 递归循环体——LLM 拼错的 kind、字段名、值类型在此明确拒绝，不再静默落库。
-  // 只管形状；环/拓扑/条件引用归下方 assertWorkflowGraphValid，运行时容错归 executor。
-  const assertWorkflowGraphSchema = (graph: unknown): void => {
-    if (graph == null) return
-    const parsed = WorkflowGraphSchema.safeParse(graph)
-    if (!parsed.success) {
-      throw new Error(`工作流图校验失败：${formatWorkflowGraphIssues(parsed.error.issues)}`)
-    }
-  }
-
-  // 保存前环校验：环图在运行时只能以 workflow_deadlock 失败（英文裸 node id 报错），
-  // 这里在持久化前用拓扑排序即时拦截，报错带节点标题便于用户定位。
-  const assertWorkflowGraphValid = (graph: unknown): void => {
-    if (graph == null) return
-    const normalized = normalizeWorkflowGraph(graph as Parameters<typeof normalizeWorkflowGraph>[0])
-    const cycleReports = detectWorkflowGraphCycles(normalized)
-    if (cycleReports.length > 0) throw new Error(formatWorkflowCycleError(cycleReports))
-    const referenceReports = detectWorkflowConditionReferenceErrors(normalized)
-    if (referenceReports.length > 0) {
-      throw new Error(formatWorkflowConditionReferenceError(referenceReports))
-    }
-  }
-
+  // 保存闸门（形状白名单 + 拓扑环/引用检测）抽至 ./workflow-graph-gate.ts，
+  // 与 workflow:update 共用同一实现，便于集成测试直调同一闸门。
   typedIpcHandle('workflow:create', async (req) => {
     const { graph, ...fields } = req
     assertWorkflowGraphSchema(graph)

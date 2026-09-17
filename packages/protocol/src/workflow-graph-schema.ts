@@ -12,8 +12,10 @@
  * - config 不做 per-kind 字段排斥：编辑器切换节点类型时不清理旧字段（残留字段在
  *   存量数据中普遍存在），strict 排斥会误杀合法保存。kind↔字段组合的语义检查留给
  *   workflow_validate 以 lint 形式提示。
- * - 白名单 = UI 检查器实际写入字段的并集（含 WorkflowNodeConfig TS 类型未声明的
- *   value：input 静态值 / route 固定分支）。
+ * - 白名单 = UI 写入字段 ∪ 运行时读取字段：前者来自检查器字段并集（含 TS 类型未
+ *   声明的 value），后者来自 executor / session-workflow-helpers 的防御式读取点
+ *   （agent 节点级覆盖字段与 input 结构化字段，导入/手写 JSON 可携带）——只查 UI
+ *   必漏运行时字段（review 实证）。
  * - 特有字段一律 optional：官方模板的 route 不带 routeOptions、verify 不带
  *   verifyCommands，presence 强制会击穿存量模板。
  */
@@ -80,8 +82,10 @@ const MAX_EDGES = 5_000
 
 /**
  * 节点 config：全部已知字段的并集白名单 + strict（未知键报错）。
- * 各字段类型与 WorkflowNodeConfig（ipc/index.ts L3442）对齐；value 为 UI 实际
- * 写入但 TS 类型未声明的隐藏字段（input 静态值 / route 固定分支）。
+ * 字段类型与 WorkflowNodeConfig（ipc/index.ts L3442）及运行时读取点
+ * （session-workflow-helpers.ts）对齐；value 为 UI 实际写入但 TS 类型未声明的
+ * 隐藏字段——运行时对 string 直接采用、其余 JSON 值 stringify/String() 兜底，
+ * 故放宽为任意 JSON 标量/结构。
  */
 const WorkflowNodeConfigSchemaBase = z
   .object({
@@ -94,14 +98,34 @@ const WorkflowNodeConfigSchemaBase = z
     ruleIds: z.array(z.string()).optional(),
     outputKey: z.string().optional(),
     retryCount: z.number().int().min(0).max(MAX_RETRY_COUNT).optional(),
-    // ── input / route：value（TS 类型未声明，UI 在用） ──
-    value: z.string().optional(),
+    // ── input / route：value（TS 类型未声明；input 静态值可为任意 JSON——
+    //    session-workflow-helpers 对 string 直接采用，number/boolean String()、
+    //    其余 stringify 兜底） ──
+    value: z
+      .union([
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.null(),
+        z.record(z.string(), z.unknown()),
+        z.array(z.unknown()),
+      ])
+      .optional(),
     // ── 执行模式（input/plan/skill/review/artifact；route 固定分支隐式管理） ──
     execution: z.enum(['auto', 'static']).optional(),
     // ── agent / subagent ──
     agentId: z.string().nullable().optional(),
     parallelism: z.number().int().min(1).max(MAX_PARALLELISM).optional(),
     toolIds: z.array(z.string()).optional(),
+    // ── agent 节点级运行时覆盖（session-workflow-helpers 防御式读取，缺省回退
+    //    member 值；UI 检查器不写入，导入/手写 JSON 可携带。类型用 string 而非
+    //    enum：adapter/effort 枚举随上游版本漂移，strict enum 会误杀旧版数据） ──
+    agentAdapter: z.string().optional(),
+    reasoningEffort: z.string().optional(),
+    disabledSkillIds: z.array(z.string()).optional(),
+    // ── input 结构化解析字段（buildWorkflowInputStructuredInstruction 读取） ──
+    objective: z.string().optional(),
+    constraint: z.union([z.string(), z.array(z.string())]).optional(),
     // ── tool / mcp 确定性调用 ──
     toolSource: z.enum(['mcp', 'builtin', 'platform']).nullable().optional(),
     toolServerId: z.string().nullable().optional(),
@@ -124,7 +148,13 @@ const WorkflowNodeConfigSchemaBase = z
   })
   .strict()
 
-/** 递归引用 loop.body：用 z.lazy 打破类型循环（v1 嵌套 loop 由编辑器限制，schema 不禁）。 */
+/**
+ * 递归引用 loop.body：用 z.lazy 打破类型循环。
+ * 嵌套边界（review 要求文档化）：本 schema 不限制嵌套深度——存量/手工数据可能多层，
+ * 强限制会误杀；规模风险由 MAX_NODES/MAX_EDGES 总量兜底，每层迭代上限为
+ * WORKFLOW_LOOP_HARD_CAP=50（workflow-executor.ts），拓扑合法性归
+ * assertWorkflowGraphValid（环检测 + 条件引用检测）。
+ */
 export const WorkflowGraphSchema: zod.ZodType<WorkflowGraphShape> = z.lazy(() =>
   z.object({
     nodes: z
