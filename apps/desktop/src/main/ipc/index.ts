@@ -11,7 +11,7 @@
  */
 
 import { typedIpcHandle, pushStreamEvent } from './typed-ipc.js'
-import { assertWorkflowGraphValid } from './workflow-graph-guard.js'
+import { assertWorkflowGraphSchema, assertWorkflowGraphValid } from './workflow-graph-guard.js'
 import { MAIN_WINDOW_MIN_WIDTH } from '../../window-sizing.js'
 import { CanvasSnapshotWriteCoordinator } from './canvasSnapshotWriteCoordinator.js'
 import { registerOutcomeRoomIpc } from './registerOutcomeRoomIpc.js'
@@ -6105,7 +6105,9 @@ export function registerAllIpcHandlers(): void {
   typedIpcHandle('canvas:task:get-media', async (req) => {
     const record = getMediaTaskRuntimeService().inquire(req.runtimeTaskId)
     if (!record) {
-      canvasTaskLogger.info(`event=get-failed runtimeTaskId=${req.runtimeTaskId} code=task_not_found`)
+      canvasTaskLogger.info(
+        `event=get-failed runtimeTaskId=${req.runtimeTaskId} code=task_not_found`,
+      )
       return {
         runtimeTaskId: req.runtimeTaskId,
         found: false,
@@ -8484,8 +8486,11 @@ export function registerAllIpcHandlers(): void {
     return { workflow: workflow != null ? toWorkflowItem(workflow) : null }
   })
 
+  // 保存闸门（形状白名单 + 未知类型/环/条件引用）在 ./workflow-graph-guard.ts，
+  // 与团队资产安装共用同一实现，便于集成测试直调同一闸门。
   typedIpcHandle('workflow:create', async (req) => {
     const { graph, ...fields } = req
+    assertWorkflowGraphSchema(graph)
     assertWorkflowGraphValid(graph)
     const workflow = getWorkflowRepository().create({
       ...fields,
@@ -8496,6 +8501,7 @@ export function registerAllIpcHandlers(): void {
 
   typedIpcHandle('workflow:update', async (req) => {
     const { id, graph, ...fields } = req
+    assertWorkflowGraphSchema(graph)
     assertWorkflowGraphValid(graph)
     const workflow = getWorkflowRepository().update(id, {
       ...fields,
