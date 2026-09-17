@@ -154,6 +154,10 @@ env = { LOG_LEVEL = "info" }       # stdio servers also inherit your shell envir
 [mcp.servers.remote]               # Streamable HTTP transport
 url = "https://example.com/mcp"
 headers = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
+
+[platform]
+server_url = "https://spark.yiqibyte.com/"    # Spark account server
+# web_login_url = "https://www.yiqibyte.com/login"
 ```
 
 Tool patterns use the same `*` wildcard syntax as permission rules (`mcp__*`, `ba*`). Deny entries are
@@ -234,6 +238,31 @@ when it has selected a skill. Loading returns the Markdown body without frontmat
 and never executes scripts from the skill directory. Documents are bounded to 256 KiB by default;
 the SDK keeps this tool family opt-in through `skillsEnabled` so existing embeddings do not change
 their default tool set.
+
+### Spark account login
+
+`spark login` signs the CLI in to your Spark account with the same browser handshake the desktop app
+uses: the CLI generates a `state` and a PKCE verifier, opens the web login page, and polls until the
+page binds the state (`--no-browser` prints the URL instead, for headless or SSH sessions). Only
+`state` and `sha256(verifier)` reach the browser; the verifier is exchanged exactly once and never
+written to disk before the exchange succeeds.
+
+```bash
+spark login                 # open the login page and wait for the browser
+spark login --no-browser    # print the login url and wait for it to be opened elsewhere
+spark whoami                # show the signed-in account (--json for machine output)
+spark logout                # delete the stored session
+```
+
+The session is stored in `~/.spark/credentials.json` with `0600` permissions and an atomic replace —
+tokens are never written to `config.toml`, printed to the terminal, or included in fact events.
+Expired access tokens are refreshed automatically (one request at a time) and the rotated session is
+persisted. When a refresh is rejected, `spark whoami` deletes the dead session and tells you to log in
+again instead of reporting a stale identity.
+
+The account server comes from `[platform] server_url`, overridable with `SPARK_EDUGEN_BASE_URL`; the
+web login page comes from `[platform] web_login_url`, then the server's `/client-config`, then a
+built-in default, and can be overridden with `SPARK_WEB_LOGIN_URL`.
 
 ## Model configuration
 

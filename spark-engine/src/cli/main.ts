@@ -19,6 +19,7 @@ import {
   type ResolvedEngineSettings,
 } from '../config/settings.js'
 import type { SettingsScope } from '../config/settings.js'
+import { executeAuthCommand } from './auth-command.js'
 import { executeConfigCommand } from './config-command.js'
 import { executeMcpCommand, type McpAddInput } from './mcp-command.js'
 import { executeMemoryCommand } from './memory-command.js'
@@ -97,6 +98,8 @@ interface CliOptions {
   readonly todoNotes?: string
   readonly todoLimit?: string
   readonly todoAll: boolean
+  /** `spark login` flag: print the login url instead of launching a browser. */
+  readonly noBrowser: boolean
   readonly positionals: readonly string[]
 }
 
@@ -162,6 +165,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       return 2
     }
     return runMaintenanceCommand(maintenance, options)
+  }
+  if (maintenance === 'login' || maintenance === 'logout' || maintenance === 'whoami') {
+    if (options.positionals.length > 1 || options.prompt) {
+      process.stderr.write(`spark ${maintenance} does not accept extra arguments.\n`)
+      return 2
+    }
+    return executeAuthCommand({
+      subcommand: maintenance,
+      args: [],
+      json: options.json,
+      cwd: process.cwd(),
+      sparkHome: defaultSparkHome(),
+      openBrowser: !options.noBrowser,
+      stdout: (text) => {
+        process.stdout.write(text)
+      },
+      stderr: (text) => {
+        process.stderr.write(text)
+      },
+    })
   }
   if (maintenance === 'config') {
     if (options.prompt) {
@@ -624,6 +647,7 @@ function parseCli(argv: readonly string[]): CliOptions {
       priority: { type: 'string' },
       notes: { type: 'string' },
       all: { type: 'boolean', default: false },
+      'no-browser': { type: 'boolean', default: false },
     },
   })
   const requestedOutputFormat = parsed.values['output-format']
@@ -727,6 +751,7 @@ function parseCli(argv: readonly string[]): CliOptions {
     ...(parsed.values.limit === undefined ? {} : { todoLimit: parsed.values.limit }),
     ...(parsed.values.limit === undefined ? {} : { skillLimit: parsed.values.limit }),
     todoAll: parsed.values.all ?? false,
+    noBrowser: parsed.values['no-browser'] ?? false,
     positionals: parsed.positionals,
   }
 }
@@ -1126,6 +1151,9 @@ Usage:
                             Event and streaming-delta JSONL
   spark models              List local and SparkWork-synced models
   spark doctor              Diagnose install, discovery, and model selection
+  spark login               Sign in to your Spark account (browser login)
+  spark logout              Remove the stored Spark account session
+  spark whoami              Show the signed-in Spark account
   spark sessions            List sessions recorded for the current directory
   spark config [list]       Show the effective layered configuration
   spark config get <key>    Print one value (raw in text mode)
@@ -1175,11 +1203,17 @@ Update exit codes:
   Sections: [agent] [providers] [models] (model channels),
             [permissions] mode/allow/deny/ask, [tools] enabled/disabled,
             [mcp.servers.<name>] command|url,
-            [memory] enabled/max_inject_tokens/agent_id.
+            [memory] enabled/max_inject_tokens/agent_id,
+            [platform] server_url/web_login_url.
+
+  Account:
+  spark login stores the session in ~/.spark/credentials.json (0600).
+  SPARK_EDUGEN_BASE_URL and SPARK_WEB_LOGIN_URL override [platform].
 
 Options:
   -p, --prompt <text>       Task prompt
   -m, --model <id>          Select a local id, SparkWork route id, or unique model name
+      --no-browser          Print the login url instead of opening a browser (spark login)
   -c, --continue            Continue the most recent session in this directory
   -r, --resume [<id>]       Resume a session; without an id pick one in the TUI
       --global              With 'spark config': use ~/.spark/config.toml (default)

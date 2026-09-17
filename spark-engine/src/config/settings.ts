@@ -108,7 +108,9 @@ export async function loadSparkSettings(options: SparkSettingsOptions): Promise<
   const paths = resolveSparkSettingsPaths(options)
   const global = await readSettingsLayer(paths.globalPath)
   const project =
-    paths.projectPath === paths.globalPath ? { layer: {}, exists: false } : await readSettingsLayer(paths.projectPath)
+    paths.projectPath === paths.globalPath
+      ? { layer: {}, exists: false }
+      : await readSettingsLayer(paths.projectPath)
   const mergedLayer = deepMergeLayers(global.layer, project.layer)
   let config: ModelConfig
   try {
@@ -184,7 +186,11 @@ export function resolveMcpSettings(
   for (const [name, server] of Object.entries(mcp.servers)) {
     if (!server.enabled) continue
     if (server.url !== undefined) {
-      const headers = expandEnvironmentReferences(server.headers, env, `mcp.servers.${name}.headers`)
+      const headers = expandEnvironmentReferences(
+        server.headers,
+        env,
+        `mcp.servers.${name}.headers`,
+      )
       servers[name] = {
         type: 'http',
         url: server.url,
@@ -214,6 +220,45 @@ export function resolveMemorySettings(settings: SparkSettings): ResolvedMemorySe
     maxInjectTokens: memory?.max_inject_tokens ?? 4_000,
     agentId: memory?.agent_id ?? 'default',
   }
+}
+
+export interface ResolvedPlatformSettings {
+  readonly serverUrl: string
+  readonly webLoginUrl?: string
+}
+
+/** Matches the desktop default so a CLI session logs into the same account server. */
+export const DEFAULT_PLATFORM_SERVER_URL = 'https://spark.yiqibyte.com/'
+
+/**
+ * Resolves the Spark account server used by `spark login` / `whoami`.
+ *
+ * Environment variables win over TOML so a local integration test server can be
+ * selected without editing a shared config file (same precedence as the desktop).
+ * The web login URL stays optional: when unset, the client asks the server's
+ * `/client-config` and only then falls back to its built-in page.
+ */
+export function resolvePlatformSettings(
+  settings: SparkSettings,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedPlatformSettings {
+  const platform = settings.config.platform
+  const serverUrl =
+    normalizeUrl(env.SPARK_EDUGEN_BASE_URL) ??
+    normalizeUrl(platform?.server_url) ??
+    DEFAULT_PLATFORM_SERVER_URL
+  const webLoginUrl = normalizeUrl(env.SPARK_WEB_LOGIN_URL) ?? normalizeUrl(platform?.web_login_url)
+  return {
+    serverUrl,
+    ...(webLoginUrl === undefined ? {} : { webLoginUrl }),
+  }
+}
+
+/** Trims a configured URL and drops empty values so they fall through the chain. */
+function normalizeUrl(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  return trimmed === '' ? undefined : trimmed
 }
 
 /**
@@ -262,10 +307,7 @@ export function resolveEngineSettings(
  */
 export function describeSettings(settings: SparkSettings): readonly SettingEntry[] {
   const entries: SettingEntry[] = []
-  const visit = (
-    layer: Readonly<Record<string, unknown>>,
-    path: readonly string[],
-  ): void => {
+  const visit = (layer: Readonly<Record<string, unknown>>, path: readonly string[]): void => {
     for (const [key, value] of Object.entries(layer)) {
       const next = [...path, key]
       if (isPlainObject(value)) {
@@ -284,12 +326,16 @@ export function describeSettings(settings: SparkSettings): readonly SettingEntry
 }
 
 export async function readSetting(
-  options: SparkSettingsOptions & { readonly key: string; readonly scope?: SettingsScope | 'effective' },
+  options: SparkSettingsOptions & {
+    readonly key: string
+    readonly scope?: SettingsScope | 'effective'
+  },
 ): Promise<SettingEntry> {
   const settings = await loadSparkSettings(options)
   const path = parseSettingPath(options.key)
   const scope = options.scope ?? 'effective'
-  if (scope === 'global') return entry(settings, path, getValueAtPath(settings.global.layer, path), 'global')
+  if (scope === 'global')
+    return entry(settings, path, getValueAtPath(settings.global.layer, path), 'global')
   if (scope === 'project') {
     return entry(settings, path, getValueAtPath(settings.project.layer, path), 'project')
   }
@@ -344,7 +390,9 @@ async function mutateSetting(
   const previousValue = getValueAtPath(mutated, parseSettingPath(options.key))
   mutate(mutated)
   const merged =
-    scope === 'project' ? deepMergeLayers(other.layer, mutated) : deepMergeLayers(mutated, other.layer)
+    scope === 'project'
+      ? deepMergeLayers(other.layer, mutated)
+      : deepMergeLayers(mutated, other.layer)
   try {
     ModelConfigSchema.parse(merged)
   } catch (error) {

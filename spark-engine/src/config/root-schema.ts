@@ -4,6 +4,7 @@ import {
   McpSettingsSchema,
   MemorySettingsSchema,
   PermissionSettingsSchema,
+  PlatformSettingsSchema,
   ToolSettingsSchema,
 } from './settings-schema.js'
 
@@ -75,6 +76,7 @@ const ModelConfigSchema = z
     tools: ToolSettingsSchema.optional(),
     mcp: McpSettingsSchema.optional(),
     memory: MemorySettingsSchema.optional(),
+    platform: PlatformSettingsSchema.optional(),
   })
   .strict()
 

@@ -120,3 +120,13 @@ export const MemorySettingsSchema = z
   })
   .strict()
 export type MemorySettings = z.output<typeof MemorySettingsSchema>
+
+export const PlatformSettingsSchema = z
+  .object({
+    /** Spark account server (edu-server) base URL, including the http(s) scheme. */
+    server_url: z.url().max(2_000).optional(),
+    /** Web login page opened by `spark login`; resolved from the server when unset. */
+    web_login_url: z.url().max(2_000).optional(),
+  })
+  .strict()
+export type PlatformSettings = z.output<typeof PlatformSettingsSchema>
