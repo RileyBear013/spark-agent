@@ -1394,6 +1394,7 @@ function WorkflowViewInner() {
                 toast.error(error instanceof Error ? error.message : '打开新生成的工作流失败。')
               })
           }}
+          onRestoreGraph={(graph) => loadGraphIntoCanvas(graph)}
         />
       )}
       {testRunOpen && (

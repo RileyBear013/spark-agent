@@ -12,10 +12,20 @@
  *     （同 BoardView 先例）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ManagedAgent, ProviderProfile, SessionAttachment } from '@spark/protocol'
+import type {
+  ManagedAgent,
+  ProviderProfile,
+  SessionAttachment,
+  WorkflowGraph,
+} from '@spark/protocol'
 import { ChatPanel } from '../../components/ChatPanel'
 import { Icons } from '../../Icons'
 import { isProviderCompatibleWithAdapter } from '../../utils/provider-adapter'
+import {
+  buildWorkflowTurnPrefix,
+  circuitBrokenResponse,
+  createValidateCircuit,
+} from './workflow-agent-turn'
 import { useWorkflowToolHost } from './workflow-tool-host'
 import type { WorkflowEditorState, WorkflowToolContext } from './workflow.tools'
 import './WorkflowAgentPanel.less'
@@ -31,34 +41,22 @@ interface Props {
   agents: ManagedAgent[]
   /** 新工作流落库成功后回调（编辑器切换到新图） */
   onWorkflowCreated: (workflowId: string) => void
+  /** 撤销本轮：把编辑器恢复到快照时的图（由 WorkflowView 提供 loadGraphIntoCanvas） */
+  onRestoreGraph?: (graph: WorkflowGraph) => void
 }
 
 const WORKFLOW_TOOL_PREFIX = 'mcp__spark_workflow__'
 const DEFAULT_WORKFLOW_AGENT_ID = 'workflow-architect-agent'
 const FALLBACK_WORKFLOW_AGENT_ID = 'platform-manager-agent'
+/** 强制绑定的内置技能（E2-3）：工具描述符已含纪律，skill 提供节点目录/铁律/few-shot */
+const REQUIRED_WORKFLOW_SKILL_ID = 'builtin:workflow-architect'
+/** 每轮回滚快照保留上限 */
+const TURN_SNAPSHOT_LIMIT = 5
 const CONNECTION_LABELS: Record<string, string> = {
   attached: '工具已连接',
   attaching: '连接中…',
   error: '连接失败',
   detached: '等待连接',
-}
-
-function buildWorkflowBindingMessage(state: WorkflowEditorState, text: string): string {
-  const scope =
-    state.workflowId != null ? `workflowId: ${state.workflowId}` : 'workflowId: （未保存草稿）'
-  return [
-    '[工作流绑定]',
-    scope,
-    `workflowName: ${state.name}`,
-    `当前图：${state.graph.nodes.length} 节点 / ${state.graph.edges.length} 连线`,
-    '',
-    '当前会话已绑定工作流编辑器，可调用工作流工具：workflow_get_graph（读图）、workflow_validate（自检）、workflow_generate（首次落库）、workflow_patch（带乐观锁更新）。',
-    '不要依赖聊天里的旧图描述；每次修改前先调用 workflow_get_graph 获取最新图与 baseVersion；提交一律是整图 + baseVersion，不要声称未验证的修改已完成。',
-    '',
-    '---',
-    '',
-    text,
-  ].join('\n')
 }
 
 export function WorkflowAgentPanel({
@@ -68,13 +66,18 @@ export function WorkflowAgentPanel({
   providers,
   agents,
   onWorkflowCreated,
+  onRestoreGraph,
 }: Props): React.ReactNode | null {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [draftInput, setDraftInput] = useState('')
-  const firstTurnRef = useRef(true)
   const editorStateRef = useRef<WorkflowEditorState | null>(editorState)
+  /** 修复熔断（E2-3）：同轮内 validate 连续失败 ≥3 次后暂停校验/落库，新 turn 重置 */
+  const validateCircuit = useRef(createValidateCircuit(3)).current
+  /** 每轮回滚快照（turnId → 提交前的图深拷贝），供「撤销本轮」恢复 */
+  const turnSnapshotsRef = useRef(new Map<string, WorkflowGraph>())
+  const [canUndoTurn, setCanUndoTurn] = useState(false)
 
   // 同步最新编辑器状态（工具 handler 异步回调里读实时图）；对齐 canvas-tool-host 的 useEffect 模式
   useEffect(() => {
@@ -111,10 +114,16 @@ export function WorkflowAgentPanel({
         const res = await window.spark.invoke('workflow:get', { id })
         return res.workflow?.updatedAt ?? null
       },
-      validateGraph: async (graph) => window.spark.invoke('workflow:validate', { graph }),
+      validateGraph: async (graph) => {
+        // 熔断：本轮连续失败达到上限后不再真调，直接返回熔断响应（E2-3）
+        if (validateCircuit.isTripped()) return circuitBrokenResponse(3)
+        const result = await window.spark.invoke('workflow:validate', { graph })
+        validateCircuit.record(result.ok)
+        return result
+      },
       onWorkflowCreated: (workflowId) => onWorkflowCreated(workflowId),
     }),
-    [onWorkflowCreated],
+    [onWorkflowCreated, validateCircuit],
   )
 
   const toolHost = useWorkflowToolHost({ sessionId, context: toolContext })
@@ -130,6 +139,8 @@ export function WorkflowAgentPanel({
       try {
         setCreating(true)
         setSendError(null)
+        // 新 turn：重置修复熔断（E2-3 §3 同轮计数）
+        validateCircuit.reset()
         let sid = sessionId
         if (sid == null) {
           const sessionRes = await window.spark.invoke('session:create', {
@@ -141,17 +152,39 @@ export function WorkflowAgentPanel({
           sid = sessionRes.sessionId
           setSessionId(sid)
         }
+        // 强制绑定 workflow-architect 技能（对称画布 syncSessionSkills：session 级替换）
+        await window.spark.invoke('skill-config:update', {
+          scope: 'session',
+          scopeRef: sid,
+          skillIds: [REQUIRED_WORKFLOW_SKILL_ID],
+          disabledSkillIds: [],
+        })
         await toolHost.ensureAttached(sid)
-        const message =
-          firstTurnRef.current && editorStateRef.current != null
-            ? buildWorkflowBindingMessage(editorStateRef.current, text)
-            : text
-        await window.spark.invoke('session:submit-turn', {
+        // 每轮前缀注入（反上下文腐化）：元信息 + 图摘要 + 工具纪律；熔断激活时附带熔断声明
+        const state = editorStateRef.current
+        const message = `${buildWorkflowTurnPrefix(state, {
+          circuitBroken: validateCircuit.isTripped(),
+        })}
+
+---
+
+${text}`
+        // 回滚快照：本轮提交前的图深拷贝（turnId 关联，供「撤销本轮」）
+        const snapshot = JSON.parse(JSON.stringify(state.graph)) as WorkflowGraph
+        const turnResult = await window.spark.invoke('session:submit-turn', {
           sessionId: sid as never,
           message,
           providerProfileId: selectedProvider.id,
+          skillId: REQUIRED_WORKFLOW_SKILL_ID,
+          skillIds: [REQUIRED_WORKFLOW_SKILL_ID],
         })
-        if (firstTurnRef.current) firstTurnRef.current = false
+        turnSnapshotsRef.current.set(turnResult.turnId, snapshot)
+        while (turnSnapshotsRef.current.size > TURN_SNAPSHOT_LIMIT) {
+          const oldest = turnSnapshotsRef.current.keys().next().value
+          if (oldest == null) break
+          turnSnapshotsRef.current.delete(oldest)
+        }
+        setCanUndoTurn(true)
       } catch (sendError) {
         setSendError(sendError instanceof Error ? sendError.message : String(sendError))
         throw sendError
@@ -159,8 +192,19 @@ export function WorkflowAgentPanel({
         setCreating(false)
       }
     },
-    [resolvedAgentId, selectedProvider, sessionId, toolHost],
+    [resolvedAgentId, selectedProvider, sessionId, toolHost, validateCircuit],
   )
+
+  /** 撤销本轮：恢复到最近一次提交前的图（E2-3 checkpoint） */
+  const handleUndoLastTurn = useCallback(() => {
+    const entries = Array.from(turnSnapshotsRef.current.entries())
+    const last = entries.at(-1)
+    if (last == null) return
+    const [, snapshot] = last
+    turnSnapshotsRef.current.delete(last[0])
+    setCanUndoTurn(turnSnapshotsRef.current.size > 0)
+    onRestoreGraph?.(snapshot)
+  }, [onRestoreGraph])
 
   if (!open) return null
 
@@ -176,6 +220,16 @@ export function WorkflowAgentPanel({
         <div className="workflow-agent-panel-title">
           <Icons.Sparkles size={14} />
           <span>工作流 AI 助手</span>
+          <button
+            type="button"
+            className="workflow-agent-panel-undo"
+            disabled={!canUndoTurn}
+            title="撤销最近一轮 Agent 的图修改（恢复到该轮提交前的状态）"
+            onClick={handleUndoLastTurn}
+          >
+            <Icons.Undo2 size={12} />
+            撤销本轮
+          </button>
           <span
             className={`workflow-agent-connection is-${toolHost.status}`}
             title={toolHost.error ?? undefined}
