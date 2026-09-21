@@ -4,7 +4,7 @@
  * - 每轮消息前缀注入（对称画布 [画布绑定] 模式，反上下文腐化）：
  *   元信息 + 图摘要（≤30 节点完整压缩 JSON；>30 仅节点清单）+ 工具纪律声明；
  * - 修复熔断：同轮内 workflow_validate 连续失败 ≤3 次，超过后本轮拒绝
- *   校验/落库调用，把熔断决定交还面板（设计稿 §3：计数在面板层做）。
+ *   校验调用，把熔断决定交还面板（设计稿 §3：计数在面板层做）。
  */
 import type { WorkflowGraph } from '@spark/protocol'
 
@@ -37,8 +37,10 @@ export function buildWorkflowGraphSummary(graph: WorkflowGraph): string {
       nodes: nodes.map(compactNode),
       edges: edges.map((edge) => ({
         id: edge.id,
-        sourceNodeId: edge.sourceNodeId,
-        targetNodeId: edge.targetNodeId,
+        // WorkflowEdge 的真实字段是 from/to（见 protocol WorkflowEdge 定义）；
+        // 宽类型边界（Record<string, unknown>）下写错字段名不报编译错，只产出 undefined 被 stringify 丢弃。
+        from: edge.from,
+        to: edge.to,
         ...(edge.condition != null ? { condition: edge.condition } : {}),
       })),
     }
@@ -71,7 +73,7 @@ export function buildWorkflowTurnPrefix(
   ]
   if (extra?.circuitBroken === true) {
     lines.push(
-      '[熔断激活] 本轮 workflow_validate 已连续失败 3 次：校验与落库工具已被暂停。请停止重试，向用户完整报告最后一份 diagnostics（逐条 path/message），给出修复建议，等待用户反馈。',
+      '[熔断激活] 本轮 workflow_validate 已连续失败 3 次：校验工具已被暂停。请停止重试，向用户完整报告最后一份 diagnostics（逐条 path/message），给出修复建议，等待用户反馈。',
     )
   }
   return lines.join('\n')
@@ -113,7 +115,7 @@ export function circuitBrokenResponse(limit = 3): {
         severity: 'error',
         source: 'schema',
         code: 'validate_circuit_broken',
-        message: `本轮 workflow_validate 已连续失败 ${limit} 次，校验与落库已熔断。停止重试：向用户完整报告最后一次 diagnostics 并给出修复建议，等待用户反馈。`,
+        message: `本轮 workflow_validate 已连续失败 ${limit} 次，校验已熔断。停止重试：向用户完整报告最后一次 diagnostics 并给出修复建议，等待用户反馈。`,
       },
     ],
   }

@@ -12,7 +12,7 @@ const graphFixture = {
     { id: 'node-1', kind: 'input', title: '需求输入', config: {} },
     { id: 'node-2', kind: 'agent', title: '执行节点', config: {} },
   ],
-  edges: [{ id: 'edge-1', sourceNodeId: 'node-1', targetNodeId: 'node-2' }],
+  edges: [{ id: 'edge-1', from: 'node-1', to: 'node-2' }],
 } as unknown as WorkflowGraph
 
 function createState(overrides?: Partial<{ workflowId: string | null; name: string }>) {

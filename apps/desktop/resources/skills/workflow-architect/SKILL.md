@@ -46,7 +46,7 @@ tags: [spark, workflow, nl2workflow, editor-agent, 工作流, 编排]
 
 ## 修复熔断
 
-`workflow_validate` 连续失败达到 3 次会被**熔断**：本轮不再执行校验/落库，工具直接返回熔断标记。
+`workflow_validate` 连续失败达到 3 次会被**熔断**：本轮不再执行校验，工具直接返回熔断标记。
 此时唯一正确的动作：**停止重试**，向用户完整报告最后一份 diagnostics（逐条：path/message），并说明你建议的修复方向，等用户反馈。
 
 ## 与用户协作的边界

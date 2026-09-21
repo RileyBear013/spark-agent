@@ -7,7 +7,11 @@ import {
   createValidateCircuit,
 } from './workflow-agent-turn'
 
-function makeGraph(nodeCount: number, withOutputKey = false): WorkflowGraph {
+function makeGraph(
+  nodeCount: number,
+  withOutputKey = false,
+  edges: Array<{ id: string; from: string; to: string }> = [],
+): WorkflowGraph {
   return {
     nodes: Array.from({ length: nodeCount }, (_, index) => ({
       id: `node-${index + 1}`,
@@ -15,7 +19,7 @@ function makeGraph(nodeCount: number, withOutputKey = false): WorkflowGraph {
       title: `节点 ${index + 1}`,
       config: withOutputKey ? { outputKey: `out${index + 1}` } : {},
     })),
-    edges: [],
+    edges,
   } as unknown as WorkflowGraph
 }
 
@@ -29,6 +33,16 @@ describe('buildWorkflowGraphSummary', () => {
     expect(summary).toContain('当前图完整 JSON（3 节点')
     expect(summary).toContain('"kind":"agent"')
     expect(summary).toContain('node-2')
+  })
+
+  it('keeps from/to edge links in the compact JSON summary', () => {
+    // 回归护栏：摘要边字段必须是协议真实的 from/to（曾因写成 sourceNodeId/targetNodeId 丢失全部连线）
+    const summary = buildWorkflowGraphSummary(
+      makeGraph(2, false, [{ id: 'e-1', from: 'node-1', to: 'node-2' }]),
+    )
+    expect(summary).toContain('"from":"node-1"')
+    expect(summary).toContain('"to":"node-2"')
+    expect(summary).toContain('2 节点 / 1 连线')
   })
 
   it('degrades to a node listing above the 30-node limit and keeps outputKey hints', () => {
